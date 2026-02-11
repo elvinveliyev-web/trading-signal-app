@@ -1,4 +1,3 @@
-import math
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -6,6 +5,25 @@ import streamlit as st
 import plotly.graph_objects as go
 
 st.set_page_config(page_title="Trading Signal App", layout="wide")
+
+# -----------------------------
+# Helpers: ticker normalization
+# -----------------------------
+def normalize_ticker(raw: str, market: str) -> str:
+    """
+    market: 'USA' or 'BIST'
+    - USA: AAPL, MSFT, SPY...
+    - BIST: THYAO -> THYAO.IS  (yfinance format)
+    """
+    t = (raw or "").strip().upper()
+    if not t:
+        return t
+
+    if market == "BIST":
+        # Kullanıcı zaten .IS yazdıysa dokunma
+        if not t.endswith(".IS"):
+            t = f"{t}.IS"
+    return t
 
 # -----------------------------
 # Indicators
@@ -71,12 +89,11 @@ def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     return df
 
 # -----------------------------
-# Market regime filter (SPY)
+# Market regime filter (SPY) - only USA
 # -----------------------------
 @st.cache_data(ttl=6*3600, show_spinner=False)
 def get_spy_regime_ok() -> bool:
     """
-    Long market filter:
     True if SPY is above its 200-day EMA (bull regime).
     Cached for 6 hours to reduce calls.
     """
@@ -93,7 +110,7 @@ def get_spy_regime_ok() -> bool:
 # -----------------------------
 # Strategy: scoring + checkpoints
 # -----------------------------
-def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, mkt_ok: bool):
+def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool):
     df = df.copy()
 
     liq_ok = (df["Volume"] > df["VOL_SMA"]).fillna(False)
@@ -124,9 +141,8 @@ def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, mkt_ok: bool):
         w["obv"] * obv_ok.astype(int)
     ).astype(float)
 
-    # ENTRY includes market filter
     entry_triggers = (rsi_cross.astype(int) + macd_turn.astype(int) + bb_break.astype(int)) >= 2
-    entry = trend_ok & vol_ok & liq_ok & entry_triggers & mkt_ok
+    entry = trend_ok & vol_ok & liq_ok & entry_triggers & market_filter_ok
 
     exit_ = (
         (df["Close"] < df["EMA50"]) |
@@ -141,7 +157,7 @@ def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, mkt_ok: bool):
 
     last = df.iloc[-1]
     cp = {
-        "Market Filter (SPY > EMA200)": bool(mkt_ok),
+        "Market Filter OK": bool(market_filter_ok),
         "Liquidity (Volume > VolSMA)": bool(last["Volume"] > last["VOL_SMA"]) if pd.notna(last["VOL_SMA"]) else False,
         "Trend (Close>EMA200 & EMA50>EMA200)": bool((last["Close"] > last["EMA200"]) and (last["EMA50"] > last["EMA200"])) if pd.notna(last["EMA200"]) else False,
         f"RSI > {cfg['rsi_entry_level']}": bool(last["RSI"] > cfg["rsi_entry_level"]) if pd.notna(last["RSI"]) else False,
@@ -154,7 +170,7 @@ def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, mkt_ok: bool):
     return df, cp
 
 # -----------------------------
-# Backtest (cash + position correct)
+# Backtest (long-only)
 # -----------------------------
 def backtest_long_only(df: pd.DataFrame, cfg: dict):
     df = df.copy()
@@ -263,9 +279,11 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict):
     return eq, tdf, metrics
 
 # -----------------------------
-# Presets (US)
+# Presets
 # -----------------------------
 US_TICKERS = ["AAPL","MSFT","NVDA","AMZN","META","GOOGL","TSLA","NFLX","JPM","XOM","SPY","QQQ"]
+BIST_EXAMPLES = ["THYAO", "ASELS", "KCHOL", "SISE", "BIMAS"]
+
 PRESETS = {
     "Defansif": {"rsi_entry_level": 52, "rsi_exit_level": 46, "atr_pct_max": 0.06, "atr_stop_mult": 3.5},
     "Dengeli":  {"rsi_entry_level": 50, "rsi_exit_level": 45, "atr_pct_max": 0.08, "atr_stop_mult": 3.0},
@@ -275,183 +293,28 @@ PRESETS = {
 # -----------------------------
 # UI
 # -----------------------------
-st.title("📈 Sinyal Üreten Trading Uygulaması (ABD odaklı)")
+st.title("📈 Sinyal Üreten Trading Uygulaması (ABD + BIST)")
 st.caption("Otomatik emir göndermez. 7 indikatör + kontrol noktaları ile AL/SAT/BEKLE üretir.")
 
 with st.sidebar:
-    st.header("ABD Piyasası")
+    st.header("Piyasa")
+    market = st.selectbox("Market", ["USA", "BIST"], index=0)
+
+    st.header("Sembol")
     preset_name = st.selectbox("Mod", list(PRESETS.keys()), index=1)
-    use_dropdown = st.checkbox("Sembol listesinden seç", value=True)
 
+    use_dropdown = st.checkbox("Hazır listeden seç", value=(market == "USA"))
     if use_dropdown:
-        ticker = st.selectbox("Sembol", US_TICKERS, index=0)
+        if market == "USA":
+            raw_ticker = st.selectbox("Sembol", US_TICKERS, index=0)
+        else:
+            raw_ticker = st.selectbox("BIST örnekleri", BIST_EXAMPLES, index=0)
+            st.caption("BIST’te otomatik .IS eklenir. Örn: THYAO → THYAO.IS")
     else:
-        ticker = st.text_input("Sembol (ör: AAPL, MSFT, SPY, QQQ)", value="AAPL").strip().upper()
+        if market == "USA":
+            raw_ticker = st.text_input("Sembol (ör: AAPL, MSFT, SPY, QQQ)", value="AAPL")
+        else:
+            raw_ticker = st.text_input("BIST sembol (ör: THYAO, ASELS, KCHOL)", value="THYAO")
 
-    period = st.selectbox("Periyot", ["6mo", "1y", "2y", "5y", "10y"], index=3)
-    interval = st.selectbox("Interval", ["1d", "1h", "30m"], index=0)
-
-    st.divider()
-    st.header("Strateji Parametreleri")
-    ema_fast = st.number_input("EMA Fast (trend içi)", min_value=5, max_value=100, value=50, step=1)
-    ema_slow = st.number_input("EMA Slow (trend filtresi)", min_value=50, max_value=400, value=200, step=1)
-    rsi_period = st.number_input("RSI Period", min_value=5, max_value=30, value=14, step=1)
-    bb_period = st.number_input("Bollinger Period", min_value=10, max_value=50, value=20, step=1)
-    bb_std = st.number_input("Bollinger Std", min_value=1.0, max_value=3.5, value=2.0, step=0.1)
-    atr_period = st.number_input("ATR Period", min_value=5, max_value=30, value=14, step=1)
-    vol_sma = st.number_input("Volume SMA", min_value=5, max_value=60, value=20, step=1)
-
-    st.header("Market Filter")
-    use_spy_filter = st.checkbox("SPY > EMA200 filtresi", value=True, help="Ayı piyasasında long sinyallerini azaltır.")
-
-    st.header("Risk / Backtest")
-    initial_capital = st.number_input("Başlangıç Sermayesi", min_value=100.0, value=10000.0, step=500.0)
-    risk_per_trade = st.slider("Trade başı risk (equity %)", min_value=0.002, max_value=0.05, value=0.01, step=0.001)
-    commission_bps = st.number_input("Komisyon (bps)", min_value=0.0, value=5.0, step=1.0)
-    slippage_bps = st.number_input("Slippage (bps)", min_value=0.0, value=2.0, step=1.0)
-
-    run_btn = st.button("🚀 Çalıştır", type="primary")
-
-cfg = {
-    "ema_fast": ema_fast,
-    "ema_slow": ema_slow,
-    "rsi_period": rsi_period,
-    "bb_period": bb_period,
-    "bb_std": bb_std,
-    "atr_period": atr_period,
-    "vol_sma": vol_sma,
-    "initial_capital": initial_capital,
-    "risk_per_trade": risk_per_trade,
-    "commission_bps": commission_bps,
-    "slippage_bps": slippage_bps,
-}
-cfg.update(PRESETS[preset_name])
-
-if not run_btn:
-    st.info("Soldan sembol ve parametreleri seçip **Çalıştır**’a bas.")
-    st.stop()
-
-mkt_ok = True
-if use_spy_filter:
-    with st.spinner("SPY rejimi kontrol ediliyor..."):
-        mkt_ok = get_spy_regime_ok()
-
-@st.cache_data(show_spinner=False)
-def load_data_cached(ticker, period, interval):
-    df = yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False)
-    if df is None or df.empty:
-        return pd.DataFrame()
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [c[0] for c in df.columns]
-    return df.dropna()
-
-with st.spinner("Veri indiriliyor..."):
-    df_raw = load_data_cached(ticker, period, interval)
-
-if df_raw.empty or len(df_raw) < 260:
-    st.error("Yetersiz veri. Daha uzun periyot seç (ör. 5y/10y) veya farklı sembol dene.")
-    st.stop()
-
-df = build_features(df_raw, cfg)
-df, checkpoints = signal_with_checkpoints(df, cfg, mkt_ok=mkt_ok)
-
-latest = df.iloc[-1]
-if int(latest["ENTRY"]) == 1:
-    rec = "AL"
-elif int(latest["EXIT"]) == 1:
-    rec = "SAT"
-else:
-    rec = "İZLE (Güçlü Trend)" if latest["SCORE"] >= 80 else ("BEKLE (Orta)" if latest["SCORE"] >= 60 else "UZAK DUR")
-
-c1, c2, c3, c4, c5, c6 = st.columns(6)
-c1.metric("Sembol", ticker)
-c2.metric("Son Fiyat", f"{latest['Close']:.2f}")
-c3.metric("Skor", f"{latest['SCORE']:.0f}/100")
-c4.metric("Sinyal", rec)
-c5.metric("Mod", preset_name)
-c6.metric("SPY Rejim", "BULL ✅" if mkt_ok else "BEAR ❌")
-
-st.subheader("✅ Kontrol Noktaları (Son Bar)")
-cp_cols = st.columns(3)
-for i, (k, v) in enumerate(checkpoints.items()):
-    with cp_cols[i % 3]:
-        st.write(("🟢 " if v else "🔴 ") + k)
-
-if use_spy_filter and not mkt_ok:
-    st.warning("SPY şu an EMA200 altında. Market filter açık olduğu için ENTRY (AL) sinyalleri azalabilir/kapanabilir.")
-
-st.subheader("📊 Fiyat + EMA + Bollinger + Sinyaller")
-fig = go.Figure()
-fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"))
-fig.add_trace(go.Scatter(x=df.index, y=df["EMA50"], name="EMA Fast"))
-fig.add_trace(go.Scatter(x=df.index, y=df["EMA200"], name="EMA Slow"))
-fig.add_trace(go.Scatter(x=df.index, y=df["BB_upper"], name="BB Upper", line=dict(dash="dot")))
-fig.add_trace(go.Scatter(x=df.index, y=df["BB_mid"], name="BB Mid", line=dict(dash="dot")))
-fig.add_trace(go.Scatter(x=df.index, y=df["BB_lower"], name="BB Lower", line=dict(dash="dot")))
-
-entries = df[df["ENTRY"] == 1]
-exits = df[df["EXIT"] == 1]
-fig.add_trace(go.Scatter(x=entries.index, y=entries["Close"], mode="markers", name="ENTRY",
-                         marker=dict(symbol="triangle-up", size=10)))
-fig.add_trace(go.Scatter(x=exits.index, y=exits["Close"], mode="markers", name="EXIT",
-                         marker=dict(symbol="triangle-down", size=10)))
-
-fig.update_layout(height=600, xaxis_rangeslider_visible=False)
-st.plotly_chart(fig, use_container_width=True)
-
-st.subheader("📉 RSI / MACD / ATR%")
-ind_cols = st.columns(3)
-
-with ind_cols[0]:
-    fig_rsi = go.Figure()
-    fig_rsi.add_trace(go.Scatter(x=df.index, y=df["RSI"], name="RSI"))
-    fig_rsi.add_hline(y=cfg["rsi_entry_level"])
-    fig_rsi.add_hline(y=cfg["rsi_exit_level"])
-    fig_rsi.update_layout(height=250)
-    st.plotly_chart(fig_rsi, use_container_width=True)
-
-with ind_cols[1]:
-    fig_macd = go.Figure()
-    fig_macd.add_trace(go.Scatter(x=df.index, y=df["MACD"], name="MACD"))
-    fig_macd.add_trace(go.Scatter(x=df.index, y=df["MACD_signal"], name="Signal"))
-    fig_macd.add_trace(go.Bar(x=df.index, y=df["MACD_hist"], name="Hist"))
-    fig_macd.update_layout(height=250)
-    st.plotly_chart(fig_macd, use_container_width=True)
-
-with ind_cols[2]:
-    atr_pct = (df["ATR"] / df["Close"]).replace([np.inf, -np.inf], np.nan)
-    fig_atr = go.Figure()
-    fig_atr.add_trace(go.Scatter(x=df.index, y=atr_pct, name="ATR%"))
-    fig_atr.add_hline(y=cfg["atr_pct_max"])
-    fig_atr.update_layout(height=250, yaxis_tickformat=".1%")
-    st.plotly_chart(fig_atr, use_container_width=True)
-
-st.subheader("🧪 Backtest (Long-only) + Benchmark (Buy&Hold)")
-eq, trades, metrics = backtest_long_only(df, cfg)
-
-bh = (df["Close"] / df["Close"].iloc[0]) * cfg["initial_capital"]
-
-mcols = st.columns(7)
-mcols[0].metric("Strat Total", f"{metrics['Total Return']:.2%}")
-mcols[1].metric("BH Total", f"{(bh.iloc[-1]/bh.iloc[0]-1):.2%}")
-mcols[2].metric("Ann Return", f"{metrics['Annualized Return']:.2%}")
-mcols[3].metric("Ann Vol", f"{metrics['Annualized Volatility']:.2%}")
-mcols[4].metric("Sharpe", f"{metrics['Sharpe (rf=0)']:.2f}")
-mcols[5].metric("Max DD", f"{metrics['Max Drawdown']:.2%}")
-mcols[6].metric("Trades", f"{metrics['Trades']}")
-
-fig_eq = go.Figure()
-fig_eq.add_trace(go.Scatter(x=eq.index, y=eq.values, name="Strategy Equity"))
-fig_eq.add_trace(go.Scatter(x=bh.index, y=bh.values, name="Buy&Hold Equity"))
-fig_eq.update_layout(height=320)
-st.plotly_chart(fig_eq, use_container_width=True)
-
-st.subheader("📑 İşlemler")
-if trades.empty:
-    st.write("Trade oluşmadı. Modu Agresif yap veya periyodu büyüt.")
-else:
-    show = trades.copy()
-    show["entry_date"] = show["entry_date"].astype(str)
-    show["exit_date"] = show["exit_date"].astype(str)
-    st.dataframe(show[["entry_date","entry_price","exit_date","exit_price","exit_reason","shares","pnl","return_%","holding_days"]],
-                 use_container_width=True)
+    tick
+::contentReference[oaicite:0]{index=0}
