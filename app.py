@@ -22,27 +22,31 @@ def normalize_ticker(raw: str, market: str) -> str:
         t = f"{t}.IS"
     return t
 
+
 # -----------------------------
 # Indicators
 # -----------------------------
 def ema(s: pd.Series, span: int) -> pd.Series:
     return s.ewm(span=span, adjust=False).mean()
 
+
 def rsi(close: pd.Series, period: int = 14) -> pd.Series:
     delta = close.diff()
     up = np.where(delta > 0, delta, 0.0)
     down = np.where(delta < 0, -delta, 0.0)
-    roll_up = pd.Series(up, index=close.index).ewm(alpha=1/period, adjust=False).mean()
-    roll_down = pd.Series(down, index=close.index).ewm(alpha=1/period, adjust=False).mean()
+    roll_up = pd.Series(up, index=close.index).ewm(alpha=1 / period, adjust=False).mean()
+    roll_down = pd.Series(down, index=close.index).ewm(alpha=1 / period, adjust=False).mean()
     rs = roll_up / (roll_down.replace(0, np.nan))
     out = 100 - (100 / (1 + rs))
     return out.fillna(50)
+
 
 def macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
     macd_line = ema(close, fast) - ema(close, slow)
     signal_line = ema(macd_line, signal)
     hist = macd_line - signal_line
     return macd_line, signal_line, hist
+
 
 def bollinger(close: pd.Series, period: int = 20, std_mult: float = 2.0):
     mid = close.rolling(period).mean()
@@ -51,23 +55,28 @@ def bollinger(close: pd.Series, period: int = 20, std_mult: float = 2.0):
     lower = mid - std_mult * sd
     return mid, upper, lower
 
+
 def true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
     prev_close = close.shift(1)
     tr = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
     return tr
 
+
 def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
     tr = true_range(high, low, close)
-    return tr.ewm(alpha=1/period, adjust=False).mean()
+    return tr.ewm(alpha=1 / period, adjust=False).mean()
+
 
 def obv(close: pd.Series, volume: pd.Series) -> pd.Series:
     direction = np.sign(close.diff()).fillna(0)
     return (direction * volume).cumsum()
 
+
 def max_drawdown(eq: pd.Series) -> float:
     peak = eq.cummax()
     dd = (eq / peak) - 1.0
     return float(dd.min()) if len(dd) else 0.0
+
 
 # -----------------------------
 # Feature builder
@@ -78,12 +87,15 @@ def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     df["EMA200"] = ema(df["Close"], int(cfg["ema_slow"]))
     df["RSI"] = rsi(df["Close"], int(cfg["rsi_period"]))
     df["MACD"], df["MACD_signal"], df["MACD_hist"] = macd(df["Close"], 12, 26, 9)
-    df["BB_mid"], df["BB_upper"], df["BB_lower"] = bollinger(df["Close"], int(cfg["bb_period"]), float(cfg["bb_std"]))
+    df["BB_mid"], df["BB_upper"], df["BB_lower"] = bollinger(
+        df["Close"], int(cfg["bb_period"]), float(cfg["bb_std"])
+    )
     df["ATR"] = atr(df["High"], df["Low"], df["Close"], int(cfg["atr_period"]))
     df["OBV"] = obv(df["Close"], df["Volume"])
     df["OBV_EMA"] = ema(df["OBV"], 21)
     df["VOL_SMA"] = df["Volume"].rolling(int(cfg["vol_sma"])).mean()
     return df
+
 
 # -----------------------------
 # Market regime filter (SPY) - only USA
@@ -92,13 +104,14 @@ def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
 def get_spy_regime_ok() -> bool:
     spy = yf.download("SPY", period="10y", interval="1d", auto_adjust=False, progress=False)
     if spy is None or spy.empty or len(spy) < 260:
-        return True
+        return True  # fail-open
     if isinstance(spy.columns, pd.MultiIndex):
         spy.columns = [c[0] for c in spy.columns]
     spy = spy.dropna()
     spy["EMA200"] = ema(spy["Close"], 200)
     last = spy.iloc[-1]
     return bool(last["Close"] > last["EMA200"])
+
 
 # -----------------------------
 # Strategy: scoring + checkpoints
@@ -152,14 +165,21 @@ def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool)
     cp = {
         "Market Filter OK": bool(market_filter_ok),
         "Liquidity (Volume > VolSMA)": bool(last["Volume"] > last["VOL_SMA"]) if pd.notna(last["VOL_SMA"]) else False,
-        "Trend (Close>EMA200 & EMA50>EMA200)": bool((last["Close"] > last["EMA200"]) and (last["EMA50"] > last["EMA200"])) if pd.notna(last["EMA200"]) else False,
+        "Trend (Close>EMA200 & EMA50>EMA200)": bool((last["Close"] > last["EMA200"]) and (last["EMA50"] > last["EMA200"]))
+        if pd.notna(last["EMA200"])
+        else False,
         f"RSI > {cfg['rsi_entry_level']}": bool(last["RSI"] > cfg["rsi_entry_level"]) if pd.notna(last["RSI"]) else False,
         "MACD Hist > 0": bool(last["MACD_hist"] > 0) if pd.notna(last["MACD_hist"]) else False,
-        f"ATR% < {cfg['atr_pct_max']:.2%}": bool((last["ATR"] / last["Close"]) < cfg["atr_pct_max"]) if pd.notna(last["ATR"]) else False,
-        "Bollinger (Close>BB_mid or Breakout)": bool((last["Close"] > last["BB_mid"]) or (last["Close"] > last["BB_upper"])) if pd.notna(last["BB_mid"]) else False,
+        f"ATR% < {cfg['atr_pct_max']:.2%}": bool((last["ATR"] / last["Close"]) < cfg["atr_pct_max"])
+        if pd.notna(last["ATR"]) and pd.notna(last["Close"])
+        else False,
+        "Bollinger (Close>BB_mid or Breakout)": bool((last["Close"] > last["BB_mid"]) or (last["Close"] > last["BB_upper"]))
+        if pd.notna(last["BB_mid"])
+        else False,
         "OBV > OBV_EMA": bool(last["OBV"] > last["OBV_EMA"]) if pd.notna(last["OBV_EMA"]) else False,
     }
     return df, cp
+
 
 # -----------------------------
 # Backtest (long-only)
@@ -187,10 +207,12 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict):
         position_value = shares * price * (1 - slippage)
         equity = cash + position_value
 
+        # trailing stop
         if shares > 0 and pd.notna(row["ATR"]) and row["ATR"] > 0:
             new_stop = price - cfg["atr_stop_mult"] * float(row["ATR"])
             stop = max(stop, new_stop) if pd.notna(stop) else new_stop
 
+        # exit
         if shares > 0:
             stop_hit = pd.notna(stop) and (price <= stop)
             if exit_sig.iloc[i] == 1 or stop_hit:
@@ -207,6 +229,7 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict):
                 shares = 0.0
                 stop = np.nan
 
+        # entry
         position_value = shares * price * (1 - slippage)
         equity = cash + position_value
 
@@ -269,6 +292,7 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict):
     }
     return eq, tdf, metrics
 
+
 # -----------------------------
 # Presets
 # -----------------------------
@@ -280,6 +304,7 @@ PRESETS = {
     "Dengeli": {"rsi_entry_level": 50, "rsi_exit_level": 45, "atr_pct_max": 0.08, "atr_stop_mult": 3.0},
     "Agresif": {"rsi_entry_level": 48, "rsi_exit_level": 43, "atr_pct_max": 0.10, "atr_stop_mult": 2.5},
 }
+
 
 # -----------------------------
 # UI
@@ -338,7 +363,9 @@ with st.sidebar:
 
     st.header("Risk / Backtest")
     initial_capital = st.number_input("Başlangıç Sermayesi", min_value=100.0, value=10000.0, step=500.0)
-    risk_per_trade = st.slider("Trade başı risk (equity %)", min_value=0.002, max_value=0.05, value=0.01, step=0.001)
+    risk_per_trade = st.slider(
+        "Trade başı risk (equity %)", min_value=0.002, max_value=0.05, value=0.01, step=0.001
+    )
     commission_bps = st.number_input("Komisyon (bps)", min_value=0.0, value=5.0, step=1.0)
     slippage_bps = st.number_input("Slippage (bps)", min_value=0.0, value=2.0, step=1.0)
 
@@ -369,7 +396,7 @@ if market == "USA" and use_spy_filter:
         market_filter_ok = get_spy_regime_ok()
 
 @st.cache_data(show_spinner=False)
-def load_data_cached(ticker, period, interval):
+def load_data_cached(ticker: str, period: str, interval: str) -> pd.DataFrame:
     df = yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False)
     if df is None or df.empty:
         return pd.DataFrame()
@@ -389,7 +416,7 @@ if df_raw.empty:
     st.stop()
 
 if len(df_raw) < 260:
-   st.error("Yetersiz veri. Daha uzun periyot seç (ör. 5y/10y) veya 1d interval dene.")
+    st.error("Yetersiz veri. Daha uzun periyot seç (ör. 5y/10y) veya 1d interval dene.")
     st.stop()
 
 df = build_features(df_raw, cfg)
@@ -422,7 +449,11 @@ for i, (k, v) in enumerate(checkpoints.items()):
 
 st.subheader("📊 Fiyat + EMA + Bollinger + Sinyaller")
 fig = go.Figure()
-fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"))
+fig.add_trace(
+    go.Candlestick(
+        x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"
+    )
+)
 fig.add_trace(go.Scatter(x=df.index, y=df["EMA50"], name="EMA Fast"))
 fig.add_trace(go.Scatter(x=df.index, y=df["EMA200"], name="EMA Slow"))
 fig.add_trace(go.Scatter(x=df.index, y=df["BB_upper"], name="BB Upper", line=dict(dash="dot")))
@@ -431,10 +462,24 @@ fig.add_trace(go.Scatter(x=df.index, y=df["BB_lower"], name="BB Lower", line=dic
 
 entries = df[df["ENTRY"] == 1]
 exits = df[df["EXIT"] == 1]
-fig.add_trace(go.Scatter(x=entries.index, y=entries["Close"], mode="markers", name="ENTRY",
-                         marker=dict(symbol="triangle-up", size=10)))
-fig.add_trace(go.Scatter(x=exits.index, y=exits["Close"], mode="markers", name="EXIT",
-                         marker=dict(symbol="triangle-down", size=10)))
+fig.add_trace(
+    go.Scatter(
+        x=entries.index,
+        y=entries["Close"],
+        mode="markers",
+        name="ENTRY",
+        marker=dict(symbol="triangle-up", size=10),
+    )
+)
+fig.add_trace(
+    go.Scatter(
+        x=exits.index,
+        y=exits["Close"],
+        mode="markers",
+        name="EXIT",
+        marker=dict(symbol="triangle-down", size=10),
+    )
+)
 fig.update_layout(height=600, xaxis_rangeslider_visible=False)
 st.plotly_chart(fig, use_container_width=True)
 
@@ -471,7 +516,7 @@ bh = (df["Close"] / df["Close"].iloc[0]) * cfg["initial_capital"]
 
 mcols = st.columns(7)
 mcols[0].metric("Strat Total", f"{metrics['Total Return']:.2%}")
-mcols[1].metric("BH Total", f"{(bh.iloc[-1]/bh.iloc[0]-1):.2%}")
+mcols[1].metric("BH Total", f"{(bh.iloc[-1] / bh.iloc[0] - 1):.2%}")
 mcols[2].metric("Ann Return", f"{metrics['Annualized Return']:.2%}")
 mcols[3].metric("Ann Vol", f"{metrics['Annualized Volatility']:.2%}")
 mcols[4].metric("Sharpe", f"{metrics['Sharpe (rf=0)']:.2f}")
@@ -488,5 +533,22 @@ st.subheader("📑 İşlemler")
 if trades.empty:
     st.write("Trade oluşmadı. Modu Agresif yap veya periyodu büyüt.")
 else:
-
-::contentReference[oaicite:0]{index=0}
+    show = trades.copy()
+    show["entry_date"] = show["entry_date"].astype(str)
+    show["exit_date"] = show["exit_date"].astype(str)
+    st.dataframe(
+        show[
+            [
+                "entry_date",
+                "entry_price",
+                "exit_date",
+                "exit_price",
+                "exit_reason",
+                "shares",
+                "pnl",
+                "return_%",
+                "holding_days",
+            ]
+        ],
+        use_container_width=True,
+    )
