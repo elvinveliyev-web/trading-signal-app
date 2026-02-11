@@ -78,7 +78,6 @@ def signal_with_checkpoints(df: pd.DataFrame, cfg: dict):
     df = df.copy()
 
     liq_ok = (df["Volume"] > df["VOL_SMA"]).fillna(False)
-
     trend_ok = (df["Close"] > df["EMA200"]) & (df["EMA50"] > df["EMA200"])
 
     rsi_ok = df["RSI"] > cfg["rsi_entry_level"]
@@ -134,7 +133,7 @@ def signal_with_checkpoints(df: pd.DataFrame, cfg: dict):
     return df, cp
 
 # -----------------------------
-# Backtest (FIXED)
+# Backtest (cash + position correct)
 # -----------------------------
 def backtest_long_only(df: pd.DataFrame, cfg: dict):
     df = df.copy()
@@ -144,7 +143,6 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict):
 
     cash = float(cfg["initial_capital"])
     shares = 0.0
-    entry_price = np.nan
     stop = np.nan
 
     trades = []
@@ -158,16 +156,15 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict):
         date = df.index[i]
         price = float(row["Close"])
 
-        # Mark-to-market equity
         position_value = shares * price * (1 - slippage)
         equity = cash + position_value
 
-        # Update trailing stop
+        # trailing stop
         if shares > 0 and pd.notna(row["ATR"]) and row["ATR"] > 0:
             new_stop = price - cfg["atr_stop_mult"] * float(row["ATR"])
             stop = max(stop, new_stop) if pd.notna(stop) else new_stop
 
-        # Exit if rule or stop hit
+        # exit
         if shares > 0:
             stop_hit = pd.notna(stop) and (price <= stop)
             if exit_sig.iloc[i] == 1 or stop_hit:
@@ -182,20 +179,18 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict):
                 trades[-1]["pnl"] = cash - trades[-1]["equity_before"]
 
                 shares = 0.0
-                entry_price = np.nan
                 stop = np.nan
 
-        # Recompute equity after exit
+        # equity after exit
         position_value = shares * price * (1 - slippage)
         equity = cash + position_value
 
-        # Entry
+        # entry
         if shares == 0 and entry_sig.iloc[i] == 1 and pd.notna(row["ATR"]) and row["ATR"] > 0:
             risk_cash = equity * cfg["risk_per_trade"]
             stop_dist = cfg["atr_stop_mult"] * float(row["ATR"])
             if stop_dist > 0:
                 qty = risk_cash / stop_dist
-
                 buy_price = price * (1 + slippage)
                 cost = qty * buy_price
                 fee = cost * commission
@@ -204,12 +199,11 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict):
                 if total_cost <= cash:
                     cash -= total_cost
                     shares = qty
-                    entry_price = buy_price
-                    stop = entry_price - cfg["atr_stop_mult"] * float(row["ATR"])
+                    stop = buy_price - cfg["atr_stop_mult"] * float(row["ATR"])
 
                     trades.append({
                         "entry_date": date,
-                        "entry_price": entry_price,
+                        "entry_price": buy_price,
                         "exit_date": None,
                         "exit_price": None,
                         "exit_reason": None,
@@ -218,7 +212,6 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict):
                         "pnl": None
                     })
 
-        # Mark-to-market equity end of bar
         position_value = shares * price * (1 - slippage)
         equity = cash + position_value
         equity_curve.append((date, equity))
@@ -251,40 +244,67 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict):
     return eq, tdf, metrics
 
 # -----------------------------
+# Presets (US)
+# -----------------------------
+US_TICKERS = ["AAPL","MSFT","NVDA","AMZN","META","GOOGL","TSLA","NFLX","JPM","XOM","SPY","QQQ"]
+PRESETS = {
+    "Defansif": {"rsi_entry_level": 52, "rsi_exit_level": 46, "atr_pct_max": 0.06, "atr_stop_mult": 3.5},
+    "Dengeli":  {"rsi_entry_level": 50, "rsi_exit_level": 45, "atr_pct_max": 0.08, "atr_stop_mult": 3.0},
+    "Agresif":  {"rsi_entry_level": 48, "rsi_exit_level": 43, "atr_pct_max": 0.10, "atr_stop_mult": 2.5},
+}
+
+# -----------------------------
 # UI
 # -----------------------------
-st.title("📈 Sinyal Üreten Trading Uygulaması (7 indikatör + kontrol noktaları)")
-st.caption("Otomatik emir göndermez. Trend + momentum + volatilite + hacim teyidi ile AL/SAT/BEKLE üretir.")
+st.title("📈 Sinyal Üreten Trading Uygulaması (ABD odaklı)")
+st.caption("Otomatik emir göndermez. 7 indikatör + kontrol noktaları ile AL/SAT/BEKLE üretir.")
 
 with st.sidebar:
-    st.header("Veri")
-    ticker = st.text_input("Sembol (ör: AAPL, MSFT, TSLA, BTC-USD)", value="AAPL").strip().upper()
+    st.header("ABD Piyasası")
+    preset_name = st.selectbox("Mod", list(PRESETS.keys()), index=1)
+    use_dropdown = st.checkbox("Sembol listesinden seç", value=True)
+
+    if use_dropdown:
+        ticker = st.selectbox("Sembol", US_TICKERS, index=0)
+    else:
+        ticker = st.text_input("Sembol (ör: AAPL, MSFT, SPY, QQQ)", value="AAPL").strip().upper()
+
     period = st.selectbox("Periyot", ["6mo", "1y", "2y", "5y", "10y"], index=3)
     interval = st.selectbox("Interval", ["1d", "1h", "30m"], index=0)
-    st.divider()
 
+    st.divider()
     st.header("Strateji Parametreleri")
-    cfg = {
-        "ema_fast": st.number_input("EMA Fast (trend içi)", min_value=5, max_value=100, value=50, step=1),
-        "ema_slow": st.number_input("EMA Slow (trend filtresi)", min_value=50, max_value=400, value=200, step=1),
-        "rsi_period": st.number_input("RSI Period", min_value=5, max_value=30, value=14, step=1),
-        "rsi_entry_level": st.number_input("RSI Entry Level", min_value=40, max_value=60, value=50, step=1),
-        "rsi_exit_level": st.number_input("RSI Exit Level", min_value=30, max_value=55, value=45, step=1),
-        "bb_period": st.number_input("Bollinger Period", min_value=10, max_value=50, value=20, step=1),
-        "bb_std": st.number_input("Bollinger Std", min_value=1.0, max_value=3.5, value=2.0, step=0.1),
-        "atr_period": st.number_input("ATR Period", min_value=5, max_value=30, value=14, step=1),
-        "atr_pct_max": st.slider("ATR% Max (vol filtresi)", min_value=0.01, max_value=0.20, value=0.08, step=0.01),
-        "vol_sma": st.number_input("Volume SMA", min_value=5, max_value=60, value=20, step=1),
-    }
+    ema_fast = st.number_input("EMA Fast (trend içi)", min_value=5, max_value=100, value=50, step=1)
+    ema_slow = st.number_input("EMA Slow (trend filtresi)", min_value=50, max_value=400, value=200, step=1)
+    rsi_period = st.number_input("RSI Period", min_value=5, max_value=30, value=14, step=1)
+    bb_period = st.number_input("Bollinger Period", min_value=10, max_value=50, value=20, step=1)
+    bb_std = st.number_input("Bollinger Std", min_value=1.0, max_value=3.5, value=2.0, step=0.1)
+    atr_period = st.number_input("ATR Period", min_value=5, max_value=30, value=14, step=1)
+    vol_sma = st.number_input("Volume SMA", min_value=5, max_value=60, value=20, step=1)
 
     st.header("Risk / Backtest")
-    cfg["initial_capital"] = st.number_input("Başlangıç Sermayesi", min_value=100.0, value=10000.0, step=500.0)
-    cfg["risk_per_trade"] = st.slider("Trade başı risk (equity %)", min_value=0.002, max_value=0.05, value=0.01, step=0.001)
-    cfg["atr_stop_mult"] = st.slider("ATR Stop Katsayısı", min_value=1.0, max_value=6.0, value=3.0, step=0.5)
-    cfg["commission_bps"] = st.number_input("Komisyon (bps)", min_value=0.0, value=5.0, step=1.0)
-    cfg["slippage_bps"] = st.number_input("Slippage (bps)", min_value=0.0, value=2.0, step=1.0)
+    initial_capital = st.number_input("Başlangıç Sermayesi", min_value=100.0, value=10000.0, step=500.0)
+    risk_per_trade = st.slider("Trade başı risk (equity %)", min_value=0.002, max_value=0.05, value=0.01, step=0.001)
+    commission_bps = st.number_input("Komisyon (bps)", min_value=0.0, value=5.0, step=1.0)
+    slippage_bps = st.number_input("Slippage (bps)", min_value=0.0, value=2.0, step=1.0)
 
     run_btn = st.button("🚀 Çalıştır", type="primary")
+
+# Build cfg with preset overrides
+cfg = {
+    "ema_fast": ema_fast,
+    "ema_slow": ema_slow,
+    "rsi_period": rsi_period,
+    "bb_period": bb_period,
+    "bb_std": bb_std,
+    "atr_period": atr_period,
+    "vol_sma": vol_sma,
+    "initial_capital": initial_capital,
+    "risk_per_trade": risk_per_trade,
+    "commission_bps": commission_bps,
+    "slippage_bps": slippage_bps,
+}
+cfg.update(PRESETS[preset_name])
 
 if not run_btn:
     st.info("Soldan sembol ve parametreleri seçip **Çalıştır**’a bas.")
@@ -295,8 +315,7 @@ def load_data(ticker, period, interval):
     df = yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [c[0] for c in df.columns]
-    df = df.dropna()
-    return df
+    return df.dropna()
 
 with st.spinner("Veri indiriliyor..."):
     df_raw = load_data(ticker, period, interval)
@@ -309,24 +328,19 @@ df = build_features(df_raw, cfg)
 df, checkpoints = signal_with_checkpoints(df, cfg)
 
 latest = df.iloc[-1]
-rec = "BEKLE"
 if int(latest["ENTRY"]) == 1:
     rec = "AL"
 elif int(latest["EXIT"]) == 1:
     rec = "SAT"
 else:
-    if latest["SCORE"] >= 80:
-        rec = "İZLE (Güçlü Trend)"
-    elif latest["SCORE"] >= 60:
-        rec = "BEKLE (Orta)"
-    else:
-        rec = "UZAK DUR (Zayıf)"
+    rec = "İZLE (Güçlü Trend)" if latest["SCORE"] >= 80 else ("BEKLE (Orta)" if latest["SCORE"] >= 60 else "UZAK DUR")
 
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("Sembol", ticker)
 c2.metric("Son Fiyat", f"{latest['Close']:.2f}")
 c3.metric("Skor", f"{latest['SCORE']:.0f}/100")
 c4.metric("Sinyal", rec)
+c5.metric("Mod", preset_name)
 
 st.subheader("✅ Kontrol Noktaları (Son Bar)")
 cp_cols = st.columns(3)
@@ -337,8 +351,8 @@ for i, (k, v) in enumerate(checkpoints.items()):
 st.subheader("📊 Fiyat + EMA + Bollinger + Sinyaller")
 fig = go.Figure()
 fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"))
-fig.add_trace(go.Scatter(x=df.index, y=df["EMA50"], name="EMA50"))
-fig.add_trace(go.Scatter(x=df.index, y=df["EMA200"], name="EMA200"))
+fig.add_trace(go.Scatter(x=df.index, y=df["EMA50"], name="EMA Fast"))
+fig.add_trace(go.Scatter(x=df.index, y=df["EMA200"], name="EMA Slow"))
 fig.add_trace(go.Scatter(x=df.index, y=df["BB_upper"], name="BB Upper", line=dict(dash="dot")))
 fig.add_trace(go.Scatter(x=df.index, y=df["BB_mid"], name="BB Mid", line=dict(dash="dot")))
 fig.add_trace(go.Scatter(x=df.index, y=df["BB_lower"], name="BB Lower", line=dict(dash="dot")))
@@ -380,35 +394,33 @@ with ind_cols[2]:
     fig_atr.update_layout(height=250, yaxis_tickformat=".1%")
     st.plotly_chart(fig_atr, use_container_width=True)
 
-st.subheader("🧪 Backtest (Long-only, ATR trailing stop + risk-based sizing)")
+st.subheader("🧪 Backtest (Long-only) + Benchmark (Buy&Hold)")
 eq, trades, metrics = backtest_long_only(df, cfg)
 
-mcols = st.columns(6)
-mcols[0].metric("Total Return", f"{metrics['Total Return']:.2%}")
-mcols[1].metric("Ann. Return", f"{metrics['Annualized Return']:.2%}")
-mcols[2].metric("Ann. Vol", f"{metrics['Annualized Volatility']:.2%}")
-mcols[3].metric("Sharpe", f"{metrics['Sharpe (rf=0)']:.2f}")
-mcols[4].metric("Max DD", f"{metrics['Max Drawdown']:.2%}")
-mcols[5].metric("Win Rate", f"{metrics['Win Rate']:.2%}")
+# Buy & Hold benchmark
+bh = (df["Close"] / df["Close"].iloc[0]) * cfg["initial_capital"]
+
+mcols = st.columns(7)
+mcols[0].metric("Strat Total", f"{metrics['Total Return']:.2%}")
+mcols[1].metric("BH Total", f"{(bh.iloc[-1]/bh.iloc[0]-1):.2%}")
+mcols[2].metric("Ann Return", f"{metrics['Annualized Return']:.2%}")
+mcols[3].metric("Ann Vol", f"{metrics['Annualized Volatility']:.2%}")
+mcols[4].metric("Sharpe", f"{metrics['Sharpe (rf=0)']:.2f}")
+mcols[5].metric("Max DD", f"{metrics['Max Drawdown']:.2%}")
+mcols[6].metric("Trades", f"{metrics['Trades']}")
 
 fig_eq = go.Figure()
-fig_eq.add_trace(go.Scatter(x=eq.index, y=eq.values, name="Equity"))
-fig_eq.update_layout(height=300)
+fig_eq.add_trace(go.Scatter(x=eq.index, y=eq.values, name="Strategy Equity"))
+fig_eq.add_trace(go.Scatter(x=bh.index, y=bh.values, name="Buy&Hold Equity"))
+fig_eq.update_layout(height=320)
 st.plotly_chart(fig_eq, use_container_width=True)
 
 st.subheader("📑 İşlemler")
 if trades.empty:
-    st.write("Trade oluşmadı. Parametreleri değiştir (periyot büyüt, ATR% filtresini gevşet, vb.).")
+    st.write("Trade oluşmadı. Modu Agresif yap veya periyodu büyüt.")
 else:
     show = trades.copy()
     show["entry_date"] = show["entry_date"].astype(str)
     show["exit_date"] = show["exit_date"].astype(str)
     st.dataframe(show[["entry_date","entry_price","exit_date","exit_price","exit_reason","shares","pnl","return_%","holding_days"]],
                  use_container_width=True)
-
-st.subheader("🔎 Son Bar Özeti")
-st.write(
-    f"- Close: **{latest['Close']:.2f}** | EMA50: **{latest['EMA50']:.2f}** | EMA200: **{latest['EMA200']:.2f}**\n"
-    f"- RSI: **{latest['RSI']:.1f}** | MACD Hist: **{latest['MACD_hist']:.4f}**\n"
-    f"- BB Mid: **{latest['BB_mid']:.2f}** | ATR: **{latest['ATR']:.2f}** | Volume: **{latest['Volume']:.0f}**\n"
-)
