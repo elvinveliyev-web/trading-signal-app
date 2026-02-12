@@ -3,13 +3,12 @@ import pandas as pd
 import yfinance as yf
 import streamlit as st
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 
 st.set_page_config(page_title="Trading Signal App (FA + TA)", layout="wide")
 
-# =============================
+# =========================================================
 # Helpers
-# =============================
+# =========================================================
 def normalize_ticker(raw: str, market: str) -> str:
     t = (raw or "").strip().upper()
     if not t:
@@ -17,6 +16,15 @@ def normalize_ticker(raw: str, market: str) -> str:
     if market == "BIST" and not t.endswith(".IS"):
         t = f"{t}.IS"
     return t
+
+
+def yahoo_symbol(sym: str) -> str:
+    """
+    Wikipedia tickers like BRK.B -> yfinance BRK-B
+    """
+    s = (sym or "").strip().upper()
+    s = s.replace(".", "-")
+    return s
 
 
 def safe_float(x):
@@ -30,9 +38,40 @@ def safe_float(x):
         return np.nan
 
 
-# =============================
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
+def get_universe_sp500() -> list[str]:
+    # Wikipedia table: "Symbol"
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    tables = pd.read_html(url)
+    # first table is usually the constituents
+    df = tables[0]
+    col = "Symbol" if "Symbol" in df.columns else df.columns[0]
+    tickers = [yahoo_symbol(x) for x in df[col].astype(str).tolist()]
+    return sorted(list(dict.fromkeys(tickers)))
+
+
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
+def get_universe_nasdaq100() -> list[str]:
+    # Wikipedia page has "Ticker" column in components table
+    url = "https://en.wikipedia.org/wiki/Nasdaq-100"
+    tables = pd.read_html(url)
+    # try to find a table that contains "Ticker"
+    target = None
+    for t in tables:
+        if "Ticker" in t.columns:
+            target = t
+            break
+    if target is None:
+        # fallback: pick first table
+        target = tables[0]
+    col = "Ticker" if "Ticker" in target.columns else target.columns[0]
+    tickers = [yahoo_symbol(x) for x in target[col].astype(str).tolist()]
+    return sorted(list(dict.fromkeys(tickers)))
+
+
+# =========================================================
 # Indicators
-# =============================
+# =========================================================
 def ema(s: pd.Series, span: int) -> pd.Series:
     return s.ewm(span=span, adjust=False).mean()
 
@@ -87,9 +126,9 @@ def max_drawdown(eq: pd.Series) -> float:
     return float(dd.min())
 
 
-# =============================
+# =========================================================
 # Feature builder
-# =============================
+# =========================================================
 def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     df = df.copy()
     df["EMA50"] = ema(df["Close"], int(cfg["ema_fast"]))
@@ -106,9 +145,9 @@ def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     return df
 
 
-# =============================
-# Market regime filter (SPY) - only USA
-# =============================
+# =========================================================
+# Market regime filter (SPY)
+# =========================================================
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
 def get_spy_regime_ok() -> bool:
     spy = yf.download("SPY", period="10y", interval="1d", auto_adjust=False, progress=False)
@@ -122,9 +161,9 @@ def get_spy_regime_ok() -> bool:
     return bool(last["Close"] > last["EMA200"])
 
 
-# =============================
+# =========================================================
 # Strategy: scoring + checkpoints
-# =============================
+# =========================================================
 def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool):
     df = df.copy()
 
@@ -190,9 +229,9 @@ def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool)
     return df, cp
 
 
-# =============================
-# Backtest (long-only) + metrics
-# =============================
+# =========================================================
+# Backtest (long-only) + metrics (Sharpe/Sortino/Calmar/PF)
+# =========================================================
 def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
     df = df.copy()
     entry_sig = df["ENTRY"].shift(1).fillna(0).astype(int)
@@ -258,16 +297,16 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
                     stop = buy_price - cfg["atr_stop_mult"] * float(row["ATR"])
 
                     trades.append(
-                        {
-                            "entry_date": date,
-                            "entry_price": buy_price,
-                            "exit_date": None,
-                            "exit_price": None,
-                            "exit_reason": None,
-                            "shares": shares,
-                            "equity_before": equity,
-                            "pnl": None,
-                        }
+                        dict(
+                            entry_date=date,
+                            entry_price=buy_price,
+                            exit_date=None,
+                            exit_price=None,
+                            exit_reason=None,
+                            shares=shares,
+                            equity_before=equity,
+                            pnl=None,
+                        )
                     )
 
         position_value = shares * price * (1 - slippage)
@@ -277,38 +316,31 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
     eq = pd.Series([v for _, v in equity_curve], index=[d for d, _ in equity_curve], name="equity").astype(float)
     eq = eq.replace([np.inf, -np.inf], np.nan).dropna()
 
-    # --- returns
     ret = eq.pct_change().dropna()
 
     total_return = (eq.iloc[-1] / eq.iloc[0] - 1) if len(eq) > 1 else 0.0
     ann_return = (1 + total_return) ** (252 / max(1, len(ret))) - 1 if len(ret) > 0 else 0.0
     ann_vol = float(ret.std() * np.sqrt(252)) if len(ret) > 1 else 0.0
 
-    # risk-free handling
     rf_daily = (1 + float(risk_free_annual)) ** (1 / 252) - 1
     excess = ret - rf_daily
 
     sharpe = float((excess.mean() * 252) / (excess.std() * np.sqrt(252))) if len(ret) > 1 and excess.std() > 0 else 0.0
 
-    # Sortino (downside deviation)
     downside = excess.copy()
     downside[downside > 0] = 0
     downside_dev = float(np.sqrt((downside**2).mean()) * np.sqrt(252)) if len(downside) > 1 else 0.0
     sortino = float((excess.mean() * 252) / downside_dev) if downside_dev > 0 else 0.0
 
     mdd = max_drawdown(eq)
-
-    # Calmar: ann_return / |max_drawdown|
     calmar = float(ann_return / abs(mdd)) if mdd < 0 else 0.0
 
-    # Trades DF
     tdf = pd.DataFrame(trades)
     if not tdf.empty:
         tdf["pnl"] = tdf["pnl"].astype(float)
         tdf["return_%"] = (tdf["pnl"] / tdf["equity_before"]) * 100
         tdf["holding_days"] = (pd.to_datetime(tdf["exit_date"]) - pd.to_datetime(tdf["entry_date"])).dt.days
 
-    # Profit Factor (trade-based)
     profit_factor = 0.0
     if not tdf.empty and "pnl" in tdf.columns:
         gross_profit = float(tdf.loc[tdf["pnl"] > 0, "pnl"].sum())
@@ -335,12 +367,15 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
     return eq, tdf, metrics
 
 
-# =============================
+# =========================================================
 # Fundamental Screener (USA)
-# =============================
+# =========================================================
 @st.cache_data(ttl=12 * 3600, show_spinner=False)
 def fetch_fundamentals_usa(ticker: str) -> dict:
-    """Pulls a subset of fundamentals via yfinance. May be missing for some tickers."""
+    """
+    yfinance fundamentals (info) can be missing or rate-limited.
+    We'll keep it defensive.
+    """
     t = yf.Ticker(ticker)
     info = {}
     try:
@@ -348,7 +383,6 @@ def fetch_fundamentals_usa(ticker: str) -> dict:
     except Exception:
         info = {}
 
-    # map
     out = {
         "ticker": ticker,
         "marketCap": safe_float(info.get("marketCap")),
@@ -357,33 +391,31 @@ def fetch_fundamentals_usa(ticker: str) -> dict:
         "pegRatio": safe_float(info.get("pegRatio")),
         "priceToSalesTrailing12Months": safe_float(info.get("priceToSalesTrailing12Months")),
         "priceToBook": safe_float(info.get("priceToBook")),
-        "returnOnEquity": safe_float(info.get("returnOnEquity")),             # 0.15 = 15%
-        "profitMargins": safe_float(info.get("profitMargins")),               # 0.10 = 10%
-        "operatingMargins": safe_float(info.get("operatingMargins")),         # 0.10 = 10%
-        "debtToEquity": safe_float(info.get("debtToEquity")),                 # sometimes already ratio*100
-        "revenueGrowth": safe_float(info.get("revenueGrowth")),               # 0.10 = 10%
-        "earningsGrowth": safe_float(info.get("earningsGrowth")),             # 0.10 = 10%
+        "returnOnEquity": safe_float(info.get("returnOnEquity")),      # 0.15 = 15%
+        "profitMargins": safe_float(info.get("profitMargins")),        # 0.10 = 10%
+        "operatingMargins": safe_float(info.get("operatingMargins")),  # 0.10 = 10%
+        "debtToEquity": safe_float(info.get("debtToEquity")),          # sometimes % form
+        "revenueGrowth": safe_float(info.get("revenueGrowth")),        # 0.10 = 10%
+        "earningsGrowth": safe_float(info.get("earningsGrowth")),      # 0.10 = 10%
         "freeCashflow": safe_float(info.get("freeCashflow")),
         "currentPrice": safe_float(info.get("currentPrice")),
         "sector": info.get("sector", ""),
         "industry": info.get("industry", ""),
     }
 
-    # normalize debtToEquity if it looks like percent
     dte = out["debtToEquity"]
-    if pd.notna(dte) and dte > 10:  # likely 150 => 1.5
+    if pd.notna(dte) and dte > 10:  # e.g. 150 => 1.5
         out["debtToEquity"] = dte / 100.0
 
     return out
 
 
-def fundamental_score_row(row: dict, mode: str, thresholds: dict) -> tuple[float, dict, bool]:
+def fundamental_score_row(row: dict, mode: str, thresholds: dict):
     """
-    returns: (score 0-100, breakdown, pass_bool)
+    returns: (score 0-100, breakdown_dict, pass_bool)
     """
     b = {}
 
-    # Helpers
     def ok(name, cond, weight):
         b[name] = {"ok": bool(cond), "weight": weight}
         return weight if cond else 0.0
@@ -412,18 +444,14 @@ def fundamental_score_row(row: dict, mode: str, thresholds: dict) -> tuple[float
         total_w += 15; score += ok("Debt/Equity", pd.notna(row["debtToEquity"]) and row["debtToEquity"] <= thresholds["dte"], 15)
 
     score = (score / total_w) * 100 if total_w > 0 else 0.0
-
-    # PASS rule: score >= threshold AND at least N key checks ok
     ok_count = sum(1 for v in b.values() if v["ok"])
-    pass_bool = (score >= thresholds["min_score"]) and (ok_count >= thresholds["min_ok"])
-    return float(score), b, bool(pass_bool)
+    passed = (score >= thresholds["min_score"]) and (ok_count >= thresholds["min_ok"])
+    return float(score), b, bool(passed)
 
 
-# =============================
+# =========================================================
 # Presets
-# =============================
-US_TICKERS = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "NFLX", "JPM", "XOM", "SPY", "QQQ"]
-US_EXT = ["AVGO", "AMD", "ORCL", "COST", "KO", "PEP", "JNJ", "PG", "V", "MA", "UNH", "HD", "CRM", "ADBE"]
+# =========================================================
 BIST_EXAMPLES = ["THYAO", "ASELS", "KCHOL", "SISE", "BIMAS"]
 
 PRESETS = {
@@ -432,26 +460,46 @@ PRESETS = {
     "Agresif": {"rsi_entry_level": 48, "rsi_exit_level": 43, "atr_pct_max": 0.10, "atr_stop_mult": 2.5},
 }
 
-# =============================
+# =========================================================
 # UI
-# =============================
-st.title("📈 FA→TA Trading Uygulaması (Temel Analiz Filtre + Teknik Timing)")
-st.caption("Önce fundamental ile evreni daralt, sonra teknik analizle giriş/çıkış zamanla. Otomatik emir göndermez.")
+# =========================================================
+st.title("📈 FA → TA Trading Uygulaması (S&P500 + Nasdaq100)")
+st.caption("Önce temel analizle evreni daralt (FA), sonra teknik analizle giriş/çıkış zamanla (TA). Otomatik emir göndermez.")
 
 if "screener_df" not in st.session_state:
     st.session_state.screener_df = pd.DataFrame()
 if "selected_ticker" not in st.session_state:
     st.session_state.selected_ticker = None
+if "universe_used" not in st.session_state:
+    st.session_state.universe_used = []
 
 with st.sidebar:
     st.header("Piyasa")
     market = st.selectbox("Market", ["USA", "BIST"], index=0)
 
     st.header("1) Fundamental Screener (opsiyonel)")
-    use_fa = st.checkbox("Fundamental filtreyi kullan", value=(market == "USA"))
-    fa_mode = st.selectbox("Fundamental Mod", ["Quality", "Value", "Growth"], index=0, disabled=(not use_fa or market != "USA"))
+    use_fa = st.checkbox("Fundamental filtreyi kullan (sadece USA)", value=(market == "USA"))
+    fa_mode = st.selectbox(
+        "Fundamental Mod", ["Quality", "Value", "Growth"], index=0, disabled=(not use_fa or market != "USA")
+    )
 
-    # Fundamental thresholds
+    st.subheader("Universe (USA)")
+    universe_choice = st.selectbox(
+        "Evren",
+        ["S&P 500", "Nasdaq 100", "S&P 500 + Nasdaq 100"],
+        index=2,
+        disabled=(market != "USA"),
+    )
+    max_universe = st.slider(
+        "Tarama limiti (performans için)",
+        min_value=20,
+        max_value=600,
+        value=150,
+        step=10,
+        disabled=(not use_fa or market != "USA"),
+        help="yfinance fundamentals bazen yavaş/limitli olabilir. 150-250 genelde iyi.",
+    )
+
     st.caption("Eşikler (USA için)")
     roe = st.slider("ROE min", 0.0, 0.40, 0.15, 0.01, disabled=(not use_fa or market != "USA"))
     op_margin = st.slider("Operating Margin min", 0.0, 0.40, 0.10, 0.01, disabled=(not use_fa or market != "USA"))
@@ -466,37 +514,26 @@ with st.sidebar:
     min_score = st.slider("Min Fundamental Score", 0, 100, 60, 1, disabled=(not use_fa or market != "USA"))
     min_ok = st.slider("Min OK sayısı", 1, 5, 3, 1, disabled=(not use_fa or market != "USA"))
 
-    thresholds = {
-        "roe": roe,
-        "op_margin": op_margin,
-        "profit_margin": profit_margin,
-        "dte": dte,
-        "fpe": fpe,
-        "peg": peg,
-        "ps": ps,
-        "pb": pb,
-        "rev_g": rev_g,
-        "earn_g": earn_g,
-        "min_score": min_score,
-        "min_ok": min_ok,
-    }
-
-    st.subheader("Evrensel Liste")
-    if market == "USA":
-        universe_preset = st.selectbox("Universe", ["US Sample", "US Extended"], index=1)
-        universe = US_TICKERS if universe_preset == "US Sample" else sorted(list(set(US_TICKERS + US_EXT)))
-    else:
-        universe = BIST_EXAMPLES
-
-    if market == "USA":
-        extra = st.multiselect("Listeye ekle (opsiyonel)", options=sorted(list(set(universe + ["IBM", "INTC", "CSCO", "BA", "DIS", "PFE"]))), default=[])
-        universe = sorted(list(set(universe + extra)))
+    thresholds = dict(
+        roe=roe,
+        op_margin=op_margin,
+        profit_margin=profit_margin,
+        dte=dte,
+        fpe=fpe,
+        peg=peg,
+        ps=ps,
+        pb=pb,
+        rev_g=rev_g,
+        earn_g=earn_g,
+        min_score=min_score,
+        min_ok=min_ok,
+    )
 
     run_screener = st.button("🔎 Screener Çalıştır", type="secondary", disabled=(not use_fa or market != "USA"))
 
     st.divider()
-
     st.header("2) Teknik Analiz + Backtest")
+
     preset_name = st.selectbox("Teknik Mod", list(PRESETS.keys()), index=1)
 
     st.subheader("Sembol (TA)")
@@ -538,54 +575,90 @@ with st.sidebar:
 
     st.subheader("Risk / Backtest")
     initial_capital = st.number_input("Başlangıç Sermayesi", min_value=100.0, value=10000.0, step=500.0)
-    risk_per_trade = st.slider("Trade başı risk (equity %)", min_value=0.002, max_value=0.05, value=0.01, step=0.001)
+    risk_per_trade = st.slider(
+        "Trade başı risk (equity %)", min_value=0.002, max_value=0.05, value=0.01, step=0.001
+    )
     commission_bps = st.number_input("Komisyon (bps)", min_value=0.0, value=5.0, step=1.0)
     slippage_bps = st.number_input("Slippage (bps)", min_value=0.0, value=2.0, step=1.0)
     risk_free_annual = st.number_input("Risk-Free (yıllık, ör: 0.05 = %5)", min_value=0.0, value=0.0, step=0.01)
 
     run_btn = st.button("🚀 Teknik Analizi Çalıştır", type="primary")
 
-# -----------------------------
-# Fundamental screener action (USA only)
-# -----------------------------
+# =========================================================
+# Fundamental Screener action (USA only)
+# =========================================================
+def build_universe(choice: str) -> list[str]:
+    sp = get_universe_sp500()
+    ndx = get_universe_nasdaq100()
+    if choice == "S&P 500":
+        return sp
+    if choice == "Nasdaq 100":
+        return ndx
+    return sorted(list(dict.fromkeys(sp + ndx)))
+
+
 if run_screener and market == "USA" and use_fa:
-    with st.spinner("Fundamental veriler çekiliyor (yfinance)..."):
-        rows = []
-        for tk in universe:
-            f = fetch_fundamentals_usa(tk)
-            score, breakdown, passed = fundamental_score_row(f, fa_mode, thresholds)
-            f["FA_score"] = score
-            f["FA_pass"] = passed
-            f["FA_ok_count"] = sum(1 for v in breakdown.values() if v["ok"])
-            rows.append(f)
+    uni = build_universe(universe_choice)
+    st.session_state.universe_used = uni[:max_universe]
+    tickers_to_scan = st.session_state.universe_used
 
-        sdf = pd.DataFrame(rows)
+    st.subheader("⏳ Screener çalışıyor...")
+    prog = st.progress(0)
+    status = st.empty()
 
-        # Sort: pass first, then score
-        sdf["FA_pass_int"] = sdf["FA_pass"].astype(int)
-        sdf = sdf.sort_values(["FA_pass_int", "FA_score"], ascending=[False, False]).drop(columns=["FA_pass_int"])
+    rows = []
+    n = len(tickers_to_scan)
+    for i, tk in enumerate(tickers_to_scan, start=1):
+        status.write(f"Fundamental çekiliyor: {tk} ({i}/{n})")
+        f = fetch_fundamentals_usa(tk)
+        score, breakdown, passed = fundamental_score_row(f, fa_mode, thresholds)
+        f["FA_score"] = score
+        f["FA_pass"] = passed
+        f["FA_signal"] = "AL" if passed else "BEKLE"
+        f["FA_ok_count"] = sum(1 for v in breakdown.values() if v["ok"])
+        rows.append(f)
+        prog.progress(int(i / n * 100))
 
-        st.session_state.screener_df = sdf.copy()
+    sdf = pd.DataFrame(rows)
 
-# -----------------------------
-# Screener display (if available)
-# -----------------------------
+    # sort pass first then score
+    sdf["FA_pass_int"] = sdf["FA_pass"].astype(int)
+    sdf = sdf.sort_values(["FA_pass_int", "FA_score"], ascending=[False, False]).drop(columns=["FA_pass_int"])
+
+    st.session_state.screener_df = sdf.copy()
+    status.empty()
+    st.success(f"Screener bitti. Tarandı: {len(tickers_to_scan)}")
+
+# =========================================================
+# Screener display
+# =========================================================
 if market == "USA" and use_fa and not st.session_state.screener_df.empty:
     st.subheader("🧾 Fundamental Screener Sonuçları (USA)")
+
     sdf = st.session_state.screener_df.copy()
 
     show_cols = [
-        "ticker", "FA_pass", "FA_score", "FA_ok_count",
-        "sector", "industry",
-        "forwardPE", "pegRatio", "priceToSalesTrailing12Months", "priceToBook",
-        "returnOnEquity", "operatingMargins", "profitMargins", "debtToEquity",
-        "revenueGrowth", "earningsGrowth",
-        "marketCap"
+        "ticker",
+        "FA_signal",
+        "FA_pass",
+        "FA_score",
+        "FA_ok_count",
+        "sector",
+        "industry",
+        "forwardPE",
+        "pegRatio",
+        "priceToSalesTrailing12Months",
+        "priceToBook",
+        "returnOnEquity",
+        "operatingMargins",
+        "profitMargins",
+        "debtToEquity",
+        "revenueGrowth",
+        "earningsGrowth",
+        "marketCap",
     ]
     sdf_show = sdf[[c for c in show_cols if c in sdf.columns]].copy()
-
-    # nicer formatting in table
-    st.dataframe(sdf_show, use_container_width=True, height=320)
+    st.dataframe(sdf_show, use_container_width=True, height=360)
 
     pass_list = sdf.loc[sdf["FA_pass"] == True, "ticker"].tolist()
     if len(pass_list) == 0:
@@ -597,32 +670,32 @@ if market == "USA" and use_fa and not st.session_state.screener_df.empty:
             st.session_state.selected_ticker = picked
             st.rerun()
 
-# -----------------------------
+# =========================================================
 # Technical run
-# -----------------------------
-cfg = {
-    "ema_fast": ema_fast,
-    "ema_slow": ema_slow,
-    "rsi_period": rsi_period,
-    "bb_period": bb_period,
-    "bb_std": bb_std,
-    "atr_period": atr_period,
-    "vol_sma": vol_sma,
-    "initial_capital": initial_capital,
-    "risk_per_trade": risk_per_trade,
-    "commission_bps": commission_bps,
-    "slippage_bps": slippage_bps,
-}
+# =========================================================
+cfg = dict(
+    ema_fast=ema_fast,
+    ema_slow=ema_slow,
+    rsi_period=rsi_period,
+    bb_period=bb_period,
+    bb_std=bb_std,
+    atr_period=atr_period,
+    vol_sma=vol_sma,
+    initial_capital=initial_capital,
+    risk_per_trade=risk_per_trade,
+    commission_bps=commission_bps,
+    slippage_bps=slippage_bps,
+)
 cfg.update(PRESETS[preset_name])
 
 @st.cache_data(show_spinner=False)
-def load_data_cached(ticker: str, period: str, interval: str) -> pd.DataFrame:
-    df = yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False)
-    if df is None or df.empty:
+def load_data_cached(ticker_: str, period_: str, interval_: str) -> pd.DataFrame:
+    df_ = yf.download(ticker_, period=period_, interval=interval_, auto_adjust=False, progress=False)
+    if df_ is None or df_.empty:
         return pd.DataFrame()
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [c[0] for c in df.columns]
-    return df.dropna()
+    if isinstance(df_.columns, pd.MultiIndex):
+        df_.columns = [c[0] for c in df_.columns]
+    return df_.dropna()
 
 if not run_btn:
     st.info("Soldan ayarları yapıp **Teknik Analizi Çalıştır**’a bas. (İstersen önce fundamental screener kullan.)")
@@ -659,6 +732,7 @@ elif int(latest["EXIT"]) == 1:
 else:
     rec = "İZLE (Güçlü Trend)" if latest["SCORE"] >= 80 else ("BEKLE (Orta)" if latest["SCORE"] >= 60 else "UZAK DUR")
 
+# Top metrics row
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 c1.metric("Market", market)
 c2.metric("Sembol", ticker)
@@ -673,6 +747,7 @@ for i, (k, v) in enumerate(checkpoints.items()):
     with cp_cols[i % 3]:
         st.write(("🟢 " if v else "🔴 ") + k)
 
+# Price chart
 st.subheader("📊 Fiyat + EMA + Bollinger + Sinyaller")
 fig = go.Figure()
 fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"))
@@ -689,6 +764,58 @@ fig.add_trace(go.Scatter(x=exits.index, y=exits["Close"], mode="markers", name="
 fig.update_layout(height=600, xaxis_rangeslider_visible=False)
 st.plotly_chart(fig, use_container_width=True)
 
+# Indicators row
 st.subheader("📉 RSI / MACD / ATR%")
-ind_col
-::contentReference[oaicite:0]{index=0}
+ind_cols = st.columns(3)
+
+with ind_cols[0]:
+    fig_rsi = go.Figure()
+    fig_rsi.add_trace(go.Scatter(x=df.index, y=df["RSI"], name="RSI"))
+    fig_rsi.add_hline(y=cfg["rsi_entry_level"])
+    fig_rsi.add_hline(y=cfg["rsi_exit_level"])
+    fig_rsi.update_layout(height=260)
+    st.plotly_chart(fig_rsi, use_container_width=True)
+
+with ind_cols[1]:
+    fig_macd = go.Figure()
+    fig_macd.add_trace(go.Scatter(x=df.index, y=df["MACD"], name="MACD"))
+    fig_macd.add_trace(go.Scatter(x=df.index, y=df["MACD_signal"], name="Signal"))
+    fig_macd.add_trace(go.Bar(x=df.index, y=df["MACD_hist"], name="Hist"))
+    fig_macd.update_layout(height=260)
+    st.plotly_chart(fig_macd, use_container_width=True)
+
+with ind_cols[2]:
+    atr_pct = (df["ATR"] / df["Close"]).replace([np.inf, -np.inf], np.nan)
+    fig_atr = go.Figure()
+    fig_atr.add_trace(go.Scatter(x=df.index, y=atr_pct, name="ATR%"))
+    fig_atr.add_hline(y=cfg["atr_pct_max"])
+    fig_atr.update_layout(height=260)
+    st.plotly_chart(fig_atr, use_container_width=True)
+
+# Backtest
+st.subheader("🧪 Backtest (Long-Only)")
+eq, tdf, metrics = backtest_long_only(df, cfg, risk_free_annual=risk_free_annual)
+
+m1, m2, m3, m4, m5, m6 = st.columns(6)
+m1.metric("Total Return", f"{metrics['Total Return']*100:.1f}%")
+m2.metric("Ann. Return", f"{metrics['Annualized Return']*100:.1f}%")
+m3.metric("Max Drawdown", f"{metrics['Max Drawdown']*100:.1f}%")
+m4.metric("Sortino", f"{metrics['Sortino']:.2f}")
+m5.metric("Calmar", f"{metrics['Calmar']:.2f}")
+m6.metric("Profit Factor", "∞" if np.isinf(metrics["Profit Factor"]) else f"{metrics['Profit Factor']:.2f}")
+
+fig_eq = go.Figure()
+fig_eq.add_trace(go.Scatter(x=eq.index, y=eq.values, name="Equity"))
+fig_eq.update_layout(height=320)
+st.plotly_chart(fig_eq, use_container_width=True)
+
+cA, cB, cC = st.columns(3)
+cA.metric("Sharpe", f"{metrics['Sharpe']:.2f}")
+cB.metric("Trades", f"{metrics['Trades']}")
+cC.metric("Win Rate", f"{metrics['Win Rate']*100:.1f}%")
+
+st.subheader("📑 Trades")
+if tdf.empty:
+    st.info("Trade oluşmadı (sinyal şartları oluşmamış olabilir).")
+else:
+    st.dataframe(tdf, use_container_width=True, height=320)
