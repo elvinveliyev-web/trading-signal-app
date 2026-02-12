@@ -5,17 +5,12 @@ import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(page_title="Trading Signal App", layout="wide")
+st.set_page_config(page_title="Trading Signal App (FA + TA)", layout="wide")
 
-# -----------------------------
-# Helpers: ticker normalization
-# -----------------------------
+# =============================
+# Helpers
+# =============================
 def normalize_ticker(raw: str, market: str) -> str:
-    """
-    market: 'USA' or 'BIST'
-    - USA: AAPL, MSFT, SPY...
-    - BIST: THYAO -> THYAO.IS  (yfinance format)
-    """
     t = (raw or "").strip().upper()
     if not t:
         return t
@@ -24,9 +19,20 @@ def normalize_ticker(raw: str, market: str) -> str:
     return t
 
 
-# -----------------------------
+def safe_float(x):
+    try:
+        if x is None:
+            return np.nan
+        if isinstance(x, (int, float, np.number)):
+            return float(x)
+        return float(str(x).replace(",", ""))
+    except Exception:
+        return np.nan
+
+
+# =============================
 # Indicators
-# -----------------------------
+# =============================
 def ema(s: pd.Series, span: int) -> pd.Series:
     return s.ewm(span=span, adjust=False).mean()
 
@@ -74,14 +80,16 @@ def obv(close: pd.Series, volume: pd.Series) -> pd.Series:
 
 
 def max_drawdown(eq: pd.Series) -> float:
+    if eq is None or len(eq) == 0:
+        return 0.0
     peak = eq.cummax()
     dd = (eq / peak) - 1.0
-    return float(dd.min()) if len(dd) else 0.0
+    return float(dd.min())
 
 
-# -----------------------------
+# =============================
 # Feature builder
-# -----------------------------
+# =============================
 def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     df = df.copy()
     df["EMA50"] = ema(df["Close"], int(cfg["ema_fast"]))
@@ -98,9 +106,9 @@ def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     return df
 
 
-# -----------------------------
+# =============================
 # Market regime filter (SPY) - only USA
-# -----------------------------
+# =============================
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
 def get_spy_regime_ok() -> bool:
     spy = yf.download("SPY", period="10y", interval="1d", auto_adjust=False, progress=False)
@@ -114,9 +122,9 @@ def get_spy_regime_ok() -> bool:
     return bool(last["Close"] > last["EMA200"])
 
 
-# -----------------------------
+# =============================
 # Strategy: scoring + checkpoints
-# -----------------------------
+# =============================
 def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool):
     df = df.copy()
 
@@ -182,10 +190,10 @@ def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool)
     return df, cp
 
 
-# -----------------------------
-# Backtest (long-only)
-# -----------------------------
-def backtest_long_only(df: pd.DataFrame, cfg: dict):
+# =============================
+# Backtest (long-only) + metrics
+# =============================
+def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
     df = df.copy()
     entry_sig = df["ENTRY"].shift(1).fillna(0).astype(int)
     exit_sig = df["EXIT"].shift(1).fillna(0).astype(int)
@@ -269,21 +277,31 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict):
     eq = pd.Series([v for _, v in equity_curve], index=[d for d, _ in equity_curve], name="equity").astype(float)
     eq = eq.replace([np.inf, -np.inf], np.nan).dropna()
 
+    # --- returns
     ret = eq.pct_change().dropna()
-    total_return = eq.iloc[-1] / eq.iloc[0] - 1 if len(eq) > 1 else 0.0
+
+    total_return = (eq.iloc[-1] / eq.iloc[0] - 1) if len(eq) > 1 else 0.0
     ann_return = (1 + total_return) ** (252 / max(1, len(ret))) - 1 if len(ret) > 0 else 0.0
     ann_vol = float(ret.std() * np.sqrt(252)) if len(ret) > 1 else 0.0
-    sharpe = float((ret.mean() * 252) / (ret.std() * np.sqrt(252))) if len(ret) > 1 and ret.std() > 0 else 0.0
+
+    # risk-free handling
+    rf_daily = (1 + float(risk_free_annual)) ** (1 / 252) - 1
+    excess = ret - rf_daily
+
+    sharpe = float((excess.mean() * 252) / (excess.std() * np.sqrt(252))) if len(ret) > 1 and excess.std() > 0 else 0.0
+
+    # Sortino (downside deviation)
+    downside = excess.copy()
+    downside[downside > 0] = 0
+    downside_dev = float(np.sqrt((downside**2).mean()) * np.sqrt(252)) if len(downside) > 1 else 0.0
+    sortino = float((excess.mean() * 252) / downside_dev) if downside_dev > 0 else 0.0
+
     mdd = max_drawdown(eq)
 
-    # Sortino (rf=0, MAR=0)
-    downside = ret[ret < 0]
-    downside_dev = float(downside.std() * np.sqrt(252)) if len(downside) > 1 else 0.0
-    sortino = float((ret.mean() * 252) / downside_dev) if downside_dev > 0 else 0.0
-
-    # Calmar = annualized return / |max drawdown|
+    # Calmar: ann_return / |max_drawdown|
     calmar = float(ann_return / abs(mdd)) if mdd < 0 else 0.0
 
+    # Trades DF
     tdf = pd.DataFrame(trades)
     if not tdf.empty:
         tdf["pnl"] = tdf["pnl"].astype(float)
@@ -295,27 +313,117 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict):
     if not tdf.empty and "pnl" in tdf.columns:
         gross_profit = float(tdf.loc[tdf["pnl"] > 0, "pnl"].sum())
         gross_loss = float(-tdf.loc[tdf["pnl"] < 0, "pnl"].sum())
-        profit_factor = float(gross_profit / gross_loss) if gross_loss > 0 else (np.inf if gross_profit > 0 else 0.0)
+        if gross_loss > 0:
+            profit_factor = gross_profit / gross_loss
+        elif gross_profit > 0 and gross_loss == 0:
+            profit_factor = float("inf")
+        else:
+            profit_factor = 0.0
 
     metrics = {
-        "Total Return": total_return,
-        "Annualized Return": ann_return,
-        "Annualized Volatility": ann_vol,
-        "Sharpe (rf=0)": sharpe,
-        "Sortino (rf=0)": sortino,
-        "Calmar": calmar,
-        "Profit Factor": profit_factor,
-        "Max Drawdown": mdd,
+        "Total Return": float(total_return),
+        "Annualized Return": float(ann_return),
+        "Annualized Volatility": float(ann_vol),
+        "Sharpe": float(sharpe),
+        "Sortino": float(sortino),
+        "Calmar": float(calmar),
+        "Max Drawdown": float(mdd),
         "Trades": int(len(tdf)) if not tdf.empty else 0,
         "Win Rate": float((tdf["pnl"] > 0).mean()) if not tdf.empty else 0.0,
+        "Profit Factor": float(profit_factor) if np.isfinite(profit_factor) else float("inf"),
     }
     return eq, tdf, metrics
 
 
-# -----------------------------
+# =============================
+# Fundamental Screener (USA)
+# =============================
+@st.cache_data(ttl=12 * 3600, show_spinner=False)
+def fetch_fundamentals_usa(ticker: str) -> dict:
+    """Pulls a subset of fundamentals via yfinance. May be missing for some tickers."""
+    t = yf.Ticker(ticker)
+    info = {}
+    try:
+        info = t.info or {}
+    except Exception:
+        info = {}
+
+    # map
+    out = {
+        "ticker": ticker,
+        "marketCap": safe_float(info.get("marketCap")),
+        "trailingPE": safe_float(info.get("trailingPE")),
+        "forwardPE": safe_float(info.get("forwardPE")),
+        "pegRatio": safe_float(info.get("pegRatio")),
+        "priceToSalesTrailing12Months": safe_float(info.get("priceToSalesTrailing12Months")),
+        "priceToBook": safe_float(info.get("priceToBook")),
+        "returnOnEquity": safe_float(info.get("returnOnEquity")),             # 0.15 = 15%
+        "profitMargins": safe_float(info.get("profitMargins")),               # 0.10 = 10%
+        "operatingMargins": safe_float(info.get("operatingMargins")),         # 0.10 = 10%
+        "debtToEquity": safe_float(info.get("debtToEquity")),                 # sometimes already ratio*100
+        "revenueGrowth": safe_float(info.get("revenueGrowth")),               # 0.10 = 10%
+        "earningsGrowth": safe_float(info.get("earningsGrowth")),             # 0.10 = 10%
+        "freeCashflow": safe_float(info.get("freeCashflow")),
+        "currentPrice": safe_float(info.get("currentPrice")),
+        "sector": info.get("sector", ""),
+        "industry": info.get("industry", ""),
+    }
+
+    # normalize debtToEquity if it looks like percent
+    dte = out["debtToEquity"]
+    if pd.notna(dte) and dte > 10:  # likely 150 => 1.5
+        out["debtToEquity"] = dte / 100.0
+
+    return out
+
+
+def fundamental_score_row(row: dict, mode: str, thresholds: dict) -> tuple[float, dict, bool]:
+    """
+    returns: (score 0-100, breakdown, pass_bool)
+    """
+    b = {}
+
+    # Helpers
+    def ok(name, cond, weight):
+        b[name] = {"ok": bool(cond), "weight": weight}
+        return weight if cond else 0.0
+
+    score = 0.0
+    total_w = 0.0
+
+    if mode == "Quality":
+        total_w += 20; score += ok("ROE", pd.notna(row["returnOnEquity"]) and row["returnOnEquity"] >= thresholds["roe"], 20)
+        total_w += 15; score += ok("Op Margin", pd.notna(row["operatingMargins"]) and row["operatingMargins"] >= thresholds["op_margin"], 15)
+        total_w += 20; score += ok("Debt/Equity", pd.notna(row["debtToEquity"]) and row["debtToEquity"] <= thresholds["dte"], 20)
+        total_w += 15; score += ok("Profit Margin", pd.notna(row["profitMargins"]) and row["profitMargins"] >= thresholds["profit_margin"], 15)
+        total_w += 30; score += ok("FCF", pd.notna(row["freeCashflow"]) and row["freeCashflow"] > 0, 30)
+
+    elif mode == "Value":
+        total_w += 30; score += ok("Forward P/E", pd.notna(row["forwardPE"]) and row["forwardPE"] <= thresholds["fpe"], 30)
+        total_w += 20; score += ok("PEG", pd.notna(row["pegRatio"]) and row["pegRatio"] <= thresholds["peg"], 20)
+        total_w += 20; score += ok("P/S", pd.notna(row["priceToSalesTrailing12Months"]) and row["priceToSalesTrailing12Months"] <= thresholds["ps"], 20)
+        total_w += 15; score += ok("P/B", pd.notna(row["priceToBook"]) and row["priceToBook"] <= thresholds["pb"], 15)
+        total_w += 15; score += ok("ROE", pd.notna(row["returnOnEquity"]) and row["returnOnEquity"] >= thresholds["roe"], 15)
+
+    else:  # Growth
+        total_w += 35; score += ok("Revenue Growth", pd.notna(row["revenueGrowth"]) and row["revenueGrowth"] >= thresholds["rev_g"], 35)
+        total_w += 35; score += ok("Earnings Growth", pd.notna(row["earningsGrowth"]) and row["earningsGrowth"] >= thresholds["earn_g"], 35)
+        total_w += 15; score += ok("Op Margin", pd.notna(row["operatingMargins"]) and row["operatingMargins"] >= thresholds["op_margin"], 15)
+        total_w += 15; score += ok("Debt/Equity", pd.notna(row["debtToEquity"]) and row["debtToEquity"] <= thresholds["dte"], 15)
+
+    score = (score / total_w) * 100 if total_w > 0 else 0.0
+
+    # PASS rule: score >= threshold AND at least N key checks ok
+    ok_count = sum(1 for v in b.values() if v["ok"])
+    pass_bool = (score >= thresholds["min_score"]) and (ok_count >= thresholds["min_ok"])
+    return float(score), b, bool(pass_bool)
+
+
+# =============================
 # Presets
-# -----------------------------
+# =============================
 US_TICKERS = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "NFLX", "JPM", "XOM", "SPY", "QQQ"]
+US_EXT = ["AVGO", "AMD", "ORCL", "COST", "KO", "PEP", "JNJ", "PG", "V", "MA", "UNH", "HD", "CRM", "ADBE"]
 BIST_EXAMPLES = ["THYAO", "ASELS", "KCHOL", "SISE", "BIMAS"]
 
 PRESETS = {
@@ -324,28 +432,77 @@ PRESETS = {
     "Agresif": {"rsi_entry_level": 48, "rsi_exit_level": 43, "atr_pct_max": 0.10, "atr_stop_mult": 2.5},
 }
 
-
-# -----------------------------
+# =============================
 # UI
-# -----------------------------
-st.title("📈 Sinyal Üreten Trading Uygulaması (ABD + BIST)")
-st.caption("Otomatik emir göndermez. 7 indikatör + kontrol noktaları ile AL/SAT/BEKLE üretir.")
+# =============================
+st.title("📈 FA→TA Trading Uygulaması (Temel Analiz Filtre + Teknik Timing)")
+st.caption("Önce fundamental ile evreni daralt, sonra teknik analizle giriş/çıkış zamanla. Otomatik emir göndermez.")
+
+if "screener_df" not in st.session_state:
+    st.session_state.screener_df = pd.DataFrame()
+if "selected_ticker" not in st.session_state:
+    st.session_state.selected_ticker = None
 
 with st.sidebar:
     st.header("Piyasa")
     market = st.selectbox("Market", ["USA", "BIST"], index=0)
 
-    st.header("Sembol")
-    preset_name = st.selectbox("Mod", list(PRESETS.keys()), index=1)
+    st.header("1) Fundamental Screener (opsiyonel)")
+    use_fa = st.checkbox("Fundamental filtreyi kullan", value=(market == "USA"))
+    fa_mode = st.selectbox("Fundamental Mod", ["Quality", "Value", "Growth"], index=0, disabled=(not use_fa or market != "USA"))
 
-    use_dropdown = st.checkbox("Hazır listeden seç", value=(market == "USA"))
+    # Fundamental thresholds
+    st.caption("Eşikler (USA için)")
+    roe = st.slider("ROE min", 0.0, 0.40, 0.15, 0.01, disabled=(not use_fa or market != "USA"))
+    op_margin = st.slider("Operating Margin min", 0.0, 0.40, 0.10, 0.01, disabled=(not use_fa or market != "USA"))
+    profit_margin = st.slider("Profit Margin min", 0.0, 0.40, 0.08, 0.01, disabled=(not use_fa or market != "USA"))
+    dte = st.slider("Debt/Equity max", 0.0, 3.0, 1.0, 0.05, disabled=(not use_fa or market != "USA"))
+    fpe = st.slider("Forward P/E max", 0.0, 60.0, 20.0, 1.0, disabled=(not use_fa or market != "USA"))
+    peg = st.slider("PEG max", 0.0, 5.0, 1.5, 0.1, disabled=(not use_fa or market != "USA"))
+    ps = st.slider("P/S max", 0.0, 30.0, 6.0, 0.5, disabled=(not use_fa or market != "USA"))
+    pb = st.slider("P/B max", 0.0, 30.0, 6.0, 0.5, disabled=(not use_fa or market != "USA"))
+    rev_g = st.slider("Revenue Growth min", 0.0, 0.50, 0.10, 0.01, disabled=(not use_fa or market != "USA"))
+    earn_g = st.slider("Earnings Growth min", 0.0, 0.50, 0.10, 0.01, disabled=(not use_fa or market != "USA"))
+    min_score = st.slider("Min Fundamental Score", 0, 100, 60, 1, disabled=(not use_fa or market != "USA"))
+    min_ok = st.slider("Min OK sayısı", 1, 5, 3, 1, disabled=(not use_fa or market != "USA"))
 
-    if use_dropdown:
-        if market == "USA":
-            raw_ticker = st.selectbox("Sembol", US_TICKERS, index=0)
-        else:
-            raw_ticker = st.selectbox("BIST örnekleri", BIST_EXAMPLES, index=0)
-            st.caption("BIST’te otomatik .IS eklenir. Örn: THYAO → THYAO.IS")
+    thresholds = {
+        "roe": roe,
+        "op_margin": op_margin,
+        "profit_margin": profit_margin,
+        "dte": dte,
+        "fpe": fpe,
+        "peg": peg,
+        "ps": ps,
+        "pb": pb,
+        "rev_g": rev_g,
+        "earn_g": earn_g,
+        "min_score": min_score,
+        "min_ok": min_ok,
+    }
+
+    st.subheader("Evrensel Liste")
+    if market == "USA":
+        universe_preset = st.selectbox("Universe", ["US Sample", "US Extended"], index=1)
+        universe = US_TICKERS if universe_preset == "US Sample" else sorted(list(set(US_TICKERS + US_EXT)))
+    else:
+        universe = BIST_EXAMPLES
+
+    if market == "USA":
+        extra = st.multiselect("Listeye ekle (opsiyonel)", options=sorted(list(set(universe + ["IBM", "INTC", "CSCO", "BA", "DIS", "PFE"]))), default=[])
+        universe = sorted(list(set(universe + extra)))
+
+    run_screener = st.button("🔎 Screener Çalıştır", type="secondary", disabled=(not use_fa or market != "USA"))
+
+    st.divider()
+
+    st.header("2) Teknik Analiz + Backtest")
+    preset_name = st.selectbox("Teknik Mod", list(PRESETS.keys()), index=1)
+
+    st.subheader("Sembol (TA)")
+    if st.session_state.selected_ticker:
+        st.caption(f"Screener seçimi: **{st.session_state.selected_ticker}**")
+        raw_ticker = st.text_input("Sembol", value=st.session_state.selected_ticker)
     else:
         if market == "USA":
             raw_ticker = st.text_input("Sembol (ör: AAPL, MSFT, SPY, QQQ)", value="AAPL")
@@ -354,16 +511,15 @@ with st.sidebar:
 
     ticker = normalize_ticker(raw_ticker, market)
 
-    st.header("Zaman Aralığı")
+    st.subheader("Zaman Aralığı")
     if market == "BIST":
         interval = st.selectbox("Interval", ["1d", "1h", "30m"], index=0, help="BIST’te 1d daha stabil.")
     else:
         interval = st.selectbox("Interval", ["1d", "1h", "30m"], index=0)
-
     period = st.selectbox("Periyot", ["6mo", "1y", "2y", "5y", "10y"], index=3)
 
     st.divider()
-    st.header("Strateji Parametreleri")
+    st.subheader("Teknik Parametreler")
     ema_fast = st.number_input("EMA Fast (trend içi)", min_value=5, max_value=100, value=50, step=1)
     ema_slow = st.number_input("EMA Slow (trend filtresi)", min_value=50, max_value=400, value=200, step=1)
     rsi_period = st.number_input("RSI Period", min_value=5, max_value=30, value=14, step=1)
@@ -372,7 +528,7 @@ with st.sidebar:
     atr_period = st.number_input("ATR Period", min_value=5, max_value=30, value=14, step=1)
     vol_sma = st.number_input("Volume SMA", min_value=5, max_value=60, value=20, step=1)
 
-    st.header("Market Filter")
+    st.subheader("Market Filter")
     use_spy_filter = st.checkbox(
         "SPY > EMA200 filtresi (sadece USA)",
         value=True,
@@ -380,24 +536,70 @@ with st.sidebar:
         help="Ayı piyasasında long sinyallerini azaltır. BIST için kapalıdır.",
     )
 
-    st.header("Sharpe / Sortino ayarları")
-    rf_annual = st.number_input(
-        "Risk-free (yıllık, örn 0.40 = %40)", min_value=0.0, max_value=2.0, value=0.0, step=0.01
-    )
-    mar_annual = st.number_input(
-        "MAR (yıllık, Sortino için; örn 0.20 = %20)", min_value=0.0, max_value=2.0, value=0.0, step=0.01
-    )
-
-    st.header("Risk / Backtest")
+    st.subheader("Risk / Backtest")
     initial_capital = st.number_input("Başlangıç Sermayesi", min_value=100.0, value=10000.0, step=500.0)
-    risk_per_trade = st.slider(
-        "Trade başı risk (equity %)", min_value=0.002, max_value=0.05, value=0.01, step=0.001
-    )
+    risk_per_trade = st.slider("Trade başı risk (equity %)", min_value=0.002, max_value=0.05, value=0.01, step=0.001)
     commission_bps = st.number_input("Komisyon (bps)", min_value=0.0, value=5.0, step=1.0)
     slippage_bps = st.number_input("Slippage (bps)", min_value=0.0, value=2.0, step=1.0)
+    risk_free_annual = st.number_input("Risk-Free (yıllık, ör: 0.05 = %5)", min_value=0.0, value=0.0, step=0.01)
 
-    run_btn = st.button("🚀 Çalıştır", type="primary")
+    run_btn = st.button("🚀 Teknik Analizi Çalıştır", type="primary")
 
+# -----------------------------
+# Fundamental screener action (USA only)
+# -----------------------------
+if run_screener and market == "USA" and use_fa:
+    with st.spinner("Fundamental veriler çekiliyor (yfinance)..."):
+        rows = []
+        for tk in universe:
+            f = fetch_fundamentals_usa(tk)
+            score, breakdown, passed = fundamental_score_row(f, fa_mode, thresholds)
+            f["FA_score"] = score
+            f["FA_pass"] = passed
+            f["FA_ok_count"] = sum(1 for v in breakdown.values() if v["ok"])
+            rows.append(f)
+
+        sdf = pd.DataFrame(rows)
+
+        # Sort: pass first, then score
+        sdf["FA_pass_int"] = sdf["FA_pass"].astype(int)
+        sdf = sdf.sort_values(["FA_pass_int", "FA_score"], ascending=[False, False]).drop(columns=["FA_pass_int"])
+
+        st.session_state.screener_df = sdf.copy()
+
+# -----------------------------
+# Screener display (if available)
+# -----------------------------
+if market == "USA" and use_fa and not st.session_state.screener_df.empty:
+    st.subheader("🧾 Fundamental Screener Sonuçları (USA)")
+    sdf = st.session_state.screener_df.copy()
+
+    show_cols = [
+        "ticker", "FA_pass", "FA_score", "FA_ok_count",
+        "sector", "industry",
+        "forwardPE", "pegRatio", "priceToSalesTrailing12Months", "priceToBook",
+        "returnOnEquity", "operatingMargins", "profitMargins", "debtToEquity",
+        "revenueGrowth", "earningsGrowth",
+        "marketCap"
+    ]
+    sdf_show = sdf[[c for c in show_cols if c in sdf.columns]].copy()
+
+    # nicer formatting in table
+    st.dataframe(sdf_show, use_container_width=True, height=320)
+
+    pass_list = sdf.loc[sdf["FA_pass"] == True, "ticker"].tolist()
+    if len(pass_list) == 0:
+        st.warning("Bu eşiklerle PASS çıkan hisse yok. Eşikleri gevşet veya mode değiştir.")
+    else:
+        st.success(f"PASS sayısı: {len(pass_list)}")
+        picked = st.selectbox("PASS listesinden hisse seç (TA’ya gönder)", pass_list, index=0)
+        if st.button("➡️ Seçimi Teknik Analize Aktar"):
+            st.session_state.selected_ticker = picked
+            st.rerun()
+
+# -----------------------------
+# Technical run
+# -----------------------------
 cfg = {
     "ema_fast": ema_fast,
     "ema_slow": ema_slow,
@@ -410,19 +612,8 @@ cfg = {
     "risk_per_trade": risk_per_trade,
     "commission_bps": commission_bps,
     "slippage_bps": slippage_bps,
-    "rf_annual": float(rf_annual),
-    "mar_annual": float(mar_annual),
 }
 cfg.update(PRESETS[preset_name])
-
-if not run_btn:
-    st.info("Soldan market/sembol/parametre seçip **Çalıştır**’a bas.")
-    st.stop()
-
-market_filter_ok = True
-if market == "USA" and use_spy_filter:
-    with st.spinner("SPY rejimi kontrol ediliyor..."):
-        market_filter_ok = get_spy_regime_ok()
 
 @st.cache_data(show_spinner=False)
 def load_data_cached(ticker: str, period: str, interval: str) -> pd.DataFrame:
@@ -432,6 +623,15 @@ def load_data_cached(ticker: str, period: str, interval: str) -> pd.DataFrame:
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [c[0] for c in df.columns]
     return df.dropna()
+
+if not run_btn:
+    st.info("Soldan ayarları yapıp **Teknik Analizi Çalıştır**’a bas. (İstersen önce fundamental screener kullan.)")
+    st.stop()
+
+market_filter_ok = True
+if market == "USA" and use_spy_filter:
+    with st.spinner("SPY rejimi kontrol ediliyor..."):
+        market_filter_ok = get_spy_regime_ok()
 
 with st.spinner(f"Veri indiriliyor: {ticker}"):
     df_raw = load_data_cached(ticker, period, interval)
@@ -465,10 +665,7 @@ c2.metric("Sembol", ticker)
 c3.metric("Son Fiyat", f"{latest['Close']:.2f}")
 c4.metric("Skor", f"{latest['SCORE']:.0f}/100")
 c5.metric("Sinyal", rec)
-if market == "USA":
-    c6.metric("SPY Rejim", "BULL ✅" if market_filter_ok else "BEAR ❌")
-else:
-    c6.metric("SPY Rejim", "N/A")
+c6.metric("SPY Rejim", "BULL ✅" if (market == "USA" and market_filter_ok) else ("BEAR ❌" if market == "USA" else "N/A"))
 
 st.subheader("✅ Kontrol Noktaları (Son Bar)")
 cp_cols = st.columns(3)
@@ -478,11 +675,7 @@ for i, (k, v) in enumerate(checkpoints.items()):
 
 st.subheader("📊 Fiyat + EMA + Bollinger + Sinyaller")
 fig = go.Figure()
-fig.add_trace(
-    go.Candlestick(
-        x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"
-    )
-)
+fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"))
 fig.add_trace(go.Scatter(x=df.index, y=df["EMA50"], name="EMA Fast"))
 fig.add_trace(go.Scatter(x=df.index, y=df["EMA200"], name="EMA Slow"))
 fig.add_trace(go.Scatter(x=df.index, y=df["BB_upper"], name="BB Upper", line=dict(dash="dot")))
@@ -491,106 +684,11 @@ fig.add_trace(go.Scatter(x=df.index, y=df["BB_lower"], name="BB Lower", line=dic
 
 entries = df[df["ENTRY"] == 1]
 exits = df[df["EXIT"] == 1]
-fig.add_trace(
-    go.Scatter(
-        x=entries.index,
-        y=entries["Close"],
-        mode="markers",
-        name="ENTRY",
-        marker=dict(symbol="triangle-up", size=10),
-    )
-)
-fig.add_trace(
-    go.Scatter(
-        x=exits.index,
-        y=exits["Close"],
-        mode="markers",
-        name="EXIT",
-        marker=dict(symbol="triangle-down", size=10),
-    )
-)
+fig.add_trace(go.Scatter(x=entries.index, y=entries["Close"], mode="markers", name="ENTRY", marker=dict(symbol="triangle-up", size=10)))
+fig.add_trace(go.Scatter(x=exits.index, y=exits["Close"], mode="markers", name="EXIT", marker=dict(symbol="triangle-down", size=10)))
 fig.update_layout(height=600, xaxis_rangeslider_visible=False)
 st.plotly_chart(fig, use_container_width=True)
 
 st.subheader("📉 RSI / MACD / ATR%")
-ind_cols = st.columns(3)
-
-with ind_cols[0]:
-    fig_rsi = go.Figure()
-    fig_rsi.add_trace(go.Scatter(x=df.index, y=df["RSI"], name="RSI"))
-    fig_rsi.add_hline(y=cfg["rsi_entry_level"])
-    fig_rsi.add_hline(y=cfg["rsi_exit_level"])
-    fig_rsi.update_layout(height=250)
-    st.plotly_chart(fig_rsi, use_container_width=True)
-
-with ind_cols[1]:
-    fig_macd = go.Figure()
-    fig_macd.add_trace(go.Scatter(x=df.index, y=df["MACD"], name="MACD"))
-    fig_macd.add_trace(go.Scatter(x=df.index, y=df["MACD_signal"], name="Signal"))
-    fig_macd.add_trace(go.Bar(x=df.index, y=df["MACD_hist"], name="Hist"))
-    fig_macd.update_layout(height=250)
-    st.plotly_chart(fig_macd, use_container_width=True)
-
-with ind_cols[2]:
-    atr_pct = (df["ATR"] / df["Close"]).replace([np.inf, -np.inf], np.nan)
-    fig_atr = go.Figure()
-    fig_atr.add_trace(go.Scatter(x=df.index, y=atr_pct, name="ATR%"))
-    fig_atr.add_hline(y=cfg["atr_pct_max"])
-    fig_atr.update_layout(height=250, yaxis_tickformat=".1%")
-    st.plotly_chart(fig_atr, use_container_width=True)
-
-st.subheader("🧪 Backtest (Long-only) + Benchmark (Buy&Hold)")
-eq, trades, metrics = backtest_long_only(df, cfg)
-bh = (df["Close"] / df["Close"].iloc[0]) * cfg["initial_capital"]
-
-# -----------------------------
-# Metrics row (expanded)
-# -----------------------------
-mcols = st.columns(10)
-mcols[0].metric("Strat Total", f"{metrics['Total Return']:.2%}")
-mcols[1].metric("BH Total", f"{(bh.iloc[-1] / bh.iloc[0] - 1):.2%}")
-mcols[2].metric("Ann Return", f"{metrics['Annualized Return']:.2%}")
-mcols[3].metric("Ann Vol", f"{metrics['Annualized Volatility']:.2%}")
-mcols[4].metric("Sharpe", f"{metrics['Sharpe (rf=0)']:.2f}")
-mcols[5].metric("Sortino", f"{metrics['Sortino (rf=0)']:.2f}")
-mcols[6].metric("Calmar", f"{metrics['Calmar']:.2f}")
-pf_val = metrics["Profit Factor"]
-mcols[7].metric("Profit Factor", "∞" if pf_val == np.inf else f"{pf_val:.2f}")
-mcols[8].metric("Max DD", f"{metrics['Max Drawdown']:.2%}")
-mcols[9].metric("Trades / Win", f"{metrics['Trades']} / {metrics['Win Rate']:.0%}")
-
-# -----------------------------
-# Dual-axis equity chart (Strategy left, Buy&Hold right)
-# -----------------------------
-fig_eq = make_subplots(specs=[[{"secondary_y": True}]])
-fig_eq.add_trace(go.Scatter(x=eq.index, y=eq.values, name="Strategy Equity"), secondary_y=False)
-fig_eq.add_trace(go.Scatter(x=bh.index, y=bh.values, name="Buy&Hold Equity"), secondary_y=True)
-
-fig_eq.update_yaxes(title_text="Strategy Equity", secondary_y=False)
-fig_eq.update_yaxes(title_text="Buy&Hold Equity", secondary_y=True)
-fig_eq.update_layout(height=360, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-st.plotly_chart(fig_eq, use_container_width=True)
-
-st.subheader("📑 İşlemler")
-if trades.empty:
-    st.write("Trade oluşmadı. Modu Agresif yap veya periyodu büyüt.")
-else:
-    show = trades.copy()
-    show["entry_date"] = show["entry_date"].astype(str)
-    show["exit_date"] = show["exit_date"].astype(str)
-    st.dataframe(
-        show[
-            [
-                "entry_date",
-                "entry_price",
-                "exit_date",
-                "exit_price",
-                "exit_reason",
-                "shares",
-                "pnl",
-                "return_%",
-                "holding_days",
-            ]
-        ],
-        use_container_width=True,
-    )
+ind_col
+::contentReference[oaicite:0]{index=0}
