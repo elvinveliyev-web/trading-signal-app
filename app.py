@@ -273,6 +273,8 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict):
     total_return = eq.iloc[-1] / eq.iloc[0] - 1 if len(eq) > 1 else 0.0
     ann_return = (1 + total_return) ** (252 / max(1, len(ret))) - 1 if len(ret) > 0 else 0.0
     ann_vol = float(ret.std() * np.sqrt(252)) if len(ret) > 1 else 0.0
+
+    # Sharpe rf=0: risk-free rate'i hesaba katmıyoruz (baseline)
     sharpe = float((ret.mean() * 252) / (ret.std() * np.sqrt(252))) if len(ret) > 1 and ret.std() > 0 else 0.0
     mdd = max_drawdown(eq)
 
@@ -436,10 +438,7 @@ c2.metric("Sembol", ticker)
 c3.metric("Son Fiyat", f"{latest['Close']:.2f}")
 c4.metric("Skor", f"{latest['SCORE']:.0f}/100")
 c5.metric("Sinyal", rec)
-if market == "USA":
-    c6.metric("SPY Rejim", "BULL ✅" if market_filter_ok else "BEAR ❌")
-else:
-    c6.metric("SPY Rejim", "N/A")
+c6.metric("SPY Rejim", "BULL ✅" if (market == "USA" and market_filter_ok) else ("BEAR ❌" if market == "USA" else "N/A"))
 
 st.subheader("✅ Kontrol Noktaları (Son Bar)")
 cp_cols = st.columns(3)
@@ -449,11 +448,7 @@ for i, (k, v) in enumerate(checkpoints.items()):
 
 st.subheader("📊 Fiyat + EMA + Bollinger + Sinyaller")
 fig = go.Figure()
-fig.add_trace(
-    go.Candlestick(
-        x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"
-    )
-)
+fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"))
 fig.add_trace(go.Scatter(x=df.index, y=df["EMA50"], name="EMA Fast"))
 fig.add_trace(go.Scatter(x=df.index, y=df["EMA200"], name="EMA Slow"))
 fig.add_trace(go.Scatter(x=df.index, y=df["BB_upper"], name="BB Upper", line=dict(dash="dot")))
@@ -462,24 +457,10 @@ fig.add_trace(go.Scatter(x=df.index, y=df["BB_lower"], name="BB Lower", line=dic
 
 entries = df[df["ENTRY"] == 1]
 exits = df[df["EXIT"] == 1]
-fig.add_trace(
-    go.Scatter(
-        x=entries.index,
-        y=entries["Close"],
-        mode="markers",
-        name="ENTRY",
-        marker=dict(symbol="triangle-up", size=10),
-    )
-)
-fig.add_trace(
-    go.Scatter(
-        x=exits.index,
-        y=exits["Close"],
-        mode="markers",
-        name="EXIT",
-        marker=dict(symbol="triangle-down", size=10),
-    )
-)
+fig.add_trace(go.Scatter(x=entries.index, y=entries["Close"], mode="markers", name="ENTRY",
+                         marker=dict(symbol="triangle-up", size=10)))
+fig.add_trace(go.Scatter(x=exits.index, y=exits["Close"], mode="markers", name="EXIT",
+                         marker=dict(symbol="triangle-down", size=10)))
 fig.update_layout(height=600, xaxis_rangeslider_visible=False)
 st.plotly_chart(fig, use_container_width=True)
 
@@ -506,5 +487,58 @@ with ind_cols[2]:
     atr_pct = (df["ATR"] / df["Close"]).replace([np.inf, -np.inf], np.nan)
     fig_atr = go.Figure()
     fig_atr.add_trace(go.Scatter(x=df.index, y=atr_pct, name="ATR%"))
-    fig_atr.add_hline(y=cfg[
-::contentReference[oaicite:0]{index=0}
+    fig_atr.add_hline(y=cfg["atr_pct_max"])
+    fig_atr.update_layout(height=250, yaxis_tickformat=".1%")
+    st.plotly_chart(fig_atr, use_container_width=True)
+
+st.subheader("🧪 Backtest (Long-only) + Benchmark (Buy&Hold)")
+eq, trades, metrics = backtest_long_only(df, cfg)
+bh = (df["Close"] / df["Close"].iloc[0]) * cfg["initial_capital"]
+
+# metrikler (Win Rate dahil)
+mcols = st.columns(8)
+mcols[0].metric("Strat Total", f"{metrics['Total Return']:.2%}")
+mcols[1].metric("BH Total", f"{(bh.iloc[-1] / bh.iloc[0] - 1):.2%}")
+mcols[2].metric("Ann Return", f"{metrics['Annualized Return']:.2%}")
+mcols[3].metric("Ann Vol", f"{metrics['Annualized Volatility']:.2%}")
+mcols[4].metric("Sharpe (rf=0)", f"{metrics['Sharpe (rf=0)']:.2f}")
+mcols[5].metric("Max DD", f"{metrics['Max Drawdown']:.2%}")
+mcols[6].metric("Trades", f"{metrics['Trades']}")
+mcols[7].metric("Win Rate", f"{metrics['Win Rate']:.2%}")
+
+# -----------------------------
+# Equity chart: TWO Y AXES
+# Strategy = left, Buy&Hold = right
+# -----------------------------
+fig_eq = make_subplots(specs=[[{"secondary_y": True}]])
+fig_eq.add_trace(go.Scatter(x=eq.index, y=eq.values, name="Strategy Equity"), secondary_y=False)
+fig_eq.add_trace(go.Scatter(x=bh.index, y=bh.values, name="Buy&Hold Equity"), secondary_y=True)
+
+fig_eq.update_layout(height=360, legend=dict(orientation="h"))
+fig_eq.update_yaxes(title_text="Strategy Equity", secondary_y=False)
+fig_eq.update_yaxes(title_text="Buy&Hold Equity", secondary_y=True)
+st.plotly_chart(fig_eq, use_container_width=True)
+
+st.subheader("📑 İşlemler")
+if trades.empty:
+    st.write("Trade oluşmadı. Modu Agresif yap veya periyodu büyüt.")
+else:
+    show = trades.copy()
+    show["entry_date"] = show["entry_date"].astype(str)
+    show["exit_date"] = show["exit_date"].astype(str)
+    st.dataframe(
+        show[
+            [
+                "entry_date",
+                "entry_price",
+                "exit_date",
+                "exit_price",
+                "exit_reason",
+                "shares",
+                "pnl",
+                "return_%",
+                "holding_days",
+            ]
+        ],
+        use_container_width=True,
+    )
