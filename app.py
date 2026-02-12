@@ -273,10 +273,16 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict):
     total_return = eq.iloc[-1] / eq.iloc[0] - 1 if len(eq) > 1 else 0.0
     ann_return = (1 + total_return) ** (252 / max(1, len(ret))) - 1 if len(ret) > 0 else 0.0
     ann_vol = float(ret.std() * np.sqrt(252)) if len(ret) > 1 else 0.0
-
-    # Sharpe rf=0: risk-free rate'i hesaba katmıyoruz (baseline)
     sharpe = float((ret.mean() * 252) / (ret.std() * np.sqrt(252))) if len(ret) > 1 and ret.std() > 0 else 0.0
     mdd = max_drawdown(eq)
+
+    # Sortino (rf=0, MAR=0)
+    downside = ret[ret < 0]
+    downside_dev = float(downside.std() * np.sqrt(252)) if len(downside) > 1 else 0.0
+    sortino = float((ret.mean() * 252) / downside_dev) if downside_dev > 0 else 0.0
+
+    # Calmar = annualized return / |max drawdown|
+    calmar = float(ann_return / abs(mdd)) if mdd < 0 else 0.0
 
     tdf = pd.DataFrame(trades)
     if not tdf.empty:
@@ -284,11 +290,21 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict):
         tdf["return_%"] = (tdf["pnl"] / tdf["equity_before"]) * 100
         tdf["holding_days"] = (pd.to_datetime(tdf["exit_date"]) - pd.to_datetime(tdf["entry_date"])).dt.days
 
+    # Profit Factor (trade-based)
+    profit_factor = 0.0
+    if not tdf.empty and "pnl" in tdf.columns:
+        gross_profit = float(tdf.loc[tdf["pnl"] > 0, "pnl"].sum())
+        gross_loss = float(-tdf.loc[tdf["pnl"] < 0, "pnl"].sum())
+        profit_factor = float(gross_profit / gross_loss) if gross_loss > 0 else (np.inf if gross_profit > 0 else 0.0)
+
     metrics = {
         "Total Return": total_return,
         "Annualized Return": ann_return,
         "Annualized Volatility": ann_vol,
         "Sharpe (rf=0)": sharpe,
+        "Sortino (rf=0)": sortino,
+        "Calmar": calmar,
+        "Profit Factor": profit_factor,
         "Max Drawdown": mdd,
         "Trades": int(len(tdf)) if not tdf.empty else 0,
         "Win Rate": float((tdf["pnl"] > 0).mean()) if not tdf.empty else 0.0,
@@ -307,6 +323,7 @@ PRESETS = {
     "Dengeli": {"rsi_entry_level": 50, "rsi_exit_level": 45, "atr_pct_max": 0.08, "atr_stop_mult": 3.0},
     "Agresif": {"rsi_entry_level": 48, "rsi_exit_level": 43, "atr_pct_max": 0.10, "atr_stop_mult": 2.5},
 }
+
 
 # -----------------------------
 # UI
@@ -363,6 +380,14 @@ with st.sidebar:
         help="Ayı piyasasında long sinyallerini azaltır. BIST için kapalıdır.",
     )
 
+    st.header("Sharpe / Sortino ayarları")
+    rf_annual = st.number_input(
+        "Risk-free (yıllık, örn 0.40 = %40)", min_value=0.0, max_value=2.0, value=0.0, step=0.01
+    )
+    mar_annual = st.number_input(
+        "MAR (yıllık, Sortino için; örn 0.20 = %20)", min_value=0.0, max_value=2.0, value=0.0, step=0.01
+    )
+
     st.header("Risk / Backtest")
     initial_capital = st.number_input("Başlangıç Sermayesi", min_value=100.0, value=10000.0, step=500.0)
     risk_per_trade = st.slider(
@@ -385,6 +410,8 @@ cfg = {
     "risk_per_trade": risk_per_trade,
     "commission_bps": commission_bps,
     "slippage_bps": slippage_bps,
+    "rf_annual": float(rf_annual),
+    "mar_annual": float(mar_annual),
 }
 cfg.update(PRESETS[preset_name])
 
@@ -438,7 +465,10 @@ c2.metric("Sembol", ticker)
 c3.metric("Son Fiyat", f"{latest['Close']:.2f}")
 c4.metric("Skor", f"{latest['SCORE']:.0f}/100")
 c5.metric("Sinyal", rec)
-c6.metric("SPY Rejim", "BULL ✅" if (market == "USA" and market_filter_ok) else ("BEAR ❌" if market == "USA" else "N/A"))
+if market == "USA":
+    c6.metric("SPY Rejim", "BULL ✅" if market_filter_ok else "BEAR ❌")
+else:
+    c6.metric("SPY Rejim", "N/A")
 
 st.subheader("✅ Kontrol Noktaları (Son Bar)")
 cp_cols = st.columns(3)
@@ -448,7 +478,11 @@ for i, (k, v) in enumerate(checkpoints.items()):
 
 st.subheader("📊 Fiyat + EMA + Bollinger + Sinyaller")
 fig = go.Figure()
-fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"))
+fig.add_trace(
+    go.Candlestick(
+        x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"
+    )
+)
 fig.add_trace(go.Scatter(x=df.index, y=df["EMA50"], name="EMA Fast"))
 fig.add_trace(go.Scatter(x=df.index, y=df["EMA200"], name="EMA Slow"))
 fig.add_trace(go.Scatter(x=df.index, y=df["BB_upper"], name="BB Upper", line=dict(dash="dot")))
@@ -457,10 +491,24 @@ fig.add_trace(go.Scatter(x=df.index, y=df["BB_lower"], name="BB Lower", line=dic
 
 entries = df[df["ENTRY"] == 1]
 exits = df[df["EXIT"] == 1]
-fig.add_trace(go.Scatter(x=entries.index, y=entries["Close"], mode="markers", name="ENTRY",
-                         marker=dict(symbol="triangle-up", size=10)))
-fig.add_trace(go.Scatter(x=exits.index, y=exits["Close"], mode="markers", name="EXIT",
-                         marker=dict(symbol="triangle-down", size=10)))
+fig.add_trace(
+    go.Scatter(
+        x=entries.index,
+        y=entries["Close"],
+        mode="markers",
+        name="ENTRY",
+        marker=dict(symbol="triangle-up", size=10),
+    )
+)
+fig.add_trace(
+    go.Scatter(
+        x=exits.index,
+        y=exits["Close"],
+        mode="markers",
+        name="EXIT",
+        marker=dict(symbol="triangle-down", size=10),
+    )
+)
 fig.update_layout(height=600, xaxis_rangeslider_visible=False)
 st.plotly_chart(fig, use_container_width=True)
 
@@ -495,28 +543,32 @@ st.subheader("🧪 Backtest (Long-only) + Benchmark (Buy&Hold)")
 eq, trades, metrics = backtest_long_only(df, cfg)
 bh = (df["Close"] / df["Close"].iloc[0]) * cfg["initial_capital"]
 
-# metrikler (Win Rate dahil)
-mcols = st.columns(8)
+# -----------------------------
+# Metrics row (expanded)
+# -----------------------------
+mcols = st.columns(10)
 mcols[0].metric("Strat Total", f"{metrics['Total Return']:.2%}")
 mcols[1].metric("BH Total", f"{(bh.iloc[-1] / bh.iloc[0] - 1):.2%}")
 mcols[2].metric("Ann Return", f"{metrics['Annualized Return']:.2%}")
 mcols[3].metric("Ann Vol", f"{metrics['Annualized Volatility']:.2%}")
-mcols[4].metric("Sharpe (rf=0)", f"{metrics['Sharpe (rf=0)']:.2f}")
-mcols[5].metric("Max DD", f"{metrics['Max Drawdown']:.2%}")
-mcols[6].metric("Trades", f"{metrics['Trades']}")
-mcols[7].metric("Win Rate", f"{metrics['Win Rate']:.2%}")
+mcols[4].metric("Sharpe", f"{metrics['Sharpe (rf=0)']:.2f}")
+mcols[5].metric("Sortino", f"{metrics['Sortino (rf=0)']:.2f}")
+mcols[6].metric("Calmar", f"{metrics['Calmar']:.2f}")
+pf_val = metrics["Profit Factor"]
+mcols[7].metric("Profit Factor", "∞" if pf_val == np.inf else f"{pf_val:.2f}")
+mcols[8].metric("Max DD", f"{metrics['Max Drawdown']:.2%}")
+mcols[9].metric("Trades / Win", f"{metrics['Trades']} / {metrics['Win Rate']:.0%}")
 
 # -----------------------------
-# Equity chart: TWO Y AXES
-# Strategy = left, Buy&Hold = right
+# Dual-axis equity chart (Strategy left, Buy&Hold right)
 # -----------------------------
 fig_eq = make_subplots(specs=[[{"secondary_y": True}]])
 fig_eq.add_trace(go.Scatter(x=eq.index, y=eq.values, name="Strategy Equity"), secondary_y=False)
 fig_eq.add_trace(go.Scatter(x=bh.index, y=bh.values, name="Buy&Hold Equity"), secondary_y=True)
 
-fig_eq.update_layout(height=360, legend=dict(orientation="h"))
 fig_eq.update_yaxes(title_text="Strategy Equity", secondary_y=False)
 fig_eq.update_yaxes(title_text="Buy&Hold Equity", secondary_y=True)
+fig_eq.update_layout(height=360, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
 st.plotly_chart(fig_eq, use_container_width=True)
 
 st.subheader("📑 İşlemler")
