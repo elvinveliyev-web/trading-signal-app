@@ -3,6 +3,7 @@ import pandas as pd
 import yfinance as yf
 import streamlit as st
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 st.set_page_config(page_title="Trading Signal App", layout="wide")
 
@@ -305,7 +306,6 @@ PRESETS = {
     "Agresif": {"rsi_entry_level": 48, "rsi_exit_level": 43, "atr_pct_max": 0.10, "atr_stop_mult": 2.5},
 }
 
-
 # -----------------------------
 # UI
 # -----------------------------
@@ -506,49 +506,5 @@ with ind_cols[2]:
     atr_pct = (df["ATR"] / df["Close"]).replace([np.inf, -np.inf], np.nan)
     fig_atr = go.Figure()
     fig_atr.add_trace(go.Scatter(x=df.index, y=atr_pct, name="ATR%"))
-    fig_atr.add_hline(y=cfg["atr_pct_max"])
-    fig_atr.update_layout(height=250, yaxis_tickformat=".1%")
-    st.plotly_chart(fig_atr, use_container_width=True)
-
-st.subheader("🧪 Backtest (Long-only) + Benchmark (Buy&Hold)")
-eq, trades, metrics = backtest_long_only(df, cfg)
-bh = (df["Close"] / df["Close"].iloc[0]) * cfg["initial_capital"]
-
-mcols = st.columns(7)
-mcols[0].metric("Strat Total", f"{metrics['Total Return']:.2%}")
-mcols[1].metric("BH Total", f"{(bh.iloc[-1] / bh.iloc[0] - 1):.2%}")
-mcols[2].metric("Ann Return", f"{metrics['Annualized Return']:.2%}")
-mcols[3].metric("Ann Vol", f"{metrics['Annualized Volatility']:.2%}")
-mcols[4].metric("Sharpe", f"{metrics['Sharpe (rf=0)']:.2f}")
-mcols[5].metric("Max DD", f"{metrics['Max Drawdown']:.2%}")
-mcols[6].metric("Trades", f"{metrics['Trades']}")
-
-fig_eq = go.Figure()
-fig_eq.add_trace(go.Scatter(x=eq.index, y=eq.values, name="Strategy Equity"))
-fig_eq.add_trace(go.Scatter(x=bh.index, y=bh.values, name="Buy&Hold Equity"))
-fig_eq.update_layout(height=320)
-st.plotly_chart(fig_eq, use_container_width=True)
-
-st.subheader("📑 İşlemler")
-if trades.empty:
-    st.write("Trade oluşmadı. Modu Agresif yap veya periyodu büyüt.")
-else:
-    show = trades.copy()
-    show["entry_date"] = show["entry_date"].astype(str)
-    show["exit_date"] = show["exit_date"].astype(str)
-    st.dataframe(
-        show[
-            [
-                "entry_date",
-                "entry_price",
-                "exit_date",
-                "exit_price",
-                "exit_reason",
-                "shares",
-                "pnl",
-                "return_%",
-                "holding_days",
-            ]
-        ],
-        use_container_width=True,
-    )
+    fig_atr.add_hline(y=cfg[
+::contentReference[oaicite:0]{index=0}
