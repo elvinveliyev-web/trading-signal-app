@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 import numpy as np
@@ -39,6 +40,45 @@ def _flatten_yf(df: pd.DataFrame) -> pd.DataFrame:
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [c[0] for c in df.columns]
     return df.dropna()
+
+# =============================
+# USA Universe: S&P500 + Nasdaq100 (auto)
+# =============================
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
+def fetch_sp500() -> list[str]:
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    tbl = pd.read_html(url)[0]
+    t = tbl["Symbol"].astype(str).str.strip().str.upper().tolist()
+    t = [x.replace(".", "-") for x in t]  # BRK.B -> BRK-B
+    return sorted(list(set(t)))
+
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
+def fetch_nasdaq100() -> list[str]:
+    url = "https://en.wikipedia.org/wiki/Nasdaq-100"
+    tables = pd.read_html(url)
+
+    cand, col = None, None
+    for tb in tables:
+        for c in tb.columns:
+            lc = str(c).lower()
+            if "ticker" in lc or "symbol" in lc:
+                cand, col = tb, c
+                break
+        if cand is not None:
+            break
+
+    if cand is None or col is None:
+        return []
+
+    t = cand[col].astype(str).str.strip().str.upper().tolist()
+    t = [x.replace(".", "-") for x in t]
+    t = [x for x in t if re.fullmatch(r"[A-Z0-9\-]{1,10}", x)]
+    return sorted(list(set(t)))
+
+def build_usa_universe(extra_list: list[str]) -> list[str]:
+    sp = fetch_sp500()
+    ndx = fetch_nasdaq100()
+    return sorted(list(set(sp + ndx + extra_list)))
 
 # =============================
 # Indicators
@@ -98,9 +138,7 @@ def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     df["EMA200"] = ema(df["Close"], int(cfg["ema_slow"]))
     df["RSI"] = rsi(df["Close"], int(cfg["rsi_period"]))
     df["MACD"], df["MACD_signal"], df["MACD_hist"] = macd(df["Close"], 12, 26, 9)
-    df["BB_mid"], df["BB_upper"], df["BB_lower"] = bollinger(
-        df["Close"], int(cfg["bb_period"]), float(cfg["bb_std"])
-    )
+    df["BB_mid"], df["BB_upper"], df["BB_lower"] = bollinger(df["Close"], int(cfg["bb_period"]), float(cfg["bb_std"]))
     df["ATR"] = atr(df["High"], df["Low"], df["Close"], int(cfg["atr_period"]))
     df["OBV"] = obv(df["Close"], df["Volume"])
     df["OBV_EMA"] = ema(df["OBV"], 21)
@@ -349,7 +387,14 @@ def fetch_fundamentals_usa(ticker: str) -> dict:
         "currentPrice": safe_float(info.get("currentPrice")),
         "sector": info.get("sector", ""),
         "industry": info.get("industry", ""),
+        "data_ok": True,
     }
+
+    # basit veri sağlık kontrolü
+    must = ["forwardPE", "pegRatio", "priceToSalesTrailing12Months", "priceToBook", "returnOnEquity", "operatingMargins", "profitMargins", "debtToEquity"]
+    okcount = sum(pd.notna(out.get(k)) for k in must)
+    if okcount < 3:
+        out["data_ok"] = False
 
     dte = out["debtToEquity"]
     if pd.notna(dte) and dte > 10:
@@ -399,22 +444,12 @@ def local_levels(close: pd.Series, lookback: int = 120):
     s = close.tail(lookback).dropna()
     if len(s) < 10:
         return []
-    # simple pivot-like levels: quantiles + recent swing highs/lows
     levels = list(np.quantile(s.values, [0.1, 0.25, 0.5, 0.75, 0.9]))
-    # add last 20d high/low
     levels += [float(s.tail(20).max()), float(s.tail(20).min())]
-    # de-duplicate
     levels = sorted(list(set([round(float(x), 2) for x in levels if np.isfinite(x)])))
     return levels
 
 def target_price_band(df: pd.DataFrame):
-    """
-    Basit ama tutarlı bir bant:
-    - Base: last close
-    - Bull: last close + k*ATR (k=1.5..3)
-    - Bear: last close - k*ATR
-    - Ayrıca yakın direnç/ destek seviyeleri (local levels) ile hizalar
-    """
     last = df.iloc[-1]
     px = float(last["Close"])
     atrv = float(last["ATR"]) if pd.notna(last.get("ATR", np.nan)) else np.nan
@@ -427,28 +462,18 @@ def target_price_band(df: pd.DataFrame):
     bear2 = px - 3.0 * atrv
 
     lv = local_levels(df["Close"])
-    # nearest resistance above / support below
     above = [x for x in lv if x >= px]
     below = [x for x in lv if x <= px]
     r1 = min(above) if above else None
     s1 = max(below) if below else None
 
-    return {
-        "base": px,
-        "bull": (bull1, bull2, r1),
-        "bear": (bear1, bear2, s1),
-        "levels": lv,
-    }
+    return {"base": px, "bull": (bull1, bull2, r1), "bear": (bear1, bear2, s1), "levels": lv}
 
 # =============================
 # Live price helper
 # =============================
 @st.cache_data(ttl=30, show_spinner=False)
 def get_live_price(ticker: str) -> dict:
-    """
-    yfinance daily OHLC ile live/last farklı olabilir.
-    fast_info çoğu sembolde daha güncel "last_price" verir.
-    """
     out = {"last_price": np.nan, "currency": "", "exchange": "", "asof": ""}
     try:
         t = yf.Ticker(ticker)
@@ -471,14 +496,9 @@ def df_snapshot_for_llm(df: pd.DataFrame, n: int = 140) -> dict:
     cols = [c for c in use_cols if c in df.columns]
     tail = df[cols].tail(n).copy()
     tail.index = tail.index.astype(str)
-    return {
-        "cols": cols,
-        "n": int(len(tail)),
-        "last_index": str(tail.index[-1]) if len(tail) else None,
-        "rows": tail.to_dict(orient="records"),
-    }
+    return {"cols": cols, "n": int(len(tail)), "last_index": str(tail.index[-1]) if len(tail) else None, "rows": tail.to_dict(orient="records")}
 
-def build_ai_context(ticker: str, market: str, latest: pd.Series, checkpoints: dict, metrics: dict, tp: dict, live: dict) -> dict:
+def build_ai_context(ticker: str, market: str, latest: pd.Series, checkpoints: dict, metrics: dict, tp: dict, live: dict, df: pd.DataFrame) -> dict:
     return {
         "ticker": ticker,
         "market": market,
@@ -505,22 +525,13 @@ def build_ai_context(ticker: str, market: str, latest: pd.Series, checkpoints: d
     }
 
 def call_openai(messages, model: str, temperature: float = 0.2):
-    # OpenAI Responses API (recommended) – see OpenAI docs. :contentReference[oaicite:0]{index=0}
     client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY", ""))
-    resp = client.responses.create(
-        model=model,
-        input=messages,
-        temperature=temperature,
-    )
+    resp = client.responses.create(model=model, input=messages, temperature=temperature)
     return resp.output_text
 
 # =============================
 # Presets
 # =============================
-US_TICKERS = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "NFLX", "JPM", "XOM", "SPY", "QQQ"]
-US_EXT = ["AVGO", "AMD", "ORCL", "COST", "KO", "PEP", "JNJ", "PG", "V", "MA", "UNH", "HD", "CRM", "ADBE"]
-BIST_EXAMPLES = ["THYAO", "ASELS", "KCHOL", "SISE", "BIMAS"]
-
 PRESETS = {
     "Defansif": {"rsi_entry_level": 52, "rsi_exit_level": 46, "atr_pct_max": 0.06, "atr_stop_mult": 3.5},
     "Dengeli": {"rsi_entry_level": 50, "rsi_exit_level": 45, "atr_pct_max": 0.08, "atr_stop_mult": 3.0},
@@ -538,9 +549,7 @@ if "screener_df" not in st.session_state:
 if "selected_ticker" not in st.session_state:
     st.session_state.selected_ticker = None
 if "ai_messages" not in st.session_state:
-    st.session_state.ai_messages = [
-        {"role": "assistant", "content": "Sorunu yaz: örn. “Riskler ne, hedef bant ne, hangi şartta çıkarım?”"}
-    ]
+    st.session_state.ai_messages = [{"role": "assistant", "content": "Sorunu yaz: örn. “Riskler ne, hedef bant ne, hangi şartta çıkarım?”"}]
 
 with st.sidebar:
     st.header("Piyasa")
@@ -564,35 +573,14 @@ with st.sidebar:
     min_score = st.slider("Min Fundamental Score", 0, 100, 60, 1, disabled=(not use_fa or market != "USA"))
     min_ok = st.slider("Min OK sayısı", 1, 5, 3, 1, disabled=(not use_fa or market != "USA"))
 
-    thresholds = {
-        "roe": roe,
-        "op_margin": op_margin,
-        "profit_margin": profit_margin,
-        "dte": dte,
-        "fpe": fpe,
-        "peg": peg,
-        "ps": ps,
-        "pb": pb,
-        "rev_g": rev_g,
-        "earn_g": earn_g,
-        "min_score": min_score,
-        "min_ok": min_ok,
-    }
+    thresholds = {"roe": roe, "op_margin": op_margin, "profit_margin": profit_margin, "dte": dte, "fpe": fpe, "peg": peg, "ps": ps, "pb": pb,
+                  "rev_g": rev_g, "earn_g": earn_g, "min_score": min_score, "min_ok": min_ok}
 
-    st.subheader("Evrensel Liste")
-    if market == "USA":
-        universe_preset = st.selectbox("Universe", ["US Sample", "US Extended"], index=1)
-        universe = US_TICKERS if universe_preset == "US Sample" else sorted(list(set(US_TICKERS + US_EXT)))
-        extra = st.text_area(
-            "Listeye ekle (virgülle): örn NVCR, AMD, MU",
-            value="",
-            help="NVCR gibi semboller burada yoksa eklemen gerekir (varsayılan evrende olmayabilir).",
-        ).strip()
-        if extra:
-            add = [x.strip().upper() for x in extra.split(",") if x.strip()]
-            universe = sorted(list(set(universe + add)))
-    else:
-        universe = BIST_EXAMPLES
+    st.subheader("Universe (USA)")
+    extra = st.text_area("Ek sembol ekle (virgülle): örn APA, MU", value="").strip()
+    extra_list = [x.strip().upper().replace(".", "-") for x in extra.split(",") if x.strip()]
+    universe = build_usa_universe(extra_list)
+    st.caption(f"S&P500 + Nasdaq100 toplam: **{len(universe)}** sembol")
 
     run_screener = st.button("🔎 Screener Çalıştır", type="secondary", disabled=(not use_fa or market != "USA"))
 
@@ -606,7 +594,6 @@ with st.sidebar:
         raw_ticker = st.text_input("Sembol", value=st.session_state.selected_ticker)
     else:
         raw_ticker = st.text_input("Sembol (ör: AAPL, NVCR, SPY) / BIST: THYAO", value="AAPL" if market == "USA" else "THYAO")
-
     ticker = normalize_ticker(raw_ticker, market)
 
     st.subheader("Zaman Aralığı")
@@ -624,11 +611,7 @@ with st.sidebar:
     vol_sma = st.number_input("Volume SMA", min_value=5, max_value=60, value=20, step=1)
 
     st.subheader("Market Filter")
-    use_spy_filter = st.checkbox(
-        "SPY > EMA200 filtresi (sadece USA)",
-        value=True,
-        disabled=(market != "USA"),
-    )
+    use_spy_filter = st.checkbox("SPY > EMA200 filtresi (sadece USA)", value=True, disabled=(market != "USA"))
 
     st.subheader("Risk / Backtest")
     initial_capital = st.number_input("Başlangıç Sermayesi", min_value=100.0, value=10000.0, step=500.0)
@@ -653,11 +636,23 @@ if run_screener and market == "USA" and use_fa:
         rows = []
         for tk in universe:
             f = fetch_fundamentals_usa(tk)
+
+            # Yahoo veri gelmediyse PASS hesaplamak anlamsız; kullanıcı görsün
+            if not f.get("data_ok", True):
+                f["FA_score"] = 0.0
+                f["FA_pass"] = False
+                f["FA_ok_count"] = 0
+                rows.append(f)
+                time.sleep(0.4)   # rate-limit azalt
+                continue
+
             score, breakdown, passed = fundamental_score_row(f, fa_mode, thresholds)
             f["FA_score"] = score
             f["FA_pass"] = passed
             f["FA_ok_count"] = sum(1 for v in breakdown.values() if v["ok"])
             rows.append(f)
+
+            time.sleep(0.4)  # Streamlit Cloud için önemli (0.2–0.6 arası iyi)
 
         sdf = pd.DataFrame(rows)
         sdf["FA_pass_int"] = sdf["FA_pass"].astype(int)
@@ -677,7 +672,7 @@ if market == "USA" and use_fa and not st.session_state.screener_df.empty:
         "forwardPE", "pegRatio", "priceToSalesTrailing12Months", "priceToBook",
         "returnOnEquity", "operatingMargins", "profitMargins", "debtToEquity",
         "revenueGrowth", "earningsGrowth",
-        "marketCap"
+        "marketCap", "data_ok"
     ]
     sdf_show = sdf[[c for c in show_cols if c in sdf.columns]].copy()
     st.dataframe(sdf_show, use_container_width=True, height=320)
@@ -742,11 +737,9 @@ df = build_features(df_raw, cfg)
 df, checkpoints = signal_with_checkpoints(df, cfg, market_filter_ok=market_filter_ok)
 latest = df.iloc[-1]
 
-# Live price vs last close
 live = get_live_price(ticker)
 live_price = live.get("last_price", np.nan)
 
-# Recommendation
 if int(latest["ENTRY"]) == 1:
     rec = "AL"
 elif int(latest["EXIT"]) == 1:
@@ -754,13 +747,9 @@ elif int(latest["EXIT"]) == 1:
 else:
     rec = "İZLE (Güçlü Trend)" if latest["SCORE"] >= 80 else ("BEKLE (Orta)" if latest["SCORE"] >= 60 else "UZAK DUR")
 
-# Backtest
 eq, tdf, metrics = backtest_long_only(df, cfg, risk_free_annual=risk_free_annual)
-
-# Target price band
 tp = target_price_band(df)
 
-# Top metrics
 c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
 c1.metric("Market", market)
 c2.metric("Sembol", ticker)
@@ -772,14 +761,12 @@ c7.metric("SPY Rejim", "BULL ✅" if (market == "USA" and market_filter_ok) else
 
 st.caption("Not: Daily Close (1d bar) ile Live/Last farklı olabilir. Piyasa açıkken 1d bar kapanışı güncellenmez.")
 
-# Checkpoints
 st.subheader("✅ Kontrol Noktaları (Son Bar)")
 cp_cols = st.columns(3)
 for i, (k, v) in enumerate(checkpoints.items()):
     with cp_cols[i % 3]:
         st.write(("🟢 " if v else "🔴 ") + k)
 
-# Target band display
 st.subheader("🎯 Hedef Fiyat Bandı (Senaryo)")
 bcol1, bcol2, bcol3 = st.columns(3)
 bcol1.metric("Base", f"{tp['base']:.2f}")
@@ -802,7 +789,6 @@ else:
 with st.expander("Seviye listesi (yaklaşık)", expanded=False):
     st.write(tp["levels"])
 
-# Price chart
 st.subheader("📊 Fiyat + EMA + Bollinger + Sinyaller")
 fig = go.Figure()
 fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"))
@@ -819,7 +805,6 @@ fig.add_trace(go.Scatter(x=exits.index, y=exits["Close"], mode="markers", name="
 fig.update_layout(height=600, xaxis_rangeslider_visible=False)
 st.plotly_chart(fig, use_container_width=True)
 
-# Indicators
 st.subheader("📉 RSI / MACD / ATR%")
 colA, colB, colC = st.columns(3)
 
@@ -842,7 +827,6 @@ fig_atr.add_trace(go.Scatter(x=df.index, y=df["ATR_PCT"] * 100, name="ATR%"))
 fig_atr.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), yaxis_title="%")
 colC.plotly_chart(fig_atr, use_container_width=True)
 
-# Backtest metrics
 st.subheader("🧪 Backtest Özeti (Long-only)")
 m1, m2, m3, m4, m5, m6 = st.columns(6)
 m1.metric("Total Return", f"{metrics['Total Return']*100:.1f}%")
@@ -888,6 +872,7 @@ if user_q and ai_on:
         metrics=metrics,
         tp=tp,
         live=live,
+        df=df,
     )
 
     system = (
