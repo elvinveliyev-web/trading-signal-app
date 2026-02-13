@@ -487,8 +487,21 @@ def build_ai_context(ticker: str, market: str, latest: pd.Series, checkpoints: d
         ],
     }
 
+# SADECE AI'YI BOZMADAN GÜÇLENDİRME:
+# - Secrets'te yoksa kullanıcı yan menüden girebilsin
+# - Yanlış key olursa düzgün hata dönsün
+def _get_openai_key() -> str:
+    k = st.secrets.get("OPENAI_API_KEY", "").strip()
+    if not k:
+        k = st.session_state.get("OPENAI_API_KEY_UI", "").strip()
+    return k
+
 def call_openai(messages, model: str, temperature: float = 0.2):
-    client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY", ""))
+    api_key = _get_openai_key()
+    if not api_key:
+        raise ValueError('OPENAI_API_KEY eksik. Streamlit Secrets’e ekle: OPENAI_API_KEY="sk-..." (veya yan menüden gir).')
+
+    client = OpenAI(api_key=api_key)
     resp = client.responses.create(
         model=model,
         input=messages,
@@ -499,8 +512,6 @@ def call_openai(messages, model: str, temperature: float = 0.2):
 # =============================
 # Presets
 # =============================
-US_TICKERS = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "NFLX", "JPM", "XOM", "SPY", "QQQ"]
-US_EXT = ["AVGO", "AMD", "ORCL", "COST", "KO", "PEP", "JNJ", "PG", "V", "MA", "UNH", "HD", "CRM", "ADBE"]
 BIST_EXAMPLES = ["THYAO", "ASELS", "KCHOL", "SISE", "BIMAS"]
 
 PRESETS = {
@@ -523,7 +534,8 @@ def get_sp500_tickers() -> list[str]:
         dfu = tables[0]
         return sorted(dfu["Symbol"].astype(str).str.upper().tolist())
     except Exception:
-        return sorted(list(set(US_TICKERS + US_EXT)))
+        # fail-open: boş kalmasın
+        return ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "NFLX", "JPM", "XOM", "SPY", "QQQ"]
 
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
 def get_nasdaq100_tickers() -> list[str]:
@@ -554,9 +566,10 @@ if "ai_messages" not in st.session_state:
     st.session_state.ai_messages = [
         {"role": "assistant", "content": "Sorunu yaz: örn. “Riskler ne, hedef bant ne, hangi şartta çıkarım?”"}
     ]
-# FIX: TA çalıştı mı? (chat yazınca rerun olsa bile geri atmasın)
 if "ta_ran" not in st.session_state:
     st.session_state.ta_ran = False
+if "OPENAI_API_KEY_UI" not in st.session_state:
+    st.session_state.OPENAI_API_KEY_UI = ""
 
 with st.sidebar:
     st.header("Piyasa")
@@ -595,7 +608,6 @@ with st.sidebar:
         "min_ok": min_ok,
     }
 
-    # Universe: USA => S&P 500 + Nasdaq-100 (no UI), BIST => examples
     if market == "USA":
         sp = get_sp500_tickers()
         ndx = get_nasdaq100_tickers()
@@ -651,6 +663,14 @@ with st.sidebar:
     ai_on = st.checkbox("AI Chat aktif", value=True)
     ai_model = st.text_input("Model", value="gpt-4.1-mini", help="OpenAI model adı")
     ai_temp = st.slider("Temperature", 0.0, 1.0, 0.2, 0.05)
+
+    # ÇALIŞAN KISMA DOKUNMADAN: secrets yoksa buradan girilebilir
+    if not st.secrets.get("OPENAI_API_KEY", "").strip():
+        st.session_state.OPENAI_API_KEY_UI = st.text_input(
+            "OpenAI API Key (Secrets yoksa buraya gir)",
+            value=st.session_state.OPENAI_API_KEY_UI,
+            type="password",
+        )
 
     run_btn = st.button("🚀 Teknik Analizi Çalıştır", type="primary")
     if run_btn:
@@ -726,7 +746,6 @@ def load_data_cached(ticker: str, period: str, interval: str) -> pd.DataFrame:
     df = yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False)
     return _flatten_yf(df)
 
-# FIX: chat yazınca run_btn False olacağı için geri atmasın
 if not st.session_state.ta_ran:
     st.info("Soldan ayarları yapıp **Teknik Analizi Çalıştır**’a bas.")
     st.stop()
@@ -845,70 +864,5 @@ fig_atr.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), yaxis_tit
 colC.plotly_chart(fig_atr, use_container_width=True)
 
 st.subheader("🧪 Backtest Özeti (Long-only)")
-m1, m2, m3, m4, m5, m6 = st.columns(6)
-m1.metric("Total Return", f"{metrics['Total Return']*100:.1f}%")
-m2.metric("Ann Return", f"{metrics['Annualized Return']*100:.1f}%")
-m3.metric("Sharpe", f"{metrics['Sharpe']:.2f}")
-m4.metric("Max DD", f"{metrics['Max Drawdown']*100:.1f}%")
-m5.metric("Trades", f"{metrics['Trades']}")
-m6.metric("Win Rate", f"{metrics['Win Rate']*100:.1f}%")
-
-with st.expander("Trade listesi", expanded=False):
-    st.dataframe(tdf, use_container_width=True, height=240)
-
-with st.expander("Equity curve", expanded=False):
-    fig_eq = go.Figure()
-    fig_eq.add_trace(go.Scatter(x=eq.index, y=eq.values, name="Equity"))
-    fig_eq.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig_eq, use_container_width=True)
-
-st.subheader("🤖 AI Analiz (Chat)")
-
-if not st.secrets.get("OPENAI_API_KEY", ""):
-    st.warning("OPENAI_API_KEY bulunamadı. Streamlit Cloud > Secrets'e ekle: OPENAI_API_KEY=...")
-    ai_on = False
-
-for m in st.session_state.ai_messages:
-    with st.chat_message(m["role"]):
-        st.markdown(m["content"])
-
-user_q = st.chat_input("Sorunu yaz... (ör: 'Hedef bant ne, riskler neler?')")
-if user_q and ai_on:
-    st.session_state.ai_messages.append({"role": "user", "content": user_q})
-    with st.chat_message("user"):
-        st.markdown(user_q)
-
-    ctx = build_ai_context(
-        ticker=ticker,
-        market=market,
-        latest=latest,
-        checkpoints=checkpoints,
-        metrics=metrics,
-        tp=tp,
-        live=live,
-    )
-
-    system = (
-        "Sen bir yatırım analizi asistanısın. YATIRIM TAVSİYESİ VERME.\n"
-        "Kullanıcıya: (1) kısa özet, (2) riskler, (3) hedef fiyat bandı (bull/base/bear), "
-        "(4) invalidation/çıkış koşulları, (5) takip edilecek 3 metrik ver.\n"
-        "Veri: aşağıdaki JSON bağlamıdır. Uydurma haber/finansal veri üretme."
-    )
-
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": "Bağlam JSON:\n" + json.dumps(ctx, ensure_ascii=False)},
-        {"role": "user", "content": user_q},
-    ]
-
-    with st.chat_message("assistant"):
-        with st.spinner("AI analiz ediyor..."):
-            try:
-                ans = call_openai(messages, model=ai_model, temperature=ai_temp)
-            except Exception as e:
-                ans = f"AI çağrısı hata verdi: {e}"
-        st.markdown(ans)
-
-    st.session_state.ai_messages.append({"role": "assistant", "content": ans})
-
-st.caption("Uyarı: Bu uygulama yatırım tavsiyesi değildir. Eğitim/analiz amaçlıdır.")
+m1, m2, m3, m4, m5, m6 =
+::contentReference[oaicite:0]{index=0}
