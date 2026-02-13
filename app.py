@@ -99,9 +99,7 @@ def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     df["EMA200"] = ema(df["Close"], int(cfg["ema_slow"]))
     df["RSI"] = rsi(df["Close"], int(cfg["rsi_period"]))
     df["MACD"], df["MACD_signal"], df["MACD_hist"] = macd(df["Close"], 12, 26, 9)
-    df["BB_mid"], df["BB_upper"], df["BB_lower"] = bollinger(
-        df["Close"], int(cfg["bb_period"]), float(cfg["bb_std"])
-    )
+    df["BB_mid"], df["BB_upper"], df["BB_lower"] = bollinger(df["Close"], int(cfg["bb_period"]), float(cfg["bb_std"]))
     df["ATR"] = atr(df["High"], df["Low"], df["Close"], int(cfg["atr_period"]))
     df["OBV"] = obv(df["Close"], df["Volume"])
     df["OBV_EMA"] = ema(df["OBV"], 21)
@@ -174,14 +172,11 @@ def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool)
     cp = {
         "Market Filter OK": bool(market_filter_ok),
         "Liquidity (Volume > VolSMA)": bool(last["Volume"] > last["VOL_SMA"]) if pd.notna(last["VOL_SMA"]) else False,
-        "Trend (Close>EMA200 & EMA50>EMA200)": bool((last["Close"] > last["EMA200"]) and (last["EMA50"] > last["EMA200"]))
-        if pd.notna(last["EMA200"]) else False,
+        "Trend (Close>EMA200 & EMA50>EMA200)": bool((last["Close"] > last["EMA200"]) and (last["EMA50"] > last["EMA200"])) if pd.notna(last["EMA200"]) else False,
         f"RSI > {cfg['rsi_entry_level']}": bool(last["RSI"] > cfg["rsi_entry_level"]) if pd.notna(last["RSI"]) else False,
         "MACD Hist > 0": bool(last["MACD_hist"] > 0) if pd.notna(last["MACD_hist"]) else False,
-        f"ATR% < {cfg['atr_pct_max']:.2%}": bool((last["ATR"] / last["Close"]) < cfg["atr_pct_max"])
-        if pd.notna(last["ATR"]) and pd.notna(last["Close"]) else False,
-        "Bollinger (Close>BB_mid or Breakout)": bool((last["Close"] > last["BB_mid"]) or (last["Close"] > last["BB_upper"]))
-        if pd.notna(last["BB_mid"]) else False,
+        f"ATR% < {cfg['atr_pct_max']:.2%}": bool((last["ATR"] / last["Close"]) < cfg["atr_pct_max"]) if pd.notna(last["ATR"]) and pd.notna(last["Close"]) else False,
+        "Bollinger (Close>BB_mid or Breakout)": bool((last["Close"] > last["BB_mid"]) or (last["Close"] > last["BB_upper"])) if pd.notna(last["BB_mid"]) else False,
         "OBV > OBV_EMA": bool(last["OBV"] > last["OBV_EMA"]) if pd.notna(last["OBV_EMA"]) else False,
     }
     return df, cp
@@ -420,12 +415,7 @@ def target_price_band(df: pd.DataFrame):
     r1 = min(above) if above else None
     s1 = max(below) if below else None
 
-    return {
-        "base": px,
-        "bull": (bull1, bull2, r1),
-        "bear": (bear1, bear2, s1),
-        "levels": lv,
-    }
+    return {"base": px, "bull": (bull1, bull2, r1), "bear": (bear1, bear2, s1), "levels": lv}
 
 # =============================
 # Live price helper
@@ -449,8 +439,10 @@ def get_live_price(ticker: str) -> dict:
 # LLM helpers
 # =============================
 def df_snapshot_for_llm(df: pd.DataFrame, n: int = 140) -> dict:
-    use_cols = ["Open","High","Low","Close","Volume","EMA50","EMA200","RSI","MACD","MACD_signal","MACD_hist",
-                "BB_mid","BB_upper","BB_lower","ATR","ATR_PCT","VOL_SMA","SCORE","ENTRY","EXIT"]
+    use_cols = [
+        "Open","High","Low","Close","Volume","EMA50","EMA200","RSI","MACD","MACD_signal","MACD_hist",
+        "BB_mid","BB_upper","BB_lower","ATR","ATR_PCT","VOL_SMA","SCORE","ENTRY","EXIT"
+    ]
     cols = [c for c in use_cols if c in df.columns]
     tail = df[cols].tail(n).copy()
     tail.index = tail.index.astype(str)
@@ -461,7 +453,7 @@ def df_snapshot_for_llm(df: pd.DataFrame, n: int = 140) -> dict:
         "rows": tail.to_dict(orient="records"),
     }
 
-def build_ai_context(ticker: str, market: str, latest: pd.Series, checkpoints: dict, metrics: dict, tp: dict, live: dict) -> dict:
+def build_ai_context(df: pd.DataFrame, ticker: str, market: str, latest: pd.Series, checkpoints: dict, metrics: dict, tp: dict, live: dict) -> dict:
     return {
         "ticker": ticker,
         "market": market,
@@ -487,20 +479,44 @@ def build_ai_context(ticker: str, market: str, latest: pd.Series, checkpoints: d
         ],
     }
 
-# ✅ SADECE GPT HATASI DÜZELTMESİ: (openai new sdk) + eksik key kontrolü
+def _get_openai_key() -> str:
+    k = st.secrets.get("OPENAI_API_KEY", "").strip()
+    if not k:
+        k = st.session_state.get("OPENAI_API_KEY_UI", "").strip()
+    return k
+
+# ✅ OPENAI KEY + 401 hatası için daha net hata + UI fallback
 def call_openai(messages, model: str, temperature: float = 0.2):
-    api_key = st.secrets.get("OPENAI_API_KEY", "").strip()
+    api_key = _get_openai_key()
     if not api_key:
-        raise ValueError("OPENAI_API_KEY bulunamadı. Streamlit Cloud > Secrets'e OPENAI_API_KEY=... ekleyin.")
+        raise ValueError(
+            "OPENAI_API_KEY yok.\n"
+            "Streamlit Cloud > App settings > Secrets'e şu formatla ekle:\n"
+            'OPENAI_API_KEY="sk-..."\n'
+            "Not: Çift tırnak şart değil ama baş/son boşluk olmasın."
+        )
 
     client = OpenAI(api_key=api_key)
-
-    resp = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=temperature,
-    )
-    return resp.choices[0].message.content
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+        )
+        return resp.choices[0].message.content
+    except Exception as e:
+        msg = str(e)
+        if "401" in msg or "invalid_api_key" in msg or "Incorrect API key" in msg:
+            raise ValueError(
+                "401 - Incorrect API key.\n"
+                "Secrets'e koyduğun anahtar hatalı/eksik olabilir.\n"
+                "Kontrol listesi:\n"
+                "- Secrets'te OPENAI_API_KEY değeri tam mı? (sk- ile başlar)\n"
+                "- Başında/sonunda boşluk, satır sonu, tırnak fazlalığı yok mu?\n"
+                "- Eski/iptal edilmiş anahtar mı?\n"
+                "- Streamlit Cloud'da secrets güncelledikten sonra uygulamayı 'Rerun/Restart' ettin mi?\n"
+            ) from e
+        raise
 
 # =============================
 # Presets
@@ -639,11 +655,7 @@ with st.sidebar:
     vol_sma = st.number_input("Volume SMA", min_value=5, max_value=60, value=20, step=1)
 
     st.subheader("Market Filter")
-    use_spy_filter = st.checkbox(
-        "SPY > EMA200 filtresi (sadece USA)",
-        value=True,
-        disabled=(market != "USA"),
-    )
+    use_spy_filter = st.checkbox("SPY > EMA200 filtresi (sadece USA)", value=True, disabled=(market != "USA"))
 
     st.subheader("Risk / Backtest")
     initial_capital = st.number_input("Başlangıç Sermayesi", min_value=100.0, value=10000.0, step=500.0)
@@ -657,6 +669,11 @@ with st.sidebar:
     ai_on = st.checkbox("AI Chat aktif", value=True)
     ai_model = st.text_input("Model", value="gpt-4.1-mini", help="OpenAI model adı")
     ai_temp = st.slider("Temperature", 0.0, 1.0, 0.2, 0.05)
+
+    # ✅ Secrets yoksa kullanıcı buradan girebilsin
+    if not st.secrets.get("OPENAI_API_KEY", "").strip():
+        st.caption("Secrets'te key yoksa buradan girebilirsin (deploy için Secrets önerilir).")
+        st.session_state["OPENAI_API_KEY_UI"] = st.text_input("OPENAI_API_KEY", type="password")
 
     run_btn = st.button("🚀 Teknik Analizi Çalıştır", type="primary")
     if run_btn:
@@ -870,8 +887,9 @@ with st.expander("Equity curve", expanded=False):
 
 st.subheader("🤖 AI Analiz (Chat)")
 
-if not st.secrets.get("OPENAI_API_KEY", ""):
-    st.warning("OPENAI_API_KEY bulunamadı. Streamlit Cloud > Secrets'e ekle: OPENAI_API_KEY=...")
+# Key yoksa chat'i kapat (ama sidebar input varsa çalışır)
+if not _get_openai_key():
+    st.warning("OPENAI_API_KEY bulunamadı (Secrets veya sidebar input). AI Chat kapatıldı.")
     ai_on = False
 
 for m in st.session_state.ai_messages:
@@ -885,6 +903,7 @@ if user_q and ai_on:
         st.markdown(user_q)
 
     ctx = build_ai_context(
+        df=df,
         ticker=ticker,
         market=market,
         latest=latest,
