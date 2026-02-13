@@ -172,11 +172,14 @@ def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool)
     cp = {
         "Market Filter OK": bool(market_filter_ok),
         "Liquidity (Volume > VolSMA)": bool(last["Volume"] > last["VOL_SMA"]) if pd.notna(last["VOL_SMA"]) else False,
-        "Trend (Close>EMA200 & EMA50>EMA200)": bool((last["Close"] > last["EMA200"]) and (last["EMA50"] > last["EMA200"])) if pd.notna(last["EMA200"]) else False,
+        "Trend (Close>EMA200 & EMA50>EMA200)": bool((last["Close"] > last["EMA200"]) and (last["EMA50"] > last["EMA200"]))
+        if pd.notna(last["EMA200"]) else False,
         f"RSI > {cfg['rsi_entry_level']}": bool(last["RSI"] > cfg["rsi_entry_level"]) if pd.notna(last["RSI"]) else False,
         "MACD Hist > 0": bool(last["MACD_hist"] > 0) if pd.notna(last["MACD_hist"]) else False,
-        f"ATR% < {cfg['atr_pct_max']:.2%}": bool((last["ATR"] / last["Close"]) < cfg["atr_pct_max"]) if pd.notna(last["ATR"]) and pd.notna(last["Close"]) else False,
-        "Bollinger (Close>BB_mid or Breakout)": bool((last["Close"] > last["BB_mid"]) or (last["Close"] > last["BB_upper"])) if pd.notna(last["BB_mid"]) else False,
+        f"ATR% < {cfg['atr_pct_max']:.2%}": bool((last["ATR"] / last["Close"]) < cfg["atr_pct_max"])
+        if pd.notna(last["ATR"]) and pd.notna(last["Close"]) else False,
+        "Bollinger (Close>BB_mid or Breakout)": bool((last["Close"] > last["BB_mid"]) or (last["Close"] > last["BB_upper"]))
+        if pd.notna(last["BB_mid"]) else False,
         "OBV > OBV_EMA": bool(last["OBV"] > last["OBV_EMA"]) if pd.notna(last["OBV_EMA"]) else False,
     }
     return df, cp
@@ -415,7 +418,12 @@ def target_price_band(df: pd.DataFrame):
     r1 = min(above) if above else None
     s1 = max(below) if below else None
 
-    return {"base": px, "bull": (bull1, bull2, r1), "bear": (bear1, bear2, s1), "levels": lv}
+    return {
+        "base": px,
+        "bull": (bull1, bull2, r1),
+        "bear": (bear1, bear2, s1),
+        "levels": lv,
+    }
 
 # =============================
 # Live price helper
@@ -439,10 +447,8 @@ def get_live_price(ticker: str) -> dict:
 # LLM helpers
 # =============================
 def df_snapshot_for_llm(df: pd.DataFrame, n: int = 140) -> dict:
-    use_cols = [
-        "Open","High","Low","Close","Volume","EMA50","EMA200","RSI","MACD","MACD_signal","MACD_hist",
-        "BB_mid","BB_upper","BB_lower","ATR","ATR_PCT","VOL_SMA","SCORE","ENTRY","EXIT"
-    ]
+    use_cols = ["Open","High","Low","Close","Volume","EMA50","EMA200","RSI","MACD","MACD_signal","MACD_hist",
+                "BB_mid","BB_upper","BB_lower","ATR","ATR_PCT","VOL_SMA","SCORE","ENTRY","EXIT"]
     cols = [c for c in use_cols if c in df.columns]
     tail = df[cols].tail(n).copy()
     tail.index = tail.index.astype(str)
@@ -453,7 +459,7 @@ def df_snapshot_for_llm(df: pd.DataFrame, n: int = 140) -> dict:
         "rows": tail.to_dict(orient="records"),
     }
 
-def build_ai_context(df: pd.DataFrame, ticker: str, market: str, latest: pd.Series, checkpoints: dict, metrics: dict, tp: dict, live: dict) -> dict:
+def build_ai_context(ticker: str, market: str, latest: pd.Series, checkpoints: dict, metrics: dict, tp: dict, live: dict) -> dict:
     return {
         "ticker": ticker,
         "market": market,
@@ -479,44 +485,14 @@ def build_ai_context(df: pd.DataFrame, ticker: str, market: str, latest: pd.Seri
         ],
     }
 
-def _get_openai_key() -> str:
-    k = st.secrets.get("OPENAI_API_KEY", "").strip()
-    if not k:
-        k = st.session_state.get("OPENAI_API_KEY_UI", "").strip()
-    return k
-
-# ✅ OPENAI KEY + 401 hatası için daha net hata + UI fallback
+# ✅ OpenAI çağrısı + secrets kontrolü
 def call_openai(messages, model: str, temperature: float = 0.2):
-    api_key = _get_openai_key()
+    api_key = st.secrets.get("OPENAI_API_KEY", "").strip()
     if not api_key:
-        raise ValueError(
-            "OPENAI_API_KEY yok.\n"
-            "Streamlit Cloud > App settings > Secrets'e şu formatla ekle:\n"
-            'OPENAI_API_KEY="sk-..."\n'
-            "Not: Çift tırnak şart değil ama baş/son boşluk olmasın."
-        )
-
+        raise ValueError("OPENAI_API_KEY bulunamadı. Streamlit Cloud > Secrets'e OPENAI_API_KEY=... ekleyin.")
     client = OpenAI(api_key=api_key)
-    try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-        )
-        return resp.choices[0].message.content
-    except Exception as e:
-        msg = str(e)
-        if "401" in msg or "invalid_api_key" in msg or "Incorrect API key" in msg:
-            raise ValueError(
-                "401 - Incorrect API key.\n"
-                "Secrets'e koyduğun anahtar hatalı/eksik olabilir.\n"
-                "Kontrol listesi:\n"
-                "- Secrets'te OPENAI_API_KEY değeri tam mı? (sk- ile başlar)\n"
-                "- Başında/sonunda boşluk, satır sonu, tırnak fazlalığı yok mu?\n"
-                "- Eski/iptal edilmiş anahtar mı?\n"
-                "- Streamlit Cloud'da secrets güncelledikten sonra uygulamayı 'Rerun/Restart' ettin mi?\n"
-            ) from e
-        raise
+    resp = client.chat.completions.create(model=model, messages=messages, temperature=temperature)
+    return resp.choices[0].message.content
 
 # =============================
 # Presets
@@ -532,7 +508,7 @@ PRESETS = {
 }
 
 # =============================
-# Universe helpers: S&P 500 + Nasdaq-100 (requests + user-agent, fail-open)
+# Universe helpers: S&P 500 + Nasdaq-100
 # =============================
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
 def get_sp500_tickers() -> list[str]:
@@ -576,7 +552,6 @@ if "ai_messages" not in st.session_state:
     st.session_state.ai_messages = [
         {"role": "assistant", "content": "Sorunu yaz: örn. “Riskler ne, hedef bant ne, hangi şartta çıkarım?”"}
     ]
-# FIX: TA çalıştı mı? (chat yazınca rerun olsa bile geri atmasın)
 if "ta_ran" not in st.session_state:
     st.session_state.ta_ran = False
 
@@ -617,7 +592,6 @@ with st.sidebar:
         "min_ok": min_ok,
     }
 
-    # Universe: USA => S&P 500 + Nasdaq-100 (no UI), BIST => examples
     if market == "USA":
         sp = get_sp500_tickers()
         ndx = get_nasdaq100_tickers()
@@ -669,11 +643,6 @@ with st.sidebar:
     ai_on = st.checkbox("AI Chat aktif", value=True)
     ai_model = st.text_input("Model", value="gpt-4.1-mini", help="OpenAI model adı")
     ai_temp = st.slider("Temperature", 0.0, 1.0, 0.2, 0.05)
-
-    # ✅ Secrets yoksa kullanıcı buradan girebilsin
-    if not st.secrets.get("OPENAI_API_KEY", "").strip():
-        st.caption("Secrets'te key yoksa buradan girebilirsin (deploy için Secrets önerilir).")
-        st.session_state["OPENAI_API_KEY_UI"] = st.text_input("OPENAI_API_KEY", type="password")
 
     run_btn = st.button("🚀 Teknik Analizi Çalıştır", type="primary")
     if run_btn:
@@ -749,7 +718,6 @@ def load_data_cached(ticker: str, period: str, interval: str) -> pd.DataFrame:
     df = yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False)
     return _flatten_yf(df)
 
-# FIX: chat yazınca run_btn False olacağı için geri atmasın
 if not st.session_state.ta_ran:
     st.info("Soldan ayarları yapıp **Teknik Analizi Çalıştır**’a bas.")
     st.stop()
@@ -790,6 +758,52 @@ else:
 eq, tdf, metrics = backtest_long_only(df, cfg, risk_free_annual=risk_free_annual)
 tp = target_price_band(df)
 
+# -----------------------------
+# RR (en doğru: backtest ile aynı stop mantığı = ATR stop)
+# -----------------------------
+def rr_from_atr_stop(latest_row: pd.Series, tp_dict: dict, cfg: dict):
+    """
+    Eğitim amaçlı RR:
+      - Stop: Close - atr_stop_mult * ATR
+      - Risk: Close - Stop
+      - Hedef: Bull1 (bull band'in ilk değeri)
+      - Reward: Bull1 - Close
+      - RR = Reward / Risk
+    """
+    close = float(latest_row["Close"])
+    atrv = float(latest_row.get("ATR", np.nan)) if pd.notna(latest_row.get("ATR", np.nan)) else np.nan
+    if not np.isfinite(atrv) or atrv <= 0:
+        return {"rr": None, "stop": None, "risk": None, "reward": None}
+
+    stop = close - float(cfg["atr_stop_mult"]) * atrv
+    risk = close - stop
+
+    if not tp_dict.get("bull"):
+        return {"rr": None, "stop": stop, "risk": risk, "reward": None}
+
+    bull1, _bull2, _r1 = tp_dict["bull"]
+    reward = float(bull1) - close
+
+    if risk <= 0 or reward <= 0:
+        return {"rr": None, "stop": stop, "risk": risk, "reward": reward}
+
+    return {"rr": float(reward / risk), "stop": float(stop), "risk": float(risk), "reward": float(reward)}
+
+rr_info = rr_from_atr_stop(latest, tp, cfg)
+
+def fmt_rr(rr):
+    if rr is None or (isinstance(rr, float) and (not np.isfinite(rr))):
+        return "N/A"
+    return f"1:{rr:.2f}"
+
+def pct_dist(level: float, base: float):
+    if level is None or not np.isfinite(level) or base == 0:
+        return None
+    return (level / base - 1.0) * 100.0
+
+# -----------------------------
+# Summary metrics (FIXED c7)
+# -----------------------------
 c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
 c1.metric("Market", market)
 c2.metric("Sembol", ticker)
@@ -797,7 +811,10 @@ c3.metric("Daily Close (bar)", f"{latest['Close']:.2f}")
 c4.metric("Live/Last", f"{live_price:.2f}" if np.isfinite(live_price) else "N/A")
 c5.metric("Skor", f"{latest['SCORE']:.0f}/100")
 c6.metric("Sinyal", rec)
-c7.metric("SPY Rejim", "BULL ✅" if (market == "USA" and market_filter_ok) else ("BEAR ❌" if market == "USA" else "N/A"))
+c7.metric(
+    "SPY Rejim",
+    "BULL ✅" if (market == "USA" and market_filter_ok) else ("BEAR ❌" if market == "USA" else "N/A")
+)
 
 st.caption("Not: Daily Close (1d bar) ile Live/Last farklı olabilir. Piyasa açıkken 1d bar kapanışı güncellenmez.")
 
@@ -807,28 +824,58 @@ for i, (k, v) in enumerate(checkpoints.items()):
     with cp_cols[i % 3]:
         st.write(("🟢 " if v else "🔴 ") + k)
 
+# -----------------------------
+# Target band + RR: Bear Band yanında "1:X"
+# -----------------------------
 st.subheader("🎯 Hedef Fiyat Bandı (Senaryo)")
+
+base_px = float(tp["base"])
+rr_str = fmt_rr(rr_info.get("rr"))
+
 bcol1, bcol2, bcol3 = st.columns(3)
-bcol1.metric("Base", f"{tp['base']:.2f}")
+bcol1.metric("Base", f"{base_px:.2f}")
+
 if tp["bull"]:
     bull1, bull2, r1 = tp["bull"]
     bcol2.metric("Bull Band", f"{bull1:.2f} → {bull2:.2f}")
     if r1:
-        bcol2.caption(f"Yakın direnç: {r1:.2f}")
+        bcol2.caption(f"Yakın direnç: {r1:.2f} ({pct_dist(r1, base_px):.2f}%)")
 else:
     bcol2.metric("Bull Band", "N/A")
 
 if tp["bear"]:
     bear1, bear2, s1 = tp["bear"]
-    bcol3.metric("Bear Band", f"{bear1:.2f} → {bear2:.2f}")
+    # İstenen: Bear Band yanında tek RR rakamı (1:X)
+    bcol3.metric("Bear Band", f"{bear1:.2f} → {bear2:.2f}  |  RR {rr_str}")
     if s1:
-        bcol3.caption(f"Yakın destek: {s1:.2f}")
+        bcol3.caption(f"Yakın destek: {s1:.2f} ({pct_dist(s1, base_px):.2f}%)")
 else:
-    bcol3.metric("Bear Band", "N/A")
+    bcol3.metric("Bear Band", f"N/A  |  RR {rr_str}")
 
-with st.expander("Seviye listesi (yaklaşık)", expanded=False):
-    st.write(tp["levels"])
+# -----------------------------
+# Levels: İşaretleme + fiyata uzaklık %
+# -----------------------------
+def render_levels_marked(levels: list[float], base: float, s1, r1):
+    lines = []
+    for lv in levels:
+        tag = ""
+        if s1 is not None and np.isfinite(s1) and abs(lv - float(s1)) < 1e-9:
+            tag = " 🟩 Yakın Destek"
+        if r1 is not None and np.isfinite(r1) and abs(lv - float(r1)) < 1e-9:
+            tag = " 🟥 Yakın Direnç"
+        dist = pct_dist(lv, base)
+        dist_txt = f"{dist:+.2f}%" if dist is not None else ""
+        lines.append(f"- {lv:.2f}  ({dist_txt}){tag}")
+    return "\n".join(lines) if lines else "_Seviye yok_"
 
+with st.expander("Seviye listesi (yaklaşık) — işaretli + fiyata uzaklık %", expanded=False):
+    r1 = tp["bull"][2] if tp.get("bull") else None
+    s1 = tp["bear"][2] if tp.get("bear") else None
+    st.markdown(render_levels_marked(tp["levels"], base_px, s1, r1))
+
+# -----------------------------
+# Charts
+# -----------------------------
 st.subheader("📊 Fiyat + EMA + Bollinger + Sinyaller")
 fig = go.Figure()
 fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"))
@@ -885,55 +932,11 @@ with st.expander("Equity curve", expanded=False):
     fig_eq.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
     st.plotly_chart(fig_eq, use_container_width=True)
 
+# -----------------------------
+# AI Chat
+# -----------------------------
 st.subheader("🤖 AI Analiz (Chat)")
 
-# Key yoksa chat'i kapat (ama sidebar input varsa çalışır)
-if not _get_openai_key():
-    st.warning("OPENAI_API_KEY bulunamadı (Secrets veya sidebar input). AI Chat kapatıldı.")
-    ai_on = False
-
-for m in st.session_state.ai_messages:
-    with st.chat_message(m["role"]):
-        st.markdown(m["content"])
-
-user_q = st.chat_input("Sorunu yaz... (ör: 'Hedef bant ne, riskler neler?')")
-if user_q and ai_on:
-    st.session_state.ai_messages.append({"role": "user", "content": user_q})
-    with st.chat_message("user"):
-        st.markdown(user_q)
-
-    ctx = build_ai_context(
-        df=df,
-        ticker=ticker,
-        market=market,
-        latest=latest,
-        checkpoints=checkpoints,
-        metrics=metrics,
-        tp=tp,
-        live=live,
-    )
-
-    system = (
-        "Sen bir yatırım analizi asistanısın. YATIRIM TAVSİYESİ VERME.\n"
-        "Kullanıcıya: (1) kısa özet, (2) riskler, (3) hedef fiyat bandı (bull/base/bear), "
-        "(4) invalidation/çıkış koşulları, (5) takip edilecek 3 metrik ver.\n"
-        "Veri: aşağıdaki JSON bağlamıdır. Uydurma haber/finansal veri üretme."
-    )
-
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": "Bağlam JSON:\n" + json.dumps(ctx, ensure_ascii=False)},
-        {"role": "user", "content": user_q},
-    ]
-
-    with st.chat_message("assistant"):
-        with st.spinner("AI analiz ediyor..."):
-            try:
-                ans = call_openai(messages, model=ai_model, temperature=ai_temp)
-            except Exception as e:
-                ans = f"AI çağrısı hata verdi: {e}"
-        st.markdown(ans)
-
-    st.session_state.ai_messages.append({"role": "assistant", "content": ans})
-
-st.caption("Uyarı: Bu uygulama yatırım tavsiyesi değildir. Eğitim/analiz amaçlıdır.")
+if not st.secrets.get("OPENAI_API_KEY", ""):
+    st.warning("OPENAI_API_KEY bulunamadı. Streamlit Cloud > Secrets'e ekl
+::contentReference[oaicite:0]{index=0}
