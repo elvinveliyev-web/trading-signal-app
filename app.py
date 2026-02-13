@@ -99,9 +99,7 @@ def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     df["EMA200"] = ema(df["Close"], int(cfg["ema_slow"]))
     df["RSI"] = rsi(df["Close"], int(cfg["rsi_period"]))
     df["MACD"], df["MACD_signal"], df["MACD_hist"] = macd(df["Close"], 12, 26, 9)
-    df["BB_mid"], df["BB_upper"], df["BB_lower"] = bollinger(
-        df["Close"], int(cfg["bb_period"]), float(cfg["bb_std"])
-    )
+    df["BB_mid"], df["BB_upper"], df["BB_lower"] = bollinger(df["Close"], int(cfg["bb_period"]), float(cfg["bb_std"]))
     df["ATR"] = atr(df["High"], df["Low"], df["Close"], int(cfg["atr_period"]))
     df["OBV"] = obv(df["Close"], df["Volume"])
     df["OBV_EMA"] = ema(df["OBV"], 21)
@@ -449,8 +447,10 @@ def get_live_price(ticker: str) -> dict:
 # LLM helpers
 # =============================
 def df_snapshot_for_llm(df: pd.DataFrame, n: int = 140) -> dict:
-    use_cols = ["Open","High","Low","Close","Volume","EMA50","EMA200","RSI","MACD","MACD_signal","MACD_hist",
-                "BB_mid","BB_upper","BB_lower","ATR","ATR_PCT","VOL_SMA","SCORE","ENTRY","EXIT"]
+    use_cols = [
+        "Open","High","Low","Close","Volume","EMA50","EMA200","RSI","MACD","MACD_signal","MACD_hist",
+        "BB_mid","BB_upper","BB_lower","ATR","ATR_PCT","VOL_SMA","SCORE","ENTRY","EXIT"
+    ]
     cols = [c for c in use_cols if c in df.columns]
     tail = df[cols].tail(n).copy()
     tail.index = tail.index.astype(str)
@@ -461,7 +461,6 @@ def df_snapshot_for_llm(df: pd.DataFrame, n: int = 140) -> dict:
         "rows": tail.to_dict(orient="records"),
     }
 
-# FIX (GPT hatası): df'yi fonksiyona parametre olarak al
 def build_ai_context(df: pd.DataFrame, ticker: str, market: str, latest: pd.Series, checkpoints: dict, metrics: dict, tp: dict, live: dict) -> dict:
     return {
         "ticker": ticker,
@@ -488,8 +487,18 @@ def build_ai_context(df: pd.DataFrame, ticker: str, market: str, latest: pd.Seri
         ],
     }
 
+# Secrets'te yoksa kullanıcı yan menüden girebilsin + düzgün hata
+def _get_openai_key() -> str:
+    k = st.secrets.get("OPENAI_API_KEY", "").strip()
+    if not k:
+        k = st.session_state.get("OPENAI_API_KEY_UI", "").strip()
+    return k
+
 def call_openai(messages, model: str, temperature: float = 0.2):
-    client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY", ""))
+    api_key = _get_openai_key()
+    if not api_key:
+        raise ValueError('OPENAI_API_KEY eksik. Streamlit Secrets’e ekle: OPENAI_API_KEY="sk-..." (veya yan menüden gir).')
+    client = OpenAI(api_key=api_key)
     resp = client.responses.create(
         model=model,
         input=messages,
@@ -500,8 +509,6 @@ def call_openai(messages, model: str, temperature: float = 0.2):
 # =============================
 # Presets
 # =============================
-US_TICKERS = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "NFLX", "JPM", "XOM", "SPY", "QQQ"]
-US_EXT = ["AVGO", "AMD", "ORCL", "COST", "KO", "PEP", "JNJ", "PG", "V", "MA", "UNH", "HD", "CRM", "ADBE"]
 BIST_EXAMPLES = ["THYAO", "ASELS", "KCHOL", "SISE", "BIMAS"]
 
 PRESETS = {
@@ -524,57 +531,5 @@ def get_sp500_tickers() -> list[str]:
         dfu = tables[0]
         return sorted(dfu["Symbol"].astype(str).str.upper().tolist())
     except Exception:
-        return sorted(list(set(US_TICKERS + US_EXT)))
-
-@st.cache_data(ttl=24 * 3600, show_spinner=False)
-def get_nasdaq100_tickers() -> list[str]:
-    url = "https://en.wikipedia.org/wiki/Nasdaq-100"
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; StreamlitApp/1.0; +https://streamlit.io)"}
-    try:
-        r = requests.get(url, headers=headers, timeout=20)
-        r.raise_for_status()
-        tables = pd.read_html(r.text)
-        for t in tables:
-            if "Ticker" in t.columns:
-                return sorted(t["Ticker"].astype(str).str.upper().tolist())
-        return []
-    except Exception:
-        return []
-
-# =============================
-# UI
-# =============================
-st.title("📈 FA→TA Trading Uygulaması + 🤖 AI Analiz")
-st.caption("Önce fundamental ile evreni daralt, sonra teknik analizle giriş/çıkış zamanla. Otomatik emir göndermez.")
-
-if "screener_df" not in st.session_state:
-    st.session_state.screener_df = pd.DataFrame()
-if "selected_ticker" not in st.session_state:
-    st.session_state.selected_ticker = None
-if "ai_messages" not in st.session_state:
-    st.session_state.ai_messages = [
-        {"role": "assistant", "content": "Sorunu yaz: örn. “Riskler ne, hedef bant ne, hangi şartta çıkarım?”"}
-    ]
-# FIX: TA çalıştı mı? (chat yazınca rerun olsa bile geri atmasın)
-if "ta_ran" not in st.session_state:
-    st.session_state.ta_ran = False
-
-with st.sidebar:
-    st.header("Piyasa")
-    market = st.selectbox("Market", ["USA", "BIST"], index=0)
-
-    st.header("1) Fundamental Screener (opsiyonel)")
-    use_fa = st.checkbox("Fundamental filtreyi kullan", value=(market == "USA"))
-    fa_mode = st.selectbox("Fundamental Mod", ["Quality", "Value", "Growth"], index=0, disabled=(not use_fa or market != "USA"))
-
-    st.caption("Eşikler (USA için)")
-    roe = st.slider("ROE min", 0.0, 0.40, 0.15, 0.01, disabled=(not use_fa or market != "USA"))
-    op_margin = st.slider("Operating Margin min", 0.0, 0.40, 0.10, 0.01, disabled=(not use_fa or market != "USA"))
-    profit_margin = st.slider("Profit Margin min", 0.0, 0.40, 0.08, 0.01, disabled=(not use_fa or market != "USA"))
-    dte = st.slider("Debt/Equity max", 0.0, 3.0, 1.0, 0.05, disabled=(not use_fa or market != "USA"))
-    fpe = st.slider("Forward P/E max", 0.0, 60.0, 20.0, 1.0, disabled=(not use_fa or market != "USA"))
-    peg = st.slider("PEG max", 0.0, 5.0, 1.5, 0.1, disabled=(not use_fa or market != "USA"))
-    ps = st.slider("P/S max", 0.0, 30.0, 6.0, 0.5, disabled=(not use_fa or market != "USA"))
-    pb = st.slider("P/B max", 0.0, 30.0, 6.0, 0.5, disabled=(not use_fa or market != "USA"))
-    rev_g = st.slider("Revenue Growth min", 0.0, 0.50, 0.10, 0.01, disabled=(not use_fa or market !
+        return ["A
 ::contentReference[oaicite:0]{index=0}
