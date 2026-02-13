@@ -1,6 +1,5 @@
 import os
 import json
-import time
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -8,7 +7,6 @@ import streamlit as st
 import plotly.graph_objects as go
 import requests
 
-# OpenAI (new SDK)
 from openai import OpenAI
 
 st.set_page_config(page_title="FA→TA Trading + AI", layout="wide")
@@ -72,7 +70,10 @@ def bollinger(close: pd.Series, period: int = 20, std_mult: float = 2.0):
 
 def true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
     prev_close = close.shift(1)
-    tr = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+    tr = pd.concat(
+        [(high - low), (high - prev_close).abs(), (low - prev_close).abs()],
+        axis=1
+    ).max(axis=1)
     return tr
 
 def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
@@ -173,13 +174,13 @@ def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool)
         "Market Filter OK": bool(market_filter_ok),
         "Liquidity (Volume > VolSMA)": bool(last["Volume"] > last["VOL_SMA"]) if pd.notna(last["VOL_SMA"]) else False,
         "Trend (Close>EMA200 & EMA50>EMA200)": bool((last["Close"] > last["EMA200"]) and (last["EMA50"] > last["EMA200"]))
-        if pd.notna(last["EMA200"]) else False,
+            if pd.notna(last["EMA200"]) else False,
         f"RSI > {cfg['rsi_entry_level']}": bool(last["RSI"] > cfg["rsi_entry_level"]) if pd.notna(last["RSI"]) else False,
         "MACD Hist > 0": bool(last["MACD_hist"] > 0) if pd.notna(last["MACD_hist"]) else False,
         f"ATR% < {cfg['atr_pct_max']:.2%}": bool((last["ATR"] / last["Close"]) < cfg["atr_pct_max"])
-        if pd.notna(last["ATR"]) and pd.notna(last["Close"]) else False,
+            if pd.notna(last["ATR"]) and pd.notna(last["Close"]) else False,
         "Bollinger (Close>BB_mid or Breakout)": bool((last["Close"] > last["BB_mid"]) or (last["Close"] > last["BB_upper"]))
-        if pd.notna(last["BB_mid"]) else False,
+            if pd.notna(last["BB_mid"]) else False,
         "OBV > OBV_EMA": bool(last["OBV"] > last["OBV_EMA"]) if pd.notna(last["OBV_EMA"]) else False,
     }
     return df, cp
@@ -210,10 +211,12 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
         position_value = shares * price * (1 - slippage)
         equity = cash + position_value
 
+        # trailing ATR stop
         if shares > 0 and pd.notna(row["ATR"]) and row["ATR"] > 0:
             new_stop = price - cfg["atr_stop_mult"] * float(row["ATR"])
             stop = max(stop, new_stop) if pd.notna(stop) else new_stop
 
+        # exit
         if shares > 0:
             stop_hit = pd.notna(stop) and (price <= stop)
             if exit_sig.iloc[i] == 1 or stop_hit:
@@ -230,6 +233,7 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
                 shares = 0.0
                 stop = np.nan
 
+        # entry
         position_value = shares * price * (1 - slippage)
         equity = cash + position_value
 
@@ -261,8 +265,7 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
                         }
                     )
 
-        position_value = shares * price * (1 - slippage)
-        equity = cash + position_value
+        equity = cash + shares * price * (1 - slippage)
         equity_curve.append((date, equity))
 
     eq = pd.Series([v for _, v in equity_curve], index=[d for d, _ in equity_curve], name="equity").astype(float)
@@ -287,7 +290,7 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
 
     tdf = pd.DataFrame(trades)
     if not tdf.empty:
-        tdf["pnl"] = tdf["pnl"].astype(float)
+        tdf["pnl"] = pd.to_numeric(tdf["pnl"], errors="coerce")
         tdf["return_%"] = (tdf["pnl"] / tdf["equity_before"]) * 100
         tdf["holding_days"] = (pd.to_datetime(tdf["exit_date"]) - pd.to_datetime(tdf["entry_date"])).dt.days
 
@@ -389,7 +392,7 @@ def fundamental_score_row(row: dict, mode: str, thresholds: dict) -> tuple[float
     return float(score), b, bool(pass_bool)
 
 # =============================
-# Target price band (non-LLM): scenario + levels
+# Target price band (non-LLM)
 # =============================
 def local_levels(close: pd.Series, lookback: int = 120):
     s = close.tail(lookback).dropna()
@@ -418,12 +421,7 @@ def target_price_band(df: pd.DataFrame):
     r1 = min(above) if above else None
     s1 = max(below) if below else None
 
-    return {
-        "base": px,
-        "bull": (bull1, bull2, r1),
-        "bear": (bear1, bear2, s1),
-        "levels": lv,
-    }
+    return {"base": px, "bull": (bull1, bull2, r1), "bear": (bear1, bear2, s1), "levels": lv}
 
 # =============================
 # Live price helper
@@ -454,12 +452,7 @@ def df_snapshot_for_llm(df: pd.DataFrame, n: int = 140) -> dict:
     cols = [c for c in use_cols if c in df.columns]
     tail = df[cols].tail(n).copy()
     tail.index = tail.index.astype(str)
-    return {
-        "cols": cols,
-        "n": int(len(tail)),
-        "last_index": str(tail.index[-1]) if len(tail) else None,
-        "rows": tail.to_dict(orient="records"),
-    }
+    return {"cols": cols, "n": int(len(tail)), "last_index": str(tail.index[-1]) if len(tail) else None, "rows": tail.to_dict(orient="records")}
 
 def build_ai_context(df: pd.DataFrame, ticker: str, market: str, latest: pd.Series, checkpoints: dict, metrics: dict, tp: dict, live: dict) -> dict:
     return {
@@ -487,7 +480,6 @@ def build_ai_context(df: pd.DataFrame, ticker: str, market: str, latest: pd.Seri
         ],
     }
 
-# Secrets'te yoksa kullanıcı yan menüden girebilsin + düzgün hata
 def _get_openai_key() -> str:
     k = st.secrets.get("OPENAI_API_KEY", "").strip()
     if not k:
@@ -499,15 +491,11 @@ def call_openai(messages, model: str, temperature: float = 0.2):
     if not api_key:
         raise ValueError('OPENAI_API_KEY eksik. Streamlit Secrets’e ekle: OPENAI_API_KEY="sk-..." (veya yan menüden gir).')
     client = OpenAI(api_key=api_key)
-    resp = client.responses.create(
-        model=model,
-        input=messages,
-        temperature=temperature,
-    )
+    resp = client.responses.create(model=model, input=messages, temperature=temperature)
     return resp.output_text
 
 # =============================
-# Presets
+# Presets + Universe helpers
 # =============================
 BIST_EXAMPLES = ["THYAO", "ASELS", "KCHOL", "SISE", "BIMAS"]
 
@@ -517,9 +505,6 @@ PRESETS = {
     "Agresif": {"rsi_entry_level": 48, "rsi_exit_level": 43, "atr_pct_max": 0.10, "atr_stop_mult": 2.5},
 }
 
-# =============================
-# Universe helpers: S&P 500 + Nasdaq-100 (requests + user-agent, fail-open)
-# =============================
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
 def get_sp500_tickers() -> list[str]:
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
@@ -531,5 +516,352 @@ def get_sp500_tickers() -> list[str]:
         dfu = tables[0]
         return sorted(dfu["Symbol"].astype(str).str.upper().tolist())
     except Exception:
-        return ["A
-::contentReference[oaicite:0]{index=0}
+        return ["AAPL","MSFT","NVDA","AMZN","META","GOOGL","TSLA","NFLX","JPM","XOM","SPY","QQQ"]
+
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
+def get_nasdaq100_tickers() -> list[str]:
+    url = "https://en.wikipedia.org/wiki/Nasdaq-100"
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; StreamlitApp/1.0; +https://streamlit.io)"}
+    try:
+        r = requests.get(url, headers=headers, timeout=20)
+        r.raise_for_status()
+        tables = pd.read_html(r.text)
+        for t in tables:
+            if "Ticker" in t.columns:
+                return sorted(t["Ticker"].astype(str).str.upper().tolist())
+        return []
+    except Exception:
+        return []
+
+@st.cache_data(show_spinner=False)
+def load_data_cached(ticker: str, period: str, interval: str) -> pd.DataFrame:
+    df = yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False)
+    return _flatten_yf(df)
+
+# =============================
+# UI State
+# =============================
+st.title("📈 FA→TA Trading Uygulaması + 🤖 AI Analiz")
+st.caption("Önce fundamental ile evreni daralt, sonra teknik analizle giriş/çıkış zamanla. Otomatik emir göndermez.")
+
+if "screener_df" not in st.session_state:
+    st.session_state.screener_df = pd.DataFrame()
+if "selected_ticker" not in st.session_state:
+    st.session_state.selected_ticker = None
+if "ai_messages" not in st.session_state:
+    st.session_state.ai_messages = [{"role": "assistant", "content": "Sorunu yaz: örn. “Riskler ne, hedef bant ne, hangi şartta çıkarım?”"}]
+if "ta_ran" not in st.session_state:
+    st.session_state.ta_ran = False
+if "OPENAI_API_KEY_UI" not in st.session_state:
+    st.session_state.OPENAI_API_KEY_UI = ""
+
+# =============================
+# Sidebar
+# =============================
+with st.sidebar:
+    st.header("Piyasa")
+    market = st.selectbox("Market", ["USA", "BIST"], index=0)
+
+    st.header("1) Fundamental Screener (opsiyonel)")
+    use_fa = st.checkbox("Fundamental filtreyi kullan", value=(market == "USA"))
+    fa_mode = st.selectbox("Fundamental Mod", ["Quality", "Value", "Growth"], index=0, disabled=(not use_fa or market != "USA"))
+
+    st.caption("Eşikler (USA için)")
+    roe = st.slider("ROE min", 0.0, 0.40, 0.15, 0.01, disabled=(not use_fa or market != "USA"))
+    op_margin = st.slider("Operating Margin min", 0.0, 0.40, 0.10, 0.01, disabled=(not use_fa or market != "USA"))
+    profit_margin = st.slider("Profit Margin min", 0.0, 0.40, 0.08, 0.01, disabled=(not use_fa or market != "USA"))
+    dte = st.slider("Debt/Equity max", 0.0, 3.0, 1.0, 0.05, disabled=(not use_fa or market != "USA"))
+    fpe = st.slider("Forward P/E max", 0.0, 60.0, 20.0, 1.0, disabled=(not use_fa or market != "USA"))
+    peg = st.slider("PEG max", 0.0, 5.0, 1.5, 0.1, disabled=(not use_fa or market != "USA"))
+    ps = st.slider("P/S max", 0.0, 30.0, 6.0, 0.5, disabled=(not use_fa or market != "USA"))
+    pb = st.slider("P/B max", 0.0, 30.0, 6.0, 0.5, disabled=(not use_fa or market != "USA"))
+    rev_g = st.slider("Revenue Growth min", 0.0, 0.50, 0.10, 0.01, disabled=(not use_fa or market != "USA"))
+    earn_g = st.slider("Earnings Growth min", 0.0, 0.50, 0.10, 0.01, disabled=(not use_fa or market != "USA"))
+    min_score = st.slider("Min Fundamental Score", 0, 100, 60, 1, disabled=(not use_fa or market != "USA"))
+    min_ok = st.slider("Min OK sayısı", 1, 5, 3, 1, disabled=(not use_fa or market != "USA"))
+
+    thresholds = {
+        "roe": roe, "op_margin": op_margin, "profit_margin": profit_margin, "dte": dte,
+        "fpe": fpe, "peg": peg, "ps": ps, "pb": pb,
+        "rev_g": rev_g, "earn_g": earn_g,
+        "min_score": min_score, "min_ok": min_ok,
+    }
+
+    if market == "USA":
+        universe = sorted(list(set(get_sp500_tickers() + get_nasdaq100_tickers())))
+    else:
+        universe = BIST_EXAMPLES
+
+    run_screener = st.button("🔎 Screener Çalıştır", type="secondary", disabled=(not use_fa or market != "USA"))
+
+    st.divider()
+    st.header("2) Teknik Analiz + Backtest")
+    preset_name = st.selectbox("Teknik Mod", list(PRESETS.keys()), index=1)
+
+    st.subheader("Sembol (TA)")
+    if st.session_state.selected_ticker:
+        st.caption(f"Screener seçimi: **{st.session_state.selected_ticker}**")
+        raw_ticker = st.text_input("Sembol", value=st.session_state.selected_ticker)
+    else:
+        raw_ticker = st.text_input("Sembol (USA: AAPL, SPY) / BIST: THYAO", value="AAPL" if market == "USA" else "THYAO")
+
+    ticker = normalize_ticker(raw_ticker, market)
+
+    st.subheader("Zaman Aralığı")
+    interval = st.selectbox("Interval", ["1d", "1h", "30m"], index=0)
+    period = st.selectbox("Periyot", ["6mo", "1y", "2y", "5y", "10y"], index=3)
+
+    st.divider()
+    st.subheader("Teknik Parametreler")
+    ema_fast = st.number_input("EMA Fast (trend içi)", min_value=5, max_value=100, value=50, step=1)
+    ema_slow = st.number_input("EMA Slow (trend filtresi)", min_value=50, max_value=400, value=200, step=1)
+    rsi_period = st.number_input("RSI Period", min_value=5, max_value=30, value=14, step=1)
+    bb_period = st.number_input("Bollinger Period", min_value=10, max_value=50, value=20, step=1)
+    bb_std = st.number_input("Bollinger Std", min_value=1.0, max_value=3.5, value=2.0, step=0.1)
+    atr_period = st.number_input("ATR Period", min_value=5, max_value=30, value=14, step=1)
+    vol_sma = st.number_input("Volume SMA", min_value=5, max_value=60, value=20, step=1)
+
+    st.subheader("Market Filter")
+    use_spy_filter = st.checkbox("SPY > EMA200 filtresi (sadece USA)", value=True, disabled=(market != "USA"))
+
+    st.subheader("Risk / Backtest")
+    initial_capital = st.number_input("Başlangıç Sermayesi", min_value=100.0, value=10000.0, step=500.0)
+    risk_per_trade = st.slider("Trade başı risk (equity %)", min_value=0.002, max_value=0.05, value=0.01, step=0.001)
+    commission_bps = st.number_input("Komisyon (bps)", min_value=0.0, value=5.0, step=1.0)
+    slippage_bps = st.number_input("Slippage (bps)", min_value=0.0, value=2.0, step=1.0)
+    risk_free_annual = st.number_input("Risk-Free (yıllık, ör: 0.05 = %5)", min_value=0.0, value=0.0, step=0.01)
+
+    st.divider()
+    st.header("3) AI Ayarları")
+    ai_on = st.checkbox("AI Chat aktif", value=True)
+    ai_model = st.text_input("Model", value="gpt-4.1-mini", help="OpenAI model adı")
+    ai_temp = st.slider("Temperature", 0.0, 1.0, 0.2, 0.05)
+
+    if not st.secrets.get("OPENAI_API_KEY", "").strip():
+        st.session_state.OPENAI_API_KEY_UI = st.text_input(
+            "OpenAI API Key (Secrets yoksa buraya gir)",
+            value=st.session_state.OPENAI_API_KEY_UI,
+            type="password",
+        )
+
+    run_btn = st.button("🚀 Teknik Analizi Çalıştır", type="primary")
+    if run_btn:
+        st.session_state.ta_ran = True
+
+# =============================
+# Screener action
+# =============================
+if run_screener and market == "USA" and use_fa:
+    with st.spinner("Fundamental veriler çekiliyor (yfinance)..."):
+        rows = []
+        for tk in universe:
+            f = fetch_fundamentals_usa(tk)
+            score, breakdown, passed = fundamental_score_row(f, fa_mode, thresholds)
+            f["FA_score"] = score
+            f["FA_pass"] = passed
+            f["FA_ok_count"] = sum(1 for v in breakdown.values() if v["ok"])
+            rows.append(f)
+
+        sdf = pd.DataFrame(rows)
+        sdf["FA_pass_int"] = sdf["FA_pass"].astype(int)
+        sdf = sdf.sort_values(["FA_pass_int", "FA_score"], ascending=[False, False]).drop(columns=["FA_pass_int"])
+        st.session_state.screener_df = sdf.copy()
+
+# Screener display
+if market == "USA" and use_fa and not st.session_state.screener_df.empty:
+    st.subheader("🧾 Fundamental Screener Sonuçları (USA)")
+    sdf = st.session_state.screener_df.copy()
+
+    show_cols = [
+        "ticker", "FA_pass", "FA_score", "FA_ok_count",
+        "sector", "industry",
+        "forwardPE", "pegRatio", "priceToSalesTrailing12Months", "priceToBook",
+        "returnOnEquity", "operatingMargins", "profitMargins", "debtToEquity",
+        "revenueGrowth", "earningsGrowth",
+        "marketCap"
+    ]
+    sdf_show = sdf[[c for c in show_cols if c in sdf.columns]].copy()
+    st.dataframe(sdf_show, use_container_width=True, height=320)
+
+    pass_list = sdf.loc[sdf["FA_pass"] == True, "ticker"].tolist()
+    if len(pass_list) == 0:
+        st.warning("Bu eşiklerle PASS çıkan hisse yok. Eşikleri gevşet veya mode değiştir.")
+    else:
+        st.success(f"PASS sayısı: {len(pass_list)}")
+        picked = st.selectbox("PASS listesinden hisse seç (TA’ya gönder)", pass_list, index=0)
+        if st.button("➡️ Seçimi Teknik Analize Aktar"):
+            st.session_state.selected_ticker = picked
+            st.rerun()
+
+# =============================
+# Technical run
+# =============================
+cfg = {
+    "ema_fast": ema_fast,
+    "ema_slow": ema_slow,
+    "rsi_period": rsi_period,
+    "bb_period": bb_period,
+    "bb_std": bb_std,
+    "atr_period": atr_period,
+    "vol_sma": vol_sma,
+    "initial_capital": initial_capital,
+    "risk_per_trade": risk_per_trade,
+    "commission_bps": commission_bps,
+    "slippage_bps": slippage_bps,
+}
+cfg.update(PRESETS[preset_name])
+
+if not st.session_state.ta_ran:
+    st.info("Soldan ayarları yapıp **Teknik Analizi Çalıştır**’a bas.")
+    st.stop()
+
+market_filter_ok = True
+if market == "USA" and use_spy_filter:
+    with st.spinner("SPY rejimi kontrol ediliyor..."):
+        market_filter_ok = get_spy_regime_ok()
+
+with st.spinner(f"Veri indiriliyor: {ticker}"):
+    df_raw = load_data_cached(ticker, period, interval)
+
+if df_raw.empty:
+    st.error(
+        f"Veri gelmedi: {ticker}\n\n"
+        "BIST için THYAO formatı otomatik THYAO.IS olur.\n"
+        "BIST’te 1d interval ve 5y/10y periyot daha stabil."
+    )
+    st.stop()
+
+if len(df_raw) < 260 and interval == "1d":
+    st.warning("Günlükte 260 bar altı: metrikler daha oynak olabilir. (5y/10y seçmek daha iyi)")
+
+df = build_features(df_raw, cfg)
+df, checkpoints = signal_with_checkpoints(df, cfg, market_filter_ok=market_filter_ok)
+latest = df.iloc[-1]
+
+live = get_live_price(ticker)
+live_price = live.get("last_price", np.nan)
+
+if int(latest["ENTRY"]) == 1:
+    rec = "AL"
+elif int(latest["EXIT"]) == 1:
+    rec = "SAT"
+else:
+    rec = "İZLE (Güçlü Trend)" if latest["SCORE"] >= 80 else ("BEKLE (Orta)" if latest["SCORE"] >= 60 else "UZAK DUR")
+
+eq, tdf, metrics = backtest_long_only(df, cfg, risk_free_annual=risk_free_annual)
+tp = target_price_band(df)
+
+c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+c1.metric("Market", market)
+c2.metric("Sembol", ticker)
+c3.metric("Close (bar)", f"{latest['Close']:.2f}")
+c4.metric("Live/Last", f"{live_price:.2f}" if np.isfinite(live_price) else "N/A")
+c5.metric("Skor", f"{latest['SCORE']:.0f}/100")
+c6.metric("Sinyal", rec)
+c7.metric("SPY Rejim", "BULL ✅" if (market == "USA" and market_filter_ok) else ("BEAR ❌" if market == "USA" else "N/A"))
+
+st.caption("Not: Daily Close (1d bar) ile Live/Last farklı olabilir. Piyasa açıkken 1d bar kapanışı güncellenmez.")
+
+st.subheader("✅ Kontrol Noktaları (Son Bar)")
+cp_cols = st.columns(3)
+for i, (k, v) in enumerate(checkpoints.items()):
+    with cp_cols[i % 3]:
+        st.write(("🟢 " if v else "🔴 ") + k)
+
+st.subheader("🎯 Hedef Fiyat Bandı (Senaryo)")
+bcol1, bcol2, bcol3 = st.columns(3)
+bcol1.metric("Base", f"{tp['base']:.2f}")
+if tp["bull"]:
+    bull1, bull2, r1 = tp["bull"]
+    bcol2.metric("Bull Band", f"{bull1:.2f} → {bull2:.2f}")
+    if r1:
+        bcol2.caption(f"Yakın direnç: {r1:.2f}")
+else:
+    bcol2.metric("Bull Band", "N/A")
+
+if tp["bear"]:
+    bear1, bear2, s1 = tp["bear"]
+    bcol3.metric("Bear Band", f"{bear1:.2f} → {bear2:.2f}")
+    if s1:
+        bcol3.caption(f"Yakın destek: {s1:.2f}")
+else:
+    bcol3.metric("Bear Band", "N/A")
+
+with st.expander("Seviye listesi (yaklaşık)", expanded=False):
+    st.write(tp["levels"])
+
+st.subheader("📊 Fiyat + EMA + Bollinger + Sinyaller")
+fig = go.Figure()
+fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"))
+fig.add_trace(go.Scatter(x=df.index, y=df["EMA50"], name="EMA Fast"))
+fig.add_trace(go.Scatter(x=df.index, y=df["EMA200"], name="EMA Slow"))
+fig.add_trace(go.Scatter(x=df.index, y=df["BB_upper"], name="BB Upper", line=dict(dash="dot")))
+fig.add_trace(go.Scatter(x=df.index, y=df["BB_mid"], name="BB Mid", line=dict(dash="dot")))
+fig.add_trace(go.Scatter(x=df.index, y=df["BB_lower"], name="BB Lower", line=dict(dash="dot")))
+
+entries = df[df["ENTRY"] == 1]
+exits = df[df["EXIT"] == 1]
+fig.add_trace(go.Scatter(x=entries.index, y=entries["Close"], mode="markers", name="ENTRY", marker=dict(symbol="triangle-up", size=10)))
+fig.add_trace(go.Scatter(x=exits.index, y=exits["Close"], mode="markers", name="EXIT", marker=dict(symbol="triangle-down", size=10)))
+fig.update_layout(height=600, xaxis_rangeslider_visible=False)
+st.plotly_chart(fig, use_container_width=True)
+
+st.subheader("🧪 Backtest Özeti (Long-only)")
+mcol1, mcol2, mcol3, mcol4, mcol5, mcol6 = st.columns(6)
+mcol1.metric("Total Return", f"{metrics['Total Return']*100:.1f}%")
+mcol2.metric("Ann. Return", f"{metrics['Annualized Return']*100:.1f}%")
+mcol3.metric("Ann. Vol", f"{metrics['Annualized Volatility']*100:.1f}%")
+mcol4.metric("Sharpe", f"{metrics['Sharpe']:.2f}")
+mcol5.metric("Max DD", f"{metrics['Max Drawdown']*100:.1f}%")
+mcol6.metric("Trades", f"{metrics['Trades']}")
+
+fig_eq = go.Figure()
+fig_eq.add_trace(go.Scatter(x=eq.index, y=eq.values, name="Equity"))
+fig_eq.update_layout(height=320, margin=dict(l=10, r=10, t=20, b=10))
+st.plotly_chart(fig_eq, use_container_width=True)
+
+with st.expander("Trade Listesi", expanded=False):
+    if tdf is None or tdf.empty:
+        st.info("Trade oluşmadı (bu periyotta sinyal gelmemiş olabilir).")
+    else:
+        st.dataframe(tdf, use_container_width=True, height=260)
+
+# =============================
+# AI Chat
+# =============================
+st.divider()
+st.subheader("🤖 AI Analiz (Eğitim amaçlı)")
+
+if not ai_on:
+    st.info("AI Chat kapalı.")
+else:
+    # Chat history
+    for msg in st.session_state.ai_messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    user_q = st.chat_input("Soru yaz...")
+    if user_q:
+        st.session_state.ai_messages.append({"role": "user", "content": user_q})
+        with st.chat_message("user"):
+            st.markdown(user_q)
+
+        with st.chat_message("assistant"):
+            try:
+                ctx = build_ai_context(df, ticker, market, latest, checkpoints, metrics, tp, live)
+                system = (
+                    "Sen bir finansal eğitim asistanısın. Yatırım tavsiyesi vermezsin. "
+                    "Verilen teknik/fundamental metriklere dayanarak senaryo analizi yaparsın. "
+                    "Çıktıda mutlaka: (1) Bull/Base/Bear bant, (2) riskler, (3) invalidation şartları, "
+                    "(4) skor/checkpoint yorumları olsun."
+                )
+                messages = [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": f"Soru: {user_q}\n\nBağlam (JSON):\n{json.dumps(ctx, ensure_ascii=False)}"},
+                ]
+                ans = call_openai(messages, model=ai_model, temperature=ai_temp)
+                st.markdown(ans)
+                st.session_state.ai_messages.append({"role": "assistant", "content": ans})
+            except Exception as e:
+                st.error(f"AI hata: {e}")
+                st.session_state.ai_messages.append({"role": "assistant", "content": f"AI hata: {e}"})
