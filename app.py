@@ -1,3 +1,4 @@
+
 import os
 import json
 import time
@@ -172,14 +173,11 @@ def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool)
     cp = {
         "Market Filter OK": bool(market_filter_ok),
         "Liquidity (Volume > VolSMA)": bool(last["Volume"] > last["VOL_SMA"]) if pd.notna(last["VOL_SMA"]) else False,
-        "Trend (Close>EMA200 & EMA50>EMA200)": bool((last["Close"] > last["EMA200"]) and (last["EMA50"] > last["EMA200"]))
-        if pd.notna(last["EMA200"]) else False,
+        "Trend (Close>EMA200 & EMA50>EMA200)": bool((last["Close"] > last["EMA200"]) and (last["EMA50"] > last["EMA200"])) if pd.notna(last["EMA200"]) else False,
         f"RSI > {cfg['rsi_entry_level']}": bool(last["RSI"] > cfg["rsi_entry_level"]) if pd.notna(last["RSI"]) else False,
         "MACD Hist > 0": bool(last["MACD_hist"] > 0) if pd.notna(last["MACD_hist"]) else False,
-        f"ATR% < {cfg['atr_pct_max']:.2%}": bool((last["ATR"] / last["Close"]) < cfg["atr_pct_max"])
-        if pd.notna(last["ATR"]) and pd.notna(last["Close"]) else False,
-        "Bollinger (Close>BB_mid or Breakout)": bool((last["Close"] > last["BB_mid"]) or (last["Close"] > last["BB_upper"]))
-        if pd.notna(last["BB_mid"]) else False,
+        f"ATR% < {cfg['atr_pct_max']:.2%}": bool((last["ATR"] / last["Close"]) < cfg["atr_pct_max"]) if pd.notna(last["ATR"]) and pd.notna(last["Close"]) else False,
+        "Bollinger (Close>BB_mid or Breakout)": bool((last["Close"] > last["BB_mid"]) or (last["Close"] > last["BB_upper"])) if pd.notna(last["BB_mid"]) else False,
         "OBV > OBV_EMA": bool(last["OBV"] > last["OBV_EMA"]) if pd.notna(last["OBV_EMA"]) else False,
     }
     return df, cp
@@ -418,12 +416,7 @@ def target_price_band(df: pd.DataFrame):
     r1 = min(above) if above else None
     s1 = max(below) if below else None
 
-    return {
-        "base": px,
-        "bull": (bull1, bull2, r1),
-        "bear": (bear1, bear2, s1),
-        "levels": lv,
-    }
+    return {"base": px, "bull": (bull1, bull2, r1), "bear": (bear1, bear2, s1), "levels": lv}
 
 # =============================
 # Live price helper
@@ -447,8 +440,10 @@ def get_live_price(ticker: str) -> dict:
 # LLM helpers
 # =============================
 def df_snapshot_for_llm(df: pd.DataFrame, n: int = 140) -> dict:
-    use_cols = ["Open","High","Low","Close","Volume","EMA50","EMA200","RSI","MACD","MACD_signal","MACD_hist",
-                "BB_mid","BB_upper","BB_lower","ATR","ATR_PCT","VOL_SMA","SCORE","ENTRY","EXIT"]
+    use_cols = [
+        "Open","High","Low","Close","Volume","EMA50","EMA200","RSI","MACD","MACD_signal","MACD_hist",
+        "BB_mid","BB_upper","BB_lower","ATR","ATR_PCT","VOL_SMA","SCORE","ENTRY","EXIT"
+    ]
     cols = [c for c in use_cols if c in df.columns]
     tail = df[cols].tail(n).copy()
     tail.index = tail.index.astype(str)
@@ -459,7 +454,7 @@ def df_snapshot_for_llm(df: pd.DataFrame, n: int = 140) -> dict:
         "rows": tail.to_dict(orient="records"),
     }
 
-def build_ai_context(ticker: str, market: str, latest: pd.Series, checkpoints: dict, metrics: dict, tp: dict, live: dict) -> dict:
+def build_ai_context(df: pd.DataFrame, ticker: str, market: str, latest: pd.Series, checkpoints: dict, metrics: dict, tp: dict, live: dict) -> dict:
     return {
         "ticker": ticker,
         "market": market,
@@ -485,14 +480,44 @@ def build_ai_context(ticker: str, market: str, latest: pd.Series, checkpoints: d
         ],
     }
 
-# ✅ OpenAI çağrısı + secrets kontrolü
+def _get_openai_key() -> str:
+    k = st.secrets.get("OPENAI_API_KEY", "").strip()
+    if not k:
+        k = st.session_state.get("OPENAI_API_KEY_UI", "").strip()
+    return k
+
+# ✅ OPENAI KEY + 401 hatası için daha net hata + UI fallback
 def call_openai(messages, model: str, temperature: float = 0.2):
-    api_key = st.secrets.get("OPENAI_API_KEY", "").strip()
+    api_key = _get_openai_key()
     if not api_key:
-        raise ValueError("OPENAI_API_KEY bulunamadı. Streamlit Cloud > Secrets'e OPENAI_API_KEY=... ekleyin.")
+        raise ValueError(
+            "OPENAI_API_KEY yok.\n"
+            "Streamlit Cloud > App settings > Secrets'e şu formatla ekle:\n"
+            'OPENAI_API_KEY="sk-..."\n'
+            "Not: Çift tırnak şart değil ama baş/son boşluk olmasın."
+        )
+
     client = OpenAI(api_key=api_key)
-    resp = client.chat.completions.create(model=model, messages=messages, temperature=temperature)
-    return resp.choices[0].message.content
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+        )
+        return resp.choices[0].message.content
+    except Exception as e:
+        msg = str(e)
+        if "401" in msg or "invalid_api_key" in msg or "Incorrect API key" in msg:
+            raise ValueError(
+                "401 - Incorrect API key.\n"
+                "Secrets'e koyduğun anahtar hatalı/eksik olabilir.\n"
+                "Kontrol listesi:\n"
+                "- Secrets'te OPENAI_API_KEY değeri tam mı? (sk- ile başlar)\n"
+                "- Başında/sonunda boşluk, satır sonu, tırnak fazlalığı yok mu?\n"
+                "- Eski/iptal edilmiş anahtar mı?\n"
+                "- Streamlit Cloud'da secrets güncelledikten sonra uygulamayı 'Rerun/Restart' ettin mi?\n"
+            ) from e
+        raise
 
 # =============================
 # Presets
@@ -508,7 +533,7 @@ PRESETS = {
 }
 
 # =============================
-# Universe helpers: S&P 500 + Nasdaq-100
+# Universe helpers: S&P 500 + Nasdaq-100 (requests + user-agent, fail-open)
 # =============================
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
 def get_sp500_tickers() -> list[str]:
@@ -552,6 +577,7 @@ if "ai_messages" not in st.session_state:
     st.session_state.ai_messages = [
         {"role": "assistant", "content": "Sorunu yaz: örn. “Riskler ne, hedef bant ne, hangi şartta çıkarım?”"}
     ]
+# FIX: TA çalıştı mı? (chat yazınca rerun olsa bile geri atmasın)
 if "ta_ran" not in st.session_state:
     st.session_state.ta_ran = False
 
@@ -592,6 +618,7 @@ with st.sidebar:
         "min_ok": min_ok,
     }
 
+    # Universe: USA => S&P 500 + Nasdaq-100 (no UI), BIST => examples
     if market == "USA":
         sp = get_sp500_tickers()
         ndx = get_nasdaq100_tickers()
@@ -643,6 +670,11 @@ with st.sidebar:
     ai_on = st.checkbox("AI Chat aktif", value=True)
     ai_model = st.text_input("Model", value="gpt-4.1-mini", help="OpenAI model adı")
     ai_temp = st.slider("Temperature", 0.0, 1.0, 0.2, 0.05)
+
+    # ✅ Secrets yoksa kullanıcı buradan girebilsin
+    if not st.secrets.get("OPENAI_API_KEY", "").strip():
+        st.caption("Secrets'te key yoksa buradan girebilirsin (deploy için Secrets önerilir).")
+        st.session_state["OPENAI_API_KEY_UI"] = st.text_input("OPENAI_API_KEY", type="password")
 
     run_btn = st.button("🚀 Teknik Analizi Çalıştır", type="primary")
     if run_btn:
@@ -718,6 +750,7 @@ def load_data_cached(ticker: str, period: str, interval: str) -> pd.DataFrame:
     df = yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False)
     return _flatten_yf(df)
 
+# FIX: chat yazınca run_btn False olacağı için geri atmasın
 if not st.session_state.ta_ran:
     st.info("Soldan ayarları yapıp **Teknik Analizi Çalıştır**’a bas.")
     st.stop()
@@ -758,52 +791,6 @@ else:
 eq, tdf, metrics = backtest_long_only(df, cfg, risk_free_annual=risk_free_annual)
 tp = target_price_band(df)
 
-# -----------------------------
-# RR (en doğru: backtest ile aynı stop mantığı = ATR stop)
-# -----------------------------
-def rr_from_atr_stop(latest_row: pd.Series, tp_dict: dict, cfg: dict):
-    """
-    Eğitim amaçlı RR:
-      - Stop: Close - atr_stop_mult * ATR
-      - Risk: Close - Stop
-      - Hedef: Bull1 (bull band'in ilk değeri)
-      - Reward: Bull1 - Close
-      - RR = Reward / Risk
-    """
-    close = float(latest_row["Close"])
-    atrv = float(latest_row.get("ATR", np.nan)) if pd.notna(latest_row.get("ATR", np.nan)) else np.nan
-    if not np.isfinite(atrv) or atrv <= 0:
-        return {"rr": None, "stop": None, "risk": None, "reward": None}
-
-    stop = close - float(cfg["atr_stop_mult"]) * atrv
-    risk = close - stop
-
-    if not tp_dict.get("bull"):
-        return {"rr": None, "stop": stop, "risk": risk, "reward": None}
-
-    bull1, _bull2, _r1 = tp_dict["bull"]
-    reward = float(bull1) - close
-
-    if risk <= 0 or reward <= 0:
-        return {"rr": None, "stop": stop, "risk": risk, "reward": reward}
-
-    return {"rr": float(reward / risk), "stop": float(stop), "risk": float(risk), "reward": float(reward)}
-
-rr_info = rr_from_atr_stop(latest, tp, cfg)
-
-def fmt_rr(rr):
-    if rr is None or (isinstance(rr, float) and (not np.isfinite(rr))):
-        return "N/A"
-    return f"1:{rr:.2f}"
-
-def pct_dist(level: float, base: float):
-    if level is None or not np.isfinite(level) or base == 0:
-        return None
-    return (level / base - 1.0) * 100.0
-
-# -----------------------------
-# Summary metrics (FIXED c7)
-# -----------------------------
 c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
 c1.metric("Market", market)
 c2.metric("Sembol", ticker)
@@ -811,10 +798,7 @@ c3.metric("Daily Close (bar)", f"{latest['Close']:.2f}")
 c4.metric("Live/Last", f"{live_price:.2f}" if np.isfinite(live_price) else "N/A")
 c5.metric("Skor", f"{latest['SCORE']:.0f}/100")
 c6.metric("Sinyal", rec)
-c7.metric(
-    "SPY Rejim",
-    "BULL ✅" if (market == "USA" and market_filter_ok) else ("BEAR ❌" if market == "USA" else "N/A")
-)
+c7.metric("SPY Rejim", "BULL ✅" if (market == "USA" and market_filter_ok) else ("BEAR ❌" if market == "USA" else "N/A"))
 
 st.caption("Not: Daily Close (1d bar) ile Live/Last farklı olabilir. Piyasa açıkken 1d bar kapanışı güncellenmez.")
 
@@ -824,45 +808,133 @@ for i, (k, v) in enumerate(checkpoints.items()):
     with cp_cols[i % 3]:
         st.write(("🟢 " if v else "🔴 ") + k)
 
-# -----------------------------
-# Target band + RR: Bear Band yanında "1:X"
-# -----------------------------
 st.subheader("🎯 Hedef Fiyat Bandı (Senaryo)")
-
-base_px = float(tp["base"])
-rr_str = fmt_rr(rr_info.get("rr"))
-
 bcol1, bcol2, bcol3 = st.columns(3)
-bcol1.metric("Base", f"{base_px:.2f}")
-
-if tp.get("bull"):
+bcol1.metric("Base", f"{tp['base']:.2f}")
+if tp["bull"]:
     bull1, bull2, r1 = tp["bull"]
     bcol2.metric("Bull Band", f"{bull1:.2f} → {bull2:.2f}")
-    if r1 is not None and np.isfinite(r1):
-        bcol2.caption(f"Yakın direnç: {r1:.2f} ({pct_dist(r1, base_px):+.2f}%)")
+    if r1:
+        bcol2.caption(f"Yakın direnç: {r1:.2f}")
 else:
     bcol2.metric("Bull Band", "N/A")
-    r1 = None
 
-if tp.get("bear"):
+if tp["bear"]:
     bear1, bear2, s1 = tp["bear"]
-    bcol3.metric("Bear Band", f"{bear1:.2f} → {bear2:.2f}  |  RR {rr_str}")
-    if s1 is not None and np.isfinite(s1):
-        bcol3.caption(f"Yakın destek: {s1:.2f} ({pct_dist(s1, base_px):+.2f}%)")
+    bcol3.metric("Bear Band", f"{bear1:.2f} → {bear2:.2f}")
+    if s1:
+        bcol3.caption(f"Yakın destek: {s1:.2f}")
 else:
-    bcol3.metric("Bear Band", f"N/A  |  RR {rr_str}")
-    s1 = None
+    bcol3.metric("Bear Band", "N/A")
 
-# -----------------------------
-# Levels: İşaretleme + fiyata uzaklık %
-# -----------------------------
-def render_levels_marked(levels: list[float], base: float, s1, r1):
-    lines = []
-    for lv in levels:
-        tag = ""
-        if s1 is not None and np.isfinite(s1) and abs(float(lv) - float(s1)) < 1e-9:
-            tag = " 🟩 Yakın Destek"
-        if r1 is not None and np.isfinite(r1) and abs(float(lv) - float(r1)) < 1e-9:
-            tag = " 🟥 Yakın Direnç"
-        dist = pct_dist(float(
-::contentReference[oaicite:0]{index=0}
+with st.expander("Seviye listesi (yaklaşık)", expanded=False):
+    st.write(tp["levels"])
+
+st.subheader("📊 Fiyat + EMA + Bollinger + Sinyaller")
+fig = go.Figure()
+fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"))
+fig.add_trace(go.Scatter(x=df.index, y=df["EMA50"], name="EMA Fast"))
+fig.add_trace(go.Scatter(x=df.index, y=df["EMA200"], name="EMA Slow"))
+fig.add_trace(go.Scatter(x=df.index, y=df["BB_upper"], name="BB Upper", line=dict(dash="dot")))
+fig.add_trace(go.Scatter(x=df.index, y=df["BB_mid"], name="BB Mid", line=dict(dash="dot")))
+fig.add_trace(go.Scatter(x=df.index, y=df["BB_lower"], name="BB Lower", line=dict(dash="dot")))
+
+entries = df[df["ENTRY"] == 1]
+exits = df[df["EXIT"] == 1]
+fig.add_trace(go.Scatter(x=entries.index, y=entries["Close"], mode="markers", name="ENTRY", marker=dict(symbol="triangle-up", size=10)))
+fig.add_trace(go.Scatter(x=exits.index, y=exits["Close"], mode="markers", name="EXIT", marker=dict(symbol="triangle-down", size=10)))
+fig.update_layout(height=600, xaxis_rangeslider_visible=False)
+st.plotly_chart(fig, use_container_width=True)
+
+st.subheader("📉 RSI / MACD / ATR%")
+colA, colB, colC = st.columns(3)
+
+fig_rsi = go.Figure()
+fig_rsi.add_trace(go.Scatter(x=df.index, y=df["RSI"], name="RSI"))
+fig_rsi.add_hline(y=70)
+fig_rsi.add_hline(y=30)
+fig_rsi.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10))
+colA.plotly_chart(fig_rsi, use_container_width=True)
+
+fig_macd = go.Figure()
+fig_macd.add_trace(go.Scatter(x=df.index, y=df["MACD"], name="MACD"))
+fig_macd.add_trace(go.Scatter(x=df.index, y=df["MACD_signal"], name="Signal"))
+fig_macd.add_trace(go.Bar(x=df.index, y=df["MACD_hist"], name="Hist"))
+fig_macd.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10))
+colB.plotly_chart(fig_macd, use_container_width=True)
+
+fig_atr = go.Figure()
+fig_atr.add_trace(go.Scatter(x=df.index, y=df["ATR_PCT"] * 100, name="ATR%"))
+fig_atr.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), yaxis_title="%")
+colC.plotly_chart(fig_atr, use_container_width=True)
+
+st.subheader("🧪 Backtest Özeti (Long-only)")
+m1, m2, m3, m4, m5, m6 = st.columns(6)
+m1.metric("Total Return", f"{metrics['Total Return']*100:.1f}%")
+m2.metric("Ann Return", f"{metrics['Annualized Return']*100:.1f}%")
+m3.metric("Sharpe", f"{metrics['Sharpe']:.2f}")
+m4.metric("Max DD", f"{metrics['Max Drawdown']*100:.1f}%")
+m5.metric("Trades", f"{metrics['Trades']}")
+m6.metric("Win Rate", f"{metrics['Win Rate']*100:.1f}%")
+
+with st.expander("Trade listesi", expanded=False):
+    st.dataframe(tdf, use_container_width=True, height=240)
+
+with st.expander("Equity curve", expanded=False):
+    fig_eq = go.Figure()
+    fig_eq.add_trace(go.Scatter(x=eq.index, y=eq.values, name="Equity"))
+    fig_eq.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
+    st.plotly_chart(fig_eq, use_container_width=True)
+
+st.subheader("🤖 AI Analiz (Chat)")
+
+# Key yoksa chat'i kapat (ama sidebar input varsa çalışır)
+if not _get_openai_key():
+    st.warning("OPENAI_API_KEY bulunamadı (Secrets veya sidebar input). AI Chat kapatıldı.")
+    ai_on = False
+
+for m in st.session_state.ai_messages:
+    with st.chat_message(m["role"]):
+        st.markdown(m["content"])
+
+user_q = st.chat_input("Sorunu yaz... (ör: 'Hedef bant ne, riskler neler?')")
+if user_q and ai_on:
+    st.session_state.ai_messages.append({"role": "user", "content": user_q})
+    with st.chat_message("user"):
+        st.markdown(user_q)
+
+    ctx = build_ai_context(
+        df=df,
+        ticker=ticker,
+        market=market,
+        latest=latest,
+        checkpoints=checkpoints,
+        metrics=metrics,
+        tp=tp,
+        live=live,
+    )
+
+    system = (
+        "Sen bir yatırım analizi asistanısın. YATIRIM TAVSİYESİ VERME.\n"
+        "Kullanıcıya: (1) kısa özet, (2) riskler, (3) hedef fiyat bandı (bull/base/bear), "
+        "(4) invalidation/çıkış koşulları, (5) takip edilecek 3 metrik ver.\n"
+        "Veri: aşağıdaki JSON bağlamıdır. Uydurma haber/finansal veri üretme."
+    )
+
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": "Bağlam JSON:\n" + json.dumps(ctx, ensure_ascii=False)},
+        {"role": "user", "content": user_q},
+    ]
+
+    with st.chat_message("assistant"):
+        with st.spinner("AI analiz ediyor..."):
+            try:
+                ans = call_openai(messages, model=ai_model, temperature=ai_temp)
+            except Exception as e:
+                ans = f"AI çağrısı hata verdi: {e}"
+        st.markdown(ans)
+
+    st.session_state.ai_messages.append({"role": "assistant", "content": ans})
+
+st.caption("Uyarı: Bu uygulama yatırım tavsiyesi değildir. Eğitim/analiz amaçlıdır.")
