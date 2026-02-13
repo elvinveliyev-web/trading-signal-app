@@ -399,22 +399,12 @@ def local_levels(close: pd.Series, lookback: int = 120):
     s = close.tail(lookback).dropna()
     if len(s) < 10:
         return []
-    # simple pivot-like levels: quantiles + recent swing highs/lows
     levels = list(np.quantile(s.values, [0.1, 0.25, 0.5, 0.75, 0.9]))
-    # add last 20d high/low
     levels += [float(s.tail(20).max()), float(s.tail(20).min())]
-    # de-duplicate
     levels = sorted(list(set([round(float(x), 2) for x in levels if np.isfinite(x)])))
     return levels
 
 def target_price_band(df: pd.DataFrame):
-    """
-    Basit ama tutarlı bir bant:
-    - Base: last close
-    - Bull: last close + k*ATR (k=1.5..3)
-    - Bear: last close - k*ATR
-    - Ayrıca yakın direnç/ destek seviyeleri (local levels) ile hizalar
-    """
     last = df.iloc[-1]
     px = float(last["Close"])
     atrv = float(last["ATR"]) if pd.notna(last.get("ATR", np.nan)) else np.nan
@@ -427,7 +417,6 @@ def target_price_band(df: pd.DataFrame):
     bear2 = px - 3.0 * atrv
 
     lv = local_levels(df["Close"])
-    # nearest resistance above / support below
     above = [x for x in lv if x >= px]
     below = [x for x in lv if x <= px]
     r1 = min(above) if above else None
@@ -445,10 +434,6 @@ def target_price_band(df: pd.DataFrame):
 # =============================
 @st.cache_data(ttl=30, show_spinner=False)
 def get_live_price(ticker: str) -> dict:
-    """
-    yfinance daily OHLC ile live/last farklı olabilir.
-    fast_info çoğu sembolde daha güncel "last_price" verir.
-    """
     out = {"last_price": np.nan, "currency": "", "exchange": "", "asof": ""}
     try:
         t = yf.Ticker(ticker)
@@ -505,7 +490,6 @@ def build_ai_context(ticker: str, market: str, latest: pd.Series, checkpoints: d
     }
 
 def call_openai(messages, model: str, temperature: float = 0.2):
-    # OpenAI Responses API (recommended) – see OpenAI docs. :contentReference[oaicite:0]{index=0}
     client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY", ""))
     resp = client.responses.create(
         model=model,
@@ -526,6 +510,25 @@ PRESETS = {
     "Dengeli": {"rsi_entry_level": 50, "rsi_exit_level": 45, "atr_pct_max": 0.08, "atr_stop_mult": 3.0},
     "Agresif": {"rsi_entry_level": 48, "rsi_exit_level": 43, "atr_pct_max": 0.10, "atr_stop_mult": 2.5},
 }
+
+# =============================
+# (NEW) Universe helpers: S&P 500 + Nasdaq-100
+# =============================
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
+def get_sp500_tickers() -> list[str]:
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    tables = pd.read_html(url)
+    dfu = tables[0]
+    return sorted(dfu["Symbol"].astype(str).str.upper().tolist())
+
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
+def get_nasdaq100_tickers() -> list[str]:
+    url = "https://en.wikipedia.org/wiki/Nasdaq-100"
+    tables = pd.read_html(url)
+    for t in tables:
+        if "Ticker" in t.columns:
+            return sorted(t["Ticker"].astype(str).str.upper().tolist())
+    return []
 
 # =============================
 # UI
@@ -579,18 +582,11 @@ with st.sidebar:
         "min_ok": min_ok,
     }
 
-    st.subheader("Evrensel Liste")
+    # (CHANGED) Universe: USA => S&P 500 + Nasdaq-100 (no UI), BIST => examples
     if market == "USA":
-        universe_preset = st.selectbox("Universe", ["US Sample", "US Extended"], index=1)
-        universe = US_TICKERS if universe_preset == "US Sample" else sorted(list(set(US_TICKERS + US_EXT)))
-        extra = st.text_area(
-            "Listeye ekle (virgülle): örn NVCR, AMD, MU",
-            value="",
-            help="NVCR gibi semboller burada yoksa eklemen gerekir (varsayılan evrende olmayabilir).",
-        ).strip()
-        if extra:
-            add = [x.strip().upper() for x in extra.split(",") if x.strip()]
-            universe = sorted(list(set(universe + add)))
+        sp = get_sp500_tickers()
+        ndx = get_nasdaq100_tickers()
+        universe = sorted(list(set(sp + ndx)))
     else:
         universe = BIST_EXAMPLES
 
