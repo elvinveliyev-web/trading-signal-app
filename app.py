@@ -6,6 +6,7 @@ import pandas as pd
 import yfinance as yf
 import streamlit as st
 import plotly.graph_objects as go
+import requests  # <-- FIX: wikipedia read_html için
 
 # OpenAI (new SDK)
 from openai import OpenAI
@@ -512,23 +513,35 @@ PRESETS = {
 }
 
 # =============================
-# (NEW) Universe helpers: S&P 500 + Nasdaq-100
+# Universe helpers: S&P 500 + Nasdaq-100 (FIXED: requests + user-agent, fail-open)
 # =============================
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
 def get_sp500_tickers() -> list[str]:
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    tables = pd.read_html(url)
-    dfu = tables[0]
-    return sorted(dfu["Symbol"].astype(str).str.upper().tolist())
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; StreamlitApp/1.0; +https://streamlit.io)"}
+    try:
+        r = requests.get(url, headers=headers, timeout=20)
+        r.raise_for_status()
+        tables = pd.read_html(r.text)
+        dfu = tables[0]
+        return sorted(dfu["Symbol"].astype(str).str.upper().tolist())
+    except Exception:
+        return sorted(list(set(US_TICKERS + US_EXT)))
 
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
 def get_nasdaq100_tickers() -> list[str]:
     url = "https://en.wikipedia.org/wiki/Nasdaq-100"
-    tables = pd.read_html(url)
-    for t in tables:
-        if "Ticker" in t.columns:
-            return sorted(t["Ticker"].astype(str).str.upper().tolist())
-    return []
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; StreamlitApp/1.0; +https://streamlit.io)"}
+    try:
+        r = requests.get(url, headers=headers, timeout=20)
+        r.raise_for_status()
+        tables = pd.read_html(r.text)
+        for t in tables:
+            if "Ticker" in t.columns:
+                return sorted(t["Ticker"].astype(str).str.upper().tolist())
+        return []
+    except Exception:
+        return []
 
 # =============================
 # UI
@@ -582,7 +595,7 @@ with st.sidebar:
         "min_ok": min_ok,
     }
 
-    # (CHANGED) Universe: USA => S&P 500 + Nasdaq-100 (no UI), BIST => examples
+    # Universe: USA => S&P 500 + Nasdaq-100 (no UI), BIST => examples
     if market == "USA":
         sp = get_sp500_tickers()
         ndx = get_nasdaq100_tickers()
