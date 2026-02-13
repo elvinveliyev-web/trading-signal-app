@@ -835,22 +835,23 @@ rr_str = fmt_rr(rr_info.get("rr"))
 bcol1, bcol2, bcol3 = st.columns(3)
 bcol1.metric("Base", f"{base_px:.2f}")
 
-if tp["bull"]:
+if tp.get("bull"):
     bull1, bull2, r1 = tp["bull"]
     bcol2.metric("Bull Band", f"{bull1:.2f} → {bull2:.2f}")
-    if r1:
-        bcol2.caption(f"Yakın direnç: {r1:.2f} ({pct_dist(r1, base_px):.2f}%)")
+    if r1 is not None and np.isfinite(r1):
+        bcol2.caption(f"Yakın direnç: {r1:.2f} ({pct_dist(r1, base_px):+.2f}%)")
 else:
     bcol2.metric("Bull Band", "N/A")
+    r1 = None
 
-if tp["bear"]:
+if tp.get("bear"):
     bear1, bear2, s1 = tp["bear"]
-    # İstenen: Bear Band yanında tek RR rakamı (1:X)
     bcol3.metric("Bear Band", f"{bear1:.2f} → {bear2:.2f}  |  RR {rr_str}")
-    if s1:
-        bcol3.caption(f"Yakın destek: {s1:.2f} ({pct_dist(s1, base_px):.2f}%)")
+    if s1 is not None and np.isfinite(s1):
+        bcol3.caption(f"Yakın destek: {s1:.2f} ({pct_dist(s1, base_px):+.2f}%)")
 else:
     bcol3.metric("Bear Band", f"N/A  |  RR {rr_str}")
+    s1 = None
 
 # -----------------------------
 # Levels: İşaretleme + fiyata uzaklık %
@@ -859,84 +860,9 @@ def render_levels_marked(levels: list[float], base: float, s1, r1):
     lines = []
     for lv in levels:
         tag = ""
-        if s1 is not None and np.isfinite(s1) and abs(lv - float(s1)) < 1e-9:
+        if s1 is not None and np.isfinite(s1) and abs(float(lv) - float(s1)) < 1e-9:
             tag = " 🟩 Yakın Destek"
-        if r1 is not None and np.isfinite(r1) and abs(lv - float(r1)) < 1e-9:
+        if r1 is not None and np.isfinite(r1) and abs(float(lv) - float(r1)) < 1e-9:
             tag = " 🟥 Yakın Direnç"
-        dist = pct_dist(lv, base)
-        dist_txt = f"{dist:+.2f}%" if dist is not None else ""
-        lines.append(f"- {lv:.2f}  ({dist_txt}){tag}")
-    return "\n".join(lines) if lines else "_Seviye yok_"
-
-with st.expander("Seviye listesi (yaklaşık) — işaretli + fiyata uzaklık %", expanded=False):
-    r1 = tp["bull"][2] if tp.get("bull") else None
-    s1 = tp["bear"][2] if tp.get("bear") else None
-    st.markdown(render_levels_marked(tp["levels"], base_px, s1, r1))
-
-# -----------------------------
-# Charts
-# -----------------------------
-st.subheader("📊 Fiyat + EMA + Bollinger + Sinyaller")
-fig = go.Figure()
-fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"))
-fig.add_trace(go.Scatter(x=df.index, y=df["EMA50"], name="EMA Fast"))
-fig.add_trace(go.Scatter(x=df.index, y=df["EMA200"], name="EMA Slow"))
-fig.add_trace(go.Scatter(x=df.index, y=df["BB_upper"], name="BB Upper", line=dict(dash="dot")))
-fig.add_trace(go.Scatter(x=df.index, y=df["BB_mid"], name="BB Mid", line=dict(dash="dot")))
-fig.add_trace(go.Scatter(x=df.index, y=df["BB_lower"], name="BB Lower", line=dict(dash="dot")))
-
-entries = df[df["ENTRY"] == 1]
-exits = df[df["EXIT"] == 1]
-fig.add_trace(go.Scatter(x=entries.index, y=entries["Close"], mode="markers", name="ENTRY", marker=dict(symbol="triangle-up", size=10)))
-fig.add_trace(go.Scatter(x=exits.index, y=exits["Close"], mode="markers", name="EXIT", marker=dict(symbol="triangle-down", size=10)))
-fig.update_layout(height=600, xaxis_rangeslider_visible=False)
-st.plotly_chart(fig, use_container_width=True)
-
-st.subheader("📉 RSI / MACD / ATR%")
-colA, colB, colC = st.columns(3)
-
-fig_rsi = go.Figure()
-fig_rsi.add_trace(go.Scatter(x=df.index, y=df["RSI"], name="RSI"))
-fig_rsi.add_hline(y=70)
-fig_rsi.add_hline(y=30)
-fig_rsi.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10))
-colA.plotly_chart(fig_rsi, use_container_width=True)
-
-fig_macd = go.Figure()
-fig_macd.add_trace(go.Scatter(x=df.index, y=df["MACD"], name="MACD"))
-fig_macd.add_trace(go.Scatter(x=df.index, y=df["MACD_signal"], name="Signal"))
-fig_macd.add_trace(go.Bar(x=df.index, y=df["MACD_hist"], name="Hist"))
-fig_macd.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10))
-colB.plotly_chart(fig_macd, use_container_width=True)
-
-fig_atr = go.Figure()
-fig_atr.add_trace(go.Scatter(x=df.index, y=df["ATR_PCT"] * 100, name="ATR%"))
-fig_atr.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), yaxis_title="%")
-colC.plotly_chart(fig_atr, use_container_width=True)
-
-st.subheader("🧪 Backtest Özeti (Long-only)")
-m1, m2, m3, m4, m5, m6 = st.columns(6)
-m1.metric("Total Return", f"{metrics['Total Return']*100:.1f}%")
-m2.metric("Ann Return", f"{metrics['Annualized Return']*100:.1f}%")
-m3.metric("Sharpe", f"{metrics['Sharpe']:.2f}")
-m4.metric("Max DD", f"{metrics['Max Drawdown']*100:.1f}%")
-m5.metric("Trades", f"{metrics['Trades']}")
-m6.metric("Win Rate", f"{metrics['Win Rate']*100:.1f}%")
-
-with st.expander("Trade listesi", expanded=False):
-    st.dataframe(tdf, use_container_width=True, height=240)
-
-with st.expander("Equity curve", expanded=False):
-    fig_eq = go.Figure()
-    fig_eq.add_trace(go.Scatter(x=eq.index, y=eq.values, name="Equity"))
-    fig_eq.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig_eq, use_container_width=True)
-
-# -----------------------------
-# AI Chat
-# -----------------------------
-st.subheader("🤖 AI Analiz (Chat)")
-
-if not st.secrets.get("OPENAI_API_KEY", ""):
-    st.warning("OPENAI_API_KEY bulunamadı. Streamlit Cloud > Secrets'e ekl
+        dist = pct_dist(float(
 ::contentReference[oaicite:0]{index=0}
