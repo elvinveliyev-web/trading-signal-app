@@ -6,7 +6,7 @@ import pandas as pd
 import yfinance as yf
 import streamlit as st
 import plotly.graph_objects as go
-import requests  # <-- FIX: wikipedia read_html için
+import requests
 
 # OpenAI (new SDK)
 from openai import OpenAI
@@ -212,12 +212,10 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
         position_value = shares * price * (1 - slippage)
         equity = cash + position_value
 
-        # trailing stop
         if shares > 0 and pd.notna(row["ATR"]) and row["ATR"] > 0:
             new_stop = price - cfg["atr_stop_mult"] * float(row["ATR"])
             stop = max(stop, new_stop) if pd.notna(stop) else new_stop
 
-        # exit
         if shares > 0:
             stop_hit = pd.notna(stop) and (price <= stop)
             if exit_sig.iloc[i] == 1 or stop_hit:
@@ -234,7 +232,6 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
                 shares = 0.0
                 stop = np.nan
 
-        # entry
         position_value = shares * price * (1 - slippage)
         equity = cash + position_value
 
@@ -513,7 +510,7 @@ PRESETS = {
 }
 
 # =============================
-# Universe helpers: S&P 500 + Nasdaq-100 (FIXED: requests + user-agent, fail-open)
+# Universe helpers: S&P 500 + Nasdaq-100 (requests + user-agent, fail-open)
 # =============================
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
 def get_sp500_tickers() -> list[str]:
@@ -557,6 +554,9 @@ if "ai_messages" not in st.session_state:
     st.session_state.ai_messages = [
         {"role": "assistant", "content": "Sorunu yaz: örn. “Riskler ne, hedef bant ne, hangi şartta çıkarım?”"}
     ]
+# FIX: TA çalıştı mı? (chat yazınca rerun olsa bile geri atmasın)
+if "ta_ran" not in st.session_state:
+    st.session_state.ta_ran = False
 
 with st.sidebar:
     st.header("Piyasa")
@@ -653,6 +653,8 @@ with st.sidebar:
     ai_temp = st.slider("Temperature", 0.0, 1.0, 0.2, 0.05)
 
     run_btn = st.button("🚀 Teknik Analizi Çalıştır", type="primary")
+    if run_btn:
+        st.session_state.ta_ran = True
 
 # -----------------------------
 # Fundamental screener action (USA only)
@@ -724,7 +726,8 @@ def load_data_cached(ticker: str, period: str, interval: str) -> pd.DataFrame:
     df = yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False)
     return _flatten_yf(df)
 
-if not run_btn:
+# FIX: chat yazınca run_btn False olacağı için geri atmasın
+if not st.session_state.ta_ran:
     st.info("Soldan ayarları yapıp **Teknik Analizi Çalıştır**’a bas.")
     st.stop()
 
@@ -751,11 +754,9 @@ df = build_features(df_raw, cfg)
 df, checkpoints = signal_with_checkpoints(df, cfg, market_filter_ok=market_filter_ok)
 latest = df.iloc[-1]
 
-# Live price vs last close
 live = get_live_price(ticker)
 live_price = live.get("last_price", np.nan)
 
-# Recommendation
 if int(latest["ENTRY"]) == 1:
     rec = "AL"
 elif int(latest["EXIT"]) == 1:
@@ -763,13 +764,9 @@ elif int(latest["EXIT"]) == 1:
 else:
     rec = "İZLE (Güçlü Trend)" if latest["SCORE"] >= 80 else ("BEKLE (Orta)" if latest["SCORE"] >= 60 else "UZAK DUR")
 
-# Backtest
 eq, tdf, metrics = backtest_long_only(df, cfg, risk_free_annual=risk_free_annual)
-
-# Target price band
 tp = target_price_band(df)
 
-# Top metrics
 c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
 c1.metric("Market", market)
 c2.metric("Sembol", ticker)
@@ -781,14 +778,12 @@ c7.metric("SPY Rejim", "BULL ✅" if (market == "USA" and market_filter_ok) else
 
 st.caption("Not: Daily Close (1d bar) ile Live/Last farklı olabilir. Piyasa açıkken 1d bar kapanışı güncellenmez.")
 
-# Checkpoints
 st.subheader("✅ Kontrol Noktaları (Son Bar)")
 cp_cols = st.columns(3)
 for i, (k, v) in enumerate(checkpoints.items()):
     with cp_cols[i % 3]:
         st.write(("🟢 " if v else "🔴 ") + k)
 
-# Target band display
 st.subheader("🎯 Hedef Fiyat Bandı (Senaryo)")
 bcol1, bcol2, bcol3 = st.columns(3)
 bcol1.metric("Base", f"{tp['base']:.2f}")
@@ -811,7 +806,6 @@ else:
 with st.expander("Seviye listesi (yaklaşık)", expanded=False):
     st.write(tp["levels"])
 
-# Price chart
 st.subheader("📊 Fiyat + EMA + Bollinger + Sinyaller")
 fig = go.Figure()
 fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"))
@@ -828,7 +822,6 @@ fig.add_trace(go.Scatter(x=exits.index, y=exits["Close"], mode="markers", name="
 fig.update_layout(height=600, xaxis_rangeslider_visible=False)
 st.plotly_chart(fig, use_container_width=True)
 
-# Indicators
 st.subheader("📉 RSI / MACD / ATR%")
 colA, colB, colC = st.columns(3)
 
@@ -851,7 +844,6 @@ fig_atr.add_trace(go.Scatter(x=df.index, y=df["ATR_PCT"] * 100, name="ATR%"))
 fig_atr.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), yaxis_title="%")
 colC.plotly_chart(fig_atr, use_container_width=True)
 
-# Backtest metrics
 st.subheader("🧪 Backtest Özeti (Long-only)")
 m1, m2, m3, m4, m5, m6 = st.columns(6)
 m1.metric("Total Return", f"{metrics['Total Return']*100:.1f}%")
@@ -870,9 +862,6 @@ with st.expander("Equity curve", expanded=False):
     fig_eq.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
     st.plotly_chart(fig_eq, use_container_width=True)
 
-# =============================
-# AI Chat
-# =============================
 st.subheader("🤖 AI Analiz (Chat)")
 
 if not st.secrets.get("OPENAI_API_KEY", ""):
