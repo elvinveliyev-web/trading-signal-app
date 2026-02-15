@@ -972,3 +972,101 @@ else:
 
             for m in st.session_state.ai_messages:
                 st.write(f"**{m['role'].upper()}**: {m['content']}")
+# -----------------------------
+# Main TA & Backtest Execution
+# -----------------------------
+if st.session_state.ta_ran:
+    with st.spinner(f"{ticker} verileri çekiliyor ve analiz ediliyor..."):
+        # Veri çekme
+        raw_df = yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False)
+        df = _flatten_yf(raw_df)
+
+        if df.empty:
+            st.error(f"Veri bulunamadı: {ticker}. Sembolü kontrol edin.")
+        else:
+            # 1. Göstergeleri hesapla
+            cfg = {
+                "ema_fast": ema_fast, "ema_slow": ema_slow, "rsi_period": rsi_period,
+                "bb_period": bb_period, "bb_std": bb_std, "atr_period": atr_period,
+                "vol_sma": vol_sma, "rsi_entry_level": PRESETS[preset_name]["rsi_entry_level"],
+                "rsi_exit_level": PRESETS[preset_name]["rsi_exit_level"],
+                "atr_pct_max": PRESETS[preset_name]["atr_pct_max"],
+                "atr_stop_mult": PRESETS[preset_name]["atr_stop_mult"],
+                "initial_capital": initial_capital, "risk_per_trade": risk_per_trade,
+                "commission_bps": commission_bps, "slippage_bps": slippage_bps
+            }
+            
+            df = build_features(df, cfg)
+            
+            # 2. Market Filtresi (SPY)
+            m_ok = True
+            if market == "USA" and use_spy_filter:
+                m_ok = get_spy_regime_ok()
+            
+            # 3. Sinyal ve Backtest
+            df, checkpoints = signal_with_checkpoints(df, cfg, m_ok)
+            eq_curve, trades_df, metrics = backtest_long_only(df, cfg, risk_free_annual)
+            
+            # --- GÖRSELLEŞTİRME ---
+            col_main, col_side = st.columns([3, 1])
+            
+            with col_main:
+                # Fiyat ve Gösterge Grafiği
+                fig = go.Figure()
+                fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Fiyat"))
+                fig.add_trace(go.Scatter(x=df.index, y=df['EMA50'], line=dict(color='orange', width=1), name="EMA 50"))
+                fig.add_trace(go.Scatter(x=df.index, y=df['EMA200'], line=dict(color='red', width=1.5), name="EMA 200"))
+                fig.update_layout(title=f"{ticker} Teknik Görünüm", xaxis_rangeslider_visible=False, height=600)
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Equity Curve
+                fig_eq = go.Figure()
+                fig_eq.add_trace(go.Scatter(x=eq_curve.index, y=eq_curve.values, fill='tozeroy', name="Equity"))
+                fig_eq.update_layout(title="Strateji Getiri Eğrisi (Backtest)", height=400)
+                st.plotly_chart(fig_eq, use_container_width=True)
+
+            with col_side:
+                st.subheader("📊 Performans")
+                for k, v in metrics.items():
+                    color = "green" if (isinstance(v, float) and v > 0) else "red"
+                    if k in ["Total Return", "Annualized Return", "Win Rate", "Max Drawdown"]:
+                        st.metric(k, f"{v:.2%}")
+                    else:
+                        st.metric(k, f"{v:.2f}")
+
+                st.subheader("🔍 Checkpoints")
+                for label, status in checkpoints.items():
+                    st.write(f"{'✅' if status else '❌'} {label}")
+
+            # --- AI CHAT KATMANI ---
+            if ai_on:
+                st.divider()
+                st.header("🤖 AI Analist ile Konuş")
+                
+                live_data = get_live_price(ticker)
+                tp_data = target_price_band(df)
+                ai_ctx = build_ai_context(ticker, market, df.iloc[-1], checkpoints, metrics, tp_data, live_data, df)
+                
+                # Mesaj Geçmişini Göster
+                for msg in st.session_state.ai_messages:
+                    with st.chat_message(msg["role"]):
+                        st.markdown(msg["content"])
+
+                if prompt := st.chat_input("Bu hisse senedi hakkında ne düşünüyorsun?"):
+                    st.session_state.ai_messages.append({"role": "user", "content": prompt})
+                    with st.chat_message("user"):
+                        st.markdown(prompt)
+
+                    with st.chat_message("assistant"):
+                        # AI'ya bağlamı ve soruyu gönder
+                        full_prompt = f"Context: {json.dumps(ai_ctx)}\n\nUser Question: {prompt}"
+                        messages = [
+                            {"role": "system", "content": "Sen profesyonel bir finansal analistsin. Verilen TA ve FA verilerini kullanarak objektif analiz yaparsın."},
+                            {"role": "user", "content": full_prompt}
+                        ]
+                        try:
+                            response = call_openai(messages, ai_model, ai_temp)
+                            st.markdown(response)
+                            st.session_state.ai_messages.append({"role": "assistant", "content": response})
+                        except Exception as e:
+                            st.error(f"AI Hatası: {e}")
