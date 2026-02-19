@@ -6,3 +6,5 @@ plotly
 lxml
 requests
 openai>=1.0.0
+reportlab
+kaleido
