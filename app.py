@@ -1,12 +1,20 @@
 import os
 import json
 import time
+from io import BytesIO
+
 import numpy as np
 import pandas as pd
 import yfinance as yf
 import streamlit as st
 import plotly.graph_objects as go
 import requests
+
+# PDF (reportlab)
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import cm
+from reportlab.lib.utils import ImageReader
 
 # OpenAI (new SDK)
 from openai import OpenAI
@@ -42,6 +50,16 @@ def _flatten_yf(df: pd.DataFrame) -> pd.DataFrame:
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [c[0] for c in df.columns]
     return df.dropna()
+
+def fmt_pct(x: float) -> str:
+    if x is None or (isinstance(x, float) and not np.isfinite(x)):
+        return "N/A"
+    return f"{x*100:.2f}%"
+
+def fmt_num(x: float, nd=2) -> str:
+    if x is None or (isinstance(x, float) and not np.isfinite(x)):
+        return "N/A"
+    return f"{x:.{nd}f}"
 
 # =============================
 # Indicators
@@ -329,7 +347,6 @@ def _fix_debt_to_equity(x: float) -> float:
 
 @st.cache_data(ttl=12 * 3600, show_spinner=False)
 def fetch_fundamentals_generic(ticker: str, market: str) -> dict:
-    # market paramı burada sadece gelecekte genişlemek için; şu an yfinance info okuyor
     t = yf.Ticker(ticker)
     try:
         info = t.info or {}
@@ -427,12 +444,9 @@ def fundamental_score_row(row: dict, mode: str, thresholds: dict) -> tuple[float
 
     score_pct = (score / total_w) * 100 if total_w > 0 else 0.0
 
-    # Coverage kontrolü (BIST için kritik)
     min_coverage = int(thresholds.get("min_coverage", 3))
     min_ok = int(thresholds["min_ok"])
-
     pass_bool = (score_pct >= thresholds["min_score"]) and (ok_cnt >= min_ok) and (avail_cnt >= min_coverage)
-
     return float(score_pct), b, bool(pass_bool)
 
 # =============================
@@ -441,7 +455,6 @@ def fundamental_score_row(row: dict, mode: str, thresholds: dict) -> tuple[float
 US_TICKERS = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "NFLX", "JPM", "XOM", "SPY", "QQQ"]
 US_EXT = ["AVGO", "AMD", "ORCL", "COST", "KO", "PEP", "JNJ", "PG", "V", "MA", "UNH", "HD", "CRM", "ADBE"]
 
-# BIST100 fallback (tam liste zamanla değişebilir; otomatik çekim çalışmazsa devreye girer)
 BIST100_FALLBACK = [
     "AEFES","AGHOL","AHGAZ","AKBNK","AKFGY","AKSA","AKSEN","ALARK","ALBRK","ALFAS",
     "ARCLK","ARDYZ","ASELS","ASTOR","BIMAS","BRSAN","BRYAT","BSOKE","CCOLA","CEMTS",
@@ -488,7 +501,6 @@ def get_bist100_tickers() -> list[str]:
     Önce Borsa İstanbul sayfasından tablo çekmeyi dener.
     Olmazsa fallback listeye döner.
     """
-    # 1) Borsa İstanbul (tablo yapısı zamanla değişebilir)
     candidates = [
         "https://www.borsaistanbul.com/en/indices/bist-stock-indices/bist-100",
         "https://www.borsaistanbul.com/tr/sayfa/195/bist-pay-endeksleri",
@@ -501,9 +513,7 @@ def get_bist100_tickers() -> list[str]:
             r = requests.get(url, headers=headers, timeout=20)
             r.raise_for_status()
             tables = pd.read_html(r.text)
-            # Tablolarda sembol kolonu arıyoruz
             for t in tables:
-                cols = [c.lower() for c in t.columns.astype(str)]
                 sym_col = None
                 for c in t.columns:
                     cl = str(c).lower()
@@ -512,13 +522,12 @@ def get_bist100_tickers() -> list[str]:
                         break
                 if sym_col is not None:
                     syms = t[sym_col].astype(str).str.upper().str.replace(".IS", "", regex=False).tolist()
-                    syms = [s.strip() for s in syms if s.strip() and s.strip().isalpha()]
-                    if len(syms) >= 50:  # en az 50 gelirse kabul
+                    syms = [s.strip() for s in syms if s.strip()]
+                    if len(syms) >= 50:
                         return sorted(list(set(syms)))
         except Exception:
             pass
 
-    # 2) Fallback
     return sorted(list(set(BIST100_FALLBACK)))
 
 # =============================
@@ -636,6 +645,216 @@ PRESETS = {
 }
 
 # =============================
+# PDF helpers
+# =============================
+def _plotly_fig_to_png_bytes(fig) -> bytes | None:
+    """
+    Plotly fig'i PNG'ye çevirir (kaleido gerekir).
+    Ortamda yoksa None döner (metin ağırlıklı PDF ile devam edilir).
+    """
+    try:
+        # kaleido yüklüyse çalışır
+        return fig.to_image(format="png", scale=2)
+    except Exception:
+        return None
+
+def _pdf_write_lines(c: canvas.Canvas, lines: list[str], x: float, y: float, lh: float, bottom: float):
+    for line in lines:
+        if y <= bottom:
+            c.showPage()
+            y = A4[1] - 2.0 * cm
+        c.drawString(x, y, line[:220])
+        y -= lh
+    return y
+
+def generate_pdf_report(
+    *,
+    title: str,
+    subtitle: str,
+    meta: dict,
+    checkpoints: dict,
+    ta_summary: dict,
+    target_band: dict,
+    rr_info: dict,
+    backtest_metrics: dict,
+    fundamentals: dict | None,
+    fa_eval: dict | None,
+    levels: list[float] | None,
+    trades_df: pd.DataFrame | None,
+    figs: dict[str, go.Figure] | None,
+    include_charts: bool = True,
+) -> bytes:
+    buf = BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    W, H = A4
+
+    left = 1.6 * cm
+    right = W - 1.6 * cm
+    top = H - 1.6 * cm
+    bottom = 1.6 * cm
+    y = top
+
+    # Title
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(left, y, title[:90]); y -= 18
+    c.setFont("Helvetica", 10)
+    c.drawString(left, y, subtitle[:140]); y -= 14
+
+    c.setFont("Helvetica", 9)
+    y = _pdf_write_lines(
+        c,
+        [
+            f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Market: {meta.get('market','')} | Ticker: {meta.get('ticker','')} | Interval: {meta.get('interval','')} | Period: {meta.get('period','')}",
+            f"Preset: {meta.get('preset','')} | EMA: {meta.get('ema_fast','')}/{meta.get('ema_slow','')} | RSI: {meta.get('rsi_period','')} | BB: {meta.get('bb_period','')}/{meta.get('bb_std','')} | ATR: {meta.get('atr_period','')} | VolSMA: {meta.get('vol_sma','')}",
+        ],
+        left, y, 12, bottom
+    )
+    y -= 6
+
+    # TA Summary
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(left, y, "Technical Summary"); y -= 14
+    c.setFont("Helvetica", 9)
+    y = _pdf_write_lines(
+        c,
+        [
+            f"Recommendation: {ta_summary.get('rec','')}",
+            f"Last Close (bar): {ta_summary.get('close','N/A')} | Live/Last: {ta_summary.get('live','N/A')}",
+            f"Score: {ta_summary.get('score','N/A')} | RSI: {ta_summary.get('rsi','N/A')} | EMA50: {ta_summary.get('ema50','N/A')} | EMA200: {ta_summary.get('ema200','N/A')} | ATR%: {ta_summary.get('atr_pct','N/A')}",
+        ],
+        left, y, 12, bottom
+    )
+    y -= 6
+
+    # Checkpoints
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(left, y, "Checkpoints (Last Bar)"); y -= 14
+    c.setFont("Helvetica", 9)
+    cp_lines = [f"[{'OK' if v else 'NO'}] {k}" for k, v in checkpoints.items()]
+    y = _pdf_write_lines(c, cp_lines, left, y, 11, bottom)
+    y -= 6
+
+    # Target band + RR
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(left, y, "Target Price Band (Scenario)"); y -= 14
+    c.setFont("Helvetica", 9)
+
+    base = target_band.get("base")
+    bull = target_band.get("bull")
+    bear = target_band.get("bear")
+    rr = rr_info.get("rr")
+    stop = rr_info.get("stop")
+
+    band_lines = [f"Base: {fmt_num(base)}"]
+    if bull:
+        band_lines.append(f"Bull: {fmt_num(bull[0])} -> {fmt_num(bull[1])} | Near Resistance: {fmt_num(bull[2])}")
+    else:
+        band_lines.append("Bull: N/A")
+    if bear:
+        band_lines.append(f"Bear: {fmt_num(bear[0])} -> {fmt_num(bear[1])} | Near Support: {fmt_num(bear[2])}")
+    else:
+        band_lines.append("Bear: N/A")
+
+    band_lines.append(f"RR (bull1 vs ATR stop): {'N/A' if rr is None else f'1:{rr:.2f}'} | Stop(ATR): {fmt_num(stop)}")
+    y = _pdf_write_lines(c, band_lines, left, y, 12, bottom)
+    y -= 6
+
+    # Levels
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(left, y, "Levels (Approx.)"); y -= 14
+    c.setFont("Helvetica", 9)
+    if levels:
+        lv_lines = [", ".join([fmt_num(x) for x in levels[i:i+10]]) for i in range(0, len(levels), 10)]
+    else:
+        lv_lines = ["N/A"]
+    y = _pdf_write_lines(c, lv_lines, left, y, 11, bottom)
+    y -= 6
+
+    # Backtest metrics
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(left, y, "Backtest Summary (Long-only)"); y -= 14
+    c.setFont("Helvetica", 9)
+    bm = backtest_metrics or {}
+    y = _pdf_write_lines(
+        c,
+        [
+            f"Total Return: {fmt_pct(bm.get('Total Return'))} | Ann Return: {fmt_pct(bm.get('Annualized Return'))} | Ann Vol: {fmt_pct(bm.get('Annualized Volatility'))}",
+            f"Sharpe: {fmt_num(bm.get('Sharpe'), 2)} | Sortino: {fmt_num(bm.get('Sortino'), 2)} | Calmar: {fmt_num(bm.get('Calmar'), 2)}",
+            f"Max DD: {fmt_pct(bm.get('Max Drawdown'))} | Trades: {bm.get('Trades','')} | Win Rate: {fmt_pct(bm.get('Win Rate'))} | Profit Factor: {fmt_num(bm.get('Profit Factor'), 2)}",
+        ],
+        left, y, 12, bottom
+    )
+    y -= 6
+
+    # Fundamentals
+    if fundamentals:
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(left, y, "Fundamentals (yfinance info)"); y -= 14
+        c.setFont("Helvetica", 9)
+        f = fundamentals
+        lines = [
+            f"Name: {f.get('longName','')} | Sector: {f.get('sector','')} | Industry: {f.get('industry','')}",
+            f"Market Cap: {fmt_num(f.get('marketCap'),0)} | Trailing PE: {fmt_num(f.get('trailingPE'))} | Forward PE: {fmt_num(f.get('forwardPE'))}",
+            f"PEG: {fmt_num(f.get('pegRatio'))} | P/S: {fmt_num(f.get('priceToSalesTrailing12Months'))} | P/B: {fmt_num(f.get('priceToBook'))}",
+            f"ROE: {fmt_pct(f.get('returnOnEquity'))} | Op Margin: {fmt_pct(f.get('operatingMargins'))} | Profit Margin: {fmt_pct(f.get('profitMargins'))}",
+            f"Debt/Equity: {fmt_num(f.get('debtToEquity'))} | Rev Growth: {fmt_pct(f.get('revenueGrowth'))} | Earn Growth: {fmt_pct(f.get('earningsGrowth'))}",
+            f"Free Cashflow: {fmt_num(f.get('freeCashflow'),0)} | Current Price(info): {fmt_num(f.get('currentPrice'))}",
+        ]
+        y = _pdf_write_lines(c, lines, left, y, 11, bottom)
+        y -= 4
+
+        if fa_eval:
+            c.setFont("Helvetica-Bold", 11)
+            c.drawString(left, y, "Fundamental Scoring (current thresholds)"); y -= 13
+            c.setFont("Helvetica", 9)
+            y = _pdf_write_lines(
+                c,
+                [
+                    f"Mode: {fa_eval.get('mode','')} | Score: {fmt_num(fa_eval.get('score', np.nan),1)} | PASS: {fa_eval.get('passed', False)} | OK: {fa_eval.get('ok_cnt',0)} | Coverage: {fa_eval.get('coverage',0)}",
+                ],
+                left, y, 11, bottom
+            )
+            y -= 2
+
+    # Trades (first rows)
+    if trades_df is not None and not trades_df.empty:
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(left, y, "Trades (first 25 rows)"); y -= 14
+        c.setFont("Helvetica", 8)
+        td = trades_df.copy().head(25)
+        cols = [c for c in ["entry_date","entry_price","exit_date","exit_price","exit_reason","pnl","return_%","holding_days"] if c in td.columns]
+        # header
+        header = " | ".join(cols)
+        y = _pdf_write_lines(c, [header], left, y, 10, bottom)
+        # rows
+        for _, r in td.iterrows():
+            row_txt = " | ".join([str(r.get(k, ""))[:18] for k in cols])
+            y = _pdf_write_lines(c, [row_txt], left, y, 10, bottom)
+        y -= 6
+
+    # Charts pages (optional)
+    if include_charts and figs:
+        for name, fig in figs.items():
+            img = _plotly_fig_to_png_bytes(fig)
+            if not img:
+                continue
+            c.showPage()
+            c.setFont("Helvetica-Bold", 14)
+            c.drawString(left, top, f"Chart: {name}")
+            # fit image
+            img_reader = ImageReader(BytesIO(img))
+            # A4 usable box
+            usable_w = (right - left)
+            usable_h = (H - 3.2*cm - 2.0*cm)
+            # draw image
+            c.drawImage(img_reader, left, 2.0*cm, width=usable_w, height=usable_h, preserveAspectRatio=True, anchor='c')
+
+    c.save()
+    buf.seek(0)
+    return buf.read()
+
+# =============================
 # UI
 # =============================
 st.title("📈 FA→TA Trading Uygulaması + 🤖 AI Analiz")
@@ -676,8 +895,10 @@ with st.sidebar:
 
     min_score = st.slider("Min Fundamental Score", 0, 100, 60, 1, disabled=(not use_fa))
     min_ok = st.slider("Min OK sayısı", 1, 5, 3, 1, disabled=(not use_fa))
-    min_coverage = st.slider("Min Coverage (NaN olmayan metrik sayısı)", 1, 5, 3, 1, disabled=(not use_fa),
-                             help="BIST'te yfinance bazı metrikleri boş getirebilir. Coverage düşükse PASS zorlaşır.")
+    min_coverage = st.slider(
+        "Min Coverage (NaN olmayan metrik sayısı)", 1, 5, 3, 1, disabled=(not use_fa),
+        help="BIST'te yfinance bazı metrikleri boş getirebilir. Coverage düşükse PASS zorlaşır."
+    )
 
     thresholds = {
         "roe": roe,
@@ -764,10 +985,7 @@ with st.sidebar:
 if run_screener and use_fa:
     with st.spinner(f"Fundamental veriler çekiliyor ({market})..."):
         rows = []
-        # BIST'te hız için biraz limit koymak istersen:
-        # universe_iter = universe[:100]
         universe_iter = universe
-
         for tk in universe_iter:
             tk_norm = normalize_ticker(tk, market)
             f = fetch_fundamentals_generic(tk_norm, market=market)
@@ -783,35 +1001,6 @@ if run_screener and use_fa:
             sdf["FA_pass_int"] = sdf["FA_pass"].astype(int)
             sdf = sdf.sort_values(["FA_pass_int", "FA_score", "FA_coverage"], ascending=[False, False, False]).drop(columns=["FA_pass_int"])
         st.session_state.screener_df = sdf.copy()
-
-# -----------------------------
-# Screener display (if available)
-# -----------------------------
-if use_fa and not st.session_state.screener_df.empty:
-    st.subheader(f"🧾 Fundamental Screener Sonuçları ({market})")
-    sdf = st.session_state.screener_df.copy()
-
-    show_cols = [
-        "ticker", "longName", "FA_pass", "FA_score", "FA_ok_count", "FA_coverage",
-        "sector", "industry",
-        "trailingPE", "forwardPE", "pegRatio", "priceToSalesTrailing12Months", "priceToBook",
-        "returnOnEquity", "operatingMargins", "profitMargins", "debtToEquity",
-        "revenueGrowth", "earningsGrowth",
-        "marketCap"
-    ]
-    sdf_show = sdf[[c for c in show_cols if c in sdf.columns]].copy()
-    st.dataframe(sdf_show, use_container_width=True, height=360)
-
-    pass_list = sdf.loc[sdf["FA_pass"] == True, "ticker"].tolist()
-    if len(pass_list) == 0:
-        st.warning("Bu eşiklerle PASS çıkan hisse yok. Eşikleri gevşet / mode değiştir / coverage düşür.")
-    else:
-        st.success(f"PASS sayısı: {len(pass_list)}")
-        picked = st.selectbox("PASS listesinden hisse seç (TA’ya gönder)", pass_list, index=0)
-        if st.button("➡️ Seçimi Teknik Analize Aktar"):
-            # TA input'u için .IS kalsın (BIST) / normal kalsın (USA)
-            st.session_state.selected_ticker = picked
-            st.rerun()
 
 # -----------------------------
 # Technical run (single execution)
@@ -836,10 +1025,40 @@ def load_data_cached(ticker: str, period: str, interval: str) -> pd.DataFrame:
     df = yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False)
     return _flatten_yf(df)
 
+# Eğer TA koşmadıysa: sadece screener ekranını gösterelim, sonra stop.
 if not st.session_state.ta_ran:
+    # Screener display (if available)
+    if use_fa and not st.session_state.screener_df.empty:
+        st.subheader(f"🧾 Fundamental Screener Sonuçları ({market})")
+        sdf = st.session_state.screener_df.copy()
+
+        show_cols = [
+            "ticker", "longName", "FA_pass", "FA_score", "FA_ok_count", "FA_coverage",
+            "sector", "industry",
+            "trailingPE", "forwardPE", "pegRatio", "priceToSalesTrailing12Months", "priceToBook",
+            "returnOnEquity", "operatingMargins", "profitMargins", "debtToEquity",
+            "revenueGrowth", "earningsGrowth",
+            "marketCap"
+        ]
+        sdf_show = sdf[[c for c in show_cols if c in sdf.columns]].copy()
+        st.dataframe(sdf_show, use_container_width=True, height=360)
+
+        pass_list = sdf.loc[sdf["FA_pass"] == True, "ticker"].tolist()
+        if len(pass_list) == 0:
+            st.warning("Bu eşiklerle PASS çıkan hisse yok. Eşikleri gevşet / mode değiştir / coverage düşür.")
+        else:
+            st.success(f"PASS sayısı: {len(pass_list)}")
+            picked = st.selectbox("PASS listesinden hisse seç (TA’ya gönder)", pass_list, index=0)
+            if st.button("➡️ Seçimi Teknik Analize Aktar"):
+                st.session_state.selected_ticker = picked
+                st.rerun()
+
     st.info("Soldan ayarları yapıp **Teknik Analizi Çalıştır**’a bas.")
     st.stop()
 
+# =============================
+# Run TA pipeline
+# =============================
 market_filter_ok = True
 if market == "USA" and use_spy_filter:
     with st.spinner("SPY rejimi kontrol ediliyor..."):
@@ -911,169 +1130,290 @@ def pct_dist(level: float, base: float):
         return None
     return (level / base - 1.0) * 100.0
 
-# -----------------------------
-# Summary metrics
-# -----------------------------
-c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
-c1.metric("Market", market)
-c2.metric("Sembol", ticker)
-c3.metric("Daily Close (bar)", f"{latest['Close']:.2f}")
-c4.metric("Live/Last", f"{live_price:.2f}" if np.isfinite(live_price) else "N/A")
-c5.metric("Skor", f"{latest['SCORE']:.0f}/100")
-c6.metric("Sinyal", rec)
-c7.metric(
-    "SPY Rejim",
-    "BULL ✅" if (market == "USA" and market_filter_ok) else ("BEAR ❌" if market == "USA" else "N/A")
-)
-
-st.caption("Not: Daily Close (1d bar) ile Live/Last farklı olabilir. Piyasa açıkken 1d bar kapanışı güncellenmez.")
-
-st.subheader("✅ Kontrol Noktaları (Son Bar)")
-cp_cols = st.columns(3)
-for i, (k, v) in enumerate(checkpoints.items()):
-    with cp_cols[i % 3]:
-        st.write(("🟢 " if v else "🔴 ") + k)
-
-# -----------------------------
-# Target band + RR
-# -----------------------------
-st.subheader("🎯 Hedef Fiyat Bandı (Senaryo)")
-
-base_px = float(tp["base"])
-rr_str = fmt_rr(rr_info.get("rr"))
-
-bcol1, bcol2, bcol3 = st.columns(3)
-bcol1.metric("Base", f"{base_px:.2f}")
-
-if tp.get("bull"):
-    bull1, bull2, r1 = tp["bull"]
-    bcol2.metric("Bull Band", f"{bull1:.2f} → {bull2:.2f}")
-    if r1 is not None and np.isfinite(r1):
-        bcol2.caption(f"Yakın direnç: {r1:.2f} ({pct_dist(r1, base_px):+.2f}%)")
-else:
-    bcol2.metric("Bull Band", "N/A")
-    r1 = None
-
-if tp.get("bear"):
-    bear1, bear2, s1 = tp["bear"]
-    bcol3.metric("Bear Band", f"{bear1:.2f} → {bear2:.2f}  |  RR {rr_str}")
-    if s1 is not None and np.isfinite(s1):
-        bcol3.caption(f"Yakın destek: {s1:.2f} ({pct_dist(s1, base_px):+.2f}%)")
-else:
-    bcol3.metric("Bear Band", f"N/A  |  RR {rr_str}")
-    s1 = None
-
-def render_levels_marked(levels: list[float], base: float, s1, r1):
-    lines = []
-    for lv in (levels or []):
-        tag = ""
-        if s1 is not None and np.isfinite(s1) and abs(float(lv) - float(s1)) < 1e-9:
-            tag = " 🟩 Yakın Destek"
-        if r1 is not None and np.isfinite(r1) and abs(float(lv) - float(r1)) < 1e-9:
-            tag = " 🟥 Yakın Direnç"
-        dist = pct_dist(float(lv), base)
-        dist_txt = f"{dist:+.2f}%" if dist is not None else ""
-        lines.append(f"- {float(lv):.2f}  ({dist_txt}){tag}")
-    return "\n".join(lines) if lines else "_Seviye yok_"
-
-with st.expander("Seviye listesi (yaklaşık) — işaretli + fiyata uzaklık %", expanded=False):
-    st.markdown(render_levels_marked(tp.get("levels", []), base_px, s1, r1))
-
-# -----------------------------
-# Charts
-# -----------------------------
-st.subheader("📊 Fiyat + EMA + Bollinger + Sinyaller")
-fig = go.Figure()
-fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"))
-fig.add_trace(go.Scatter(x=df.index, y=df["EMA50"], name="EMA Fast"))
-fig.add_trace(go.Scatter(x=df.index, y=df["EMA200"], name="EMA Slow"))
-fig.add_trace(go.Scatter(x=df.index, y=df["BB_upper"], name="BB Upper", line=dict(dash="dot")))
-fig.add_trace(go.Scatter(x=df.index, y=df["BB_mid"], name="BB Mid", line=dict(dash="dot")))
-fig.add_trace(go.Scatter(x=df.index, y=df["BB_lower"], name="BB Lower", line=dict(dash="dot")))
-
+# =============================
+# Build figures once (Dashboard + PDF uses)
+# =============================
+fig_price = go.Figure()
+fig_price.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"))
+fig_price.add_trace(go.Scatter(x=df.index, y=df["EMA50"], name="EMA Fast"))
+fig_price.add_trace(go.Scatter(x=df.index, y=df["EMA200"], name="EMA Slow"))
+fig_price.add_trace(go.Scatter(x=df.index, y=df["BB_upper"], name="BB Upper", line=dict(dash="dot")))
+fig_price.add_trace(go.Scatter(x=df.index, y=df["BB_mid"], name="BB Mid", line=dict(dash="dot")))
+fig_price.add_trace(go.Scatter(x=df.index, y=df["BB_lower"], name="BB Lower", line=dict(dash="dot")))
 entries = df[df["ENTRY"] == 1]
 exits = df[df["EXIT"] == 1]
-fig.add_trace(go.Scatter(x=entries.index, y=entries["Close"], mode="markers", name="ENTRY", marker=dict(symbol="triangle-up", size=10)))
-fig.add_trace(go.Scatter(x=exits.index, y=exits["Close"], mode="markers", name="EXIT", marker=dict(symbol="triangle-down", size=10)))
-fig.update_layout(height=600, xaxis_rangeslider_visible=False)
-st.plotly_chart(fig, use_container_width=True)
-
-st.subheader("📉 RSI / MACD / ATR%")
-colA, colB, colC = st.columns(3)
+fig_price.add_trace(go.Scatter(x=entries.index, y=entries["Close"], mode="markers", name="ENTRY", marker=dict(symbol="triangle-up", size=10)))
+fig_price.add_trace(go.Scatter(x=exits.index, y=exits["Close"], mode="markers", name="EXIT", marker=dict(symbol="triangle-down", size=10)))
+fig_price.update_layout(height=600, xaxis_rangeslider_visible=False)
 
 fig_rsi = go.Figure()
 fig_rsi.add_trace(go.Scatter(x=df.index, y=df["RSI"], name="RSI"))
 fig_rsi.add_hline(y=70)
 fig_rsi.add_hline(y=30)
 fig_rsi.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10))
-colA.plotly_chart(fig_rsi, use_container_width=True)
 
 fig_macd = go.Figure()
 fig_macd.add_trace(go.Scatter(x=df.index, y=df["MACD"], name="MACD"))
 fig_macd.add_trace(go.Scatter(x=df.index, y=df["MACD_signal"], name="Signal"))
 fig_macd.add_trace(go.Bar(x=df.index, y=df["MACD_hist"], name="Hist"))
 fig_macd.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10))
-colB.plotly_chart(fig_macd, use_container_width=True)
 
 fig_atr = go.Figure()
 fig_atr.add_trace(go.Scatter(x=df.index, y=df["ATR_PCT"] * 100, name="ATR%"))
 fig_atr.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), yaxis_title="%")
-colC.plotly_chart(fig_atr, use_container_width=True)
 
-st.subheader("🧪 Backtest Özeti (Long-only)")
-m1, m2, m3, m4, m5, m6 = st.columns(6)
-m1.metric("Total Return", f"{metrics['Total Return']*100:.1f}%")
-m2.metric("Ann Return", f"{metrics['Annualized Return']*100:.1f}%")
-m3.metric("Sharpe", f"{metrics['Sharpe']:.2f}")
-m4.metric("Max DD", f"{metrics['Max Drawdown']*100:.1f}%")
-m5.metric("Trades", f"{metrics['Trades']}")
-m6.metric("Win Rate", f"{metrics['Win Rate']*100:.1f}%")
+fig_eq = go.Figure()
+fig_eq.add_trace(go.Scatter(x=eq.index, y=eq.values, name="Equity"))
+fig_eq.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
 
-with st.expander("Trade listesi", expanded=False):
-    st.dataframe(tdf, use_container_width=True, height=240)
+# =============================
+# Main Tabs (Dashboard + PDF)
+# =============================
+tab_dash, tab_pdf = st.tabs(["📊 Dashboard", "📄 PDF Rapor"])
 
-with st.expander("Equity curve", expanded=False):
-    fig_eq = go.Figure()
-    fig_eq.add_trace(go.Scatter(x=eq.index, y=eq.values, name="Equity"))
-    fig_eq.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig_eq, use_container_width=True)
+with tab_dash:
+    # -----------------------------
+    # Screener display (if available)
+    # -----------------------------
+    if use_fa and not st.session_state.screener_df.empty:
+        st.subheader(f"🧾 Fundamental Screener Sonuçları ({market})")
+        sdf = st.session_state.screener_df.copy()
 
-# -----------------------------
-# AI Chat
-# -----------------------------
-st.subheader("🤖 AI Analiz (Chat)")
+        show_cols = [
+            "ticker", "longName", "FA_pass", "FA_score", "FA_ok_count", "FA_coverage",
+            "sector", "industry",
+            "trailingPE", "forwardPE", "pegRatio", "priceToSalesTrailing12Months", "priceToBook",
+            "returnOnEquity", "operatingMargins", "profitMargins", "debtToEquity",
+            "revenueGrowth", "earningsGrowth",
+            "marketCap"
+        ]
+        sdf_show = sdf[[c for c in show_cols if c in sdf.columns]].copy()
+        st.dataframe(sdf_show, use_container_width=True, height=360)
 
-if not ai_on:
-    st.info("AI Chat kapalı (soldan açabilirsin).")
-else:
-    if not st.secrets.get("OPENAI_API_KEY", ""):
-        st.warning("OPENAI_API_KEY bulunamadı. Streamlit Cloud > Secrets'e OPENAI_API_KEY=... ekleyin.")
+        pass_list = sdf.loc[sdf["FA_pass"] == True, "ticker"].tolist()
+        if len(pass_list) == 0:
+            st.warning("Bu eşiklerle PASS çıkan hisse yok. Eşikleri gevşet / mode değiştir / coverage düşür.")
+        else:
+            st.success(f"PASS sayısı: {len(pass_list)}")
+            picked = st.selectbox("PASS listesinden hisse seç (TA’ya gönder)", pass_list, index=0)
+            if st.button("➡️ Seçimi Teknik Analize Aktar"):
+                st.session_state.selected_ticker = picked
+                st.rerun()
+
+    # -----------------------------
+    # Summary metrics
+    # -----------------------------
+    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+    c1.metric("Market", market)
+    c2.metric("Sembol", ticker)
+    c3.metric("Daily Close (bar)", f"{latest['Close']:.2f}")
+    c4.metric("Live/Last", f"{live_price:.2f}" if np.isfinite(live_price) else "N/A")
+    c5.metric("Skor", f"{latest['SCORE']:.0f}/100")
+    c6.metric("Sinyal", rec)
+    c7.metric(
+        "SPY Rejim",
+        "BULL ✅" if (market == "USA" and market_filter_ok) else ("BEAR ❌" if market == "USA" else "N/A")
+    )
+
+    st.caption("Not: Daily Close (1d bar) ile Live/Last farklı olabilir. Piyasa açıkken 1d bar kapanışı güncellenmez.")
+
+    st.subheader("✅ Kontrol Noktaları (Son Bar)")
+    cp_cols = st.columns(3)
+    for i, (k, v) in enumerate(checkpoints.items()):
+        with cp_cols[i % 3]:
+            st.write(("🟢 " if v else "🔴 ") + k)
+
+    # -----------------------------
+    # Target band + RR
+    # -----------------------------
+    st.subheader("🎯 Hedef Fiyat Bandı (Senaryo)")
+
+    base_px = float(tp["base"])
+    rr_str = fmt_rr(rr_info.get("rr"))
+
+    bcol1, bcol2, bcol3 = st.columns(3)
+    bcol1.metric("Base", f"{base_px:.2f}")
+
+    if tp.get("bull"):
+        bull1, bull2, r1 = tp["bull"]
+        bcol2.metric("Bull Band", f"{bull1:.2f} → {bull2:.2f}")
+        if r1 is not None and np.isfinite(r1):
+            bcol2.caption(f"Yakın direnç: {r1:.2f} ({pct_dist(r1, base_px):+.2f}%)")
     else:
-        ai_ctx = build_ai_context(ticker, market, latest, checkpoints, metrics, tp, live, df)
-        system_msg = {
-            "role": "system",
-            "content": (
-                "Sen bir finansal analiz asistanısın. Kullanıcının verdiği veriler üzerinden eğitim amaçlı yorum yap. "
-                "Kesin yatırım tavsiyesi verme. Çıktıda: (1) Özet, (2) Riskler, (3) Invalidation koşulları, (4) Senaryo bandı. "
-                "Kısa, net, maddeli yaz."
-            ),
+        bcol2.metric("Bull Band", "N/A")
+        r1 = None
+
+    if tp.get("bear"):
+        bear1, bear2, s1 = tp["bear"]
+        bcol3.metric("Bear Band", f"{bear1:.2f} → {bear2:.2f}  |  RR {rr_str}")
+        if s1 is not None and np.isfinite(s1):
+            bcol3.caption(f"Yakın destek: {s1:.2f} ({pct_dist(s1, base_px):+.2f}%)")
+    else:
+        bcol3.metric("Bear Band", f"N/A  |  RR {rr_str}")
+        s1 = None
+
+    def render_levels_marked(levels: list[float], base: float, s1, r1):
+        lines = []
+        for lv in (levels or []):
+            tag = ""
+            if s1 is not None and np.isfinite(s1) and abs(float(lv) - float(s1)) < 1e-9:
+                tag = " 🟩 Yakın Destek"
+            if r1 is not None and np.isfinite(r1) and abs(float(lv) - float(r1)) < 1e-9:
+                tag = " 🟥 Yakın Direnç"
+            dist = pct_dist(float(lv), base)
+            dist_txt = f"{dist:+.2f}%" if dist is not None else ""
+            lines.append(f"- {float(lv):.2f}  ({dist_txt}){tag}")
+        return "\n".join(lines) if lines else "_Seviye yok_"
+
+    with st.expander("Seviye listesi (yaklaşık) — işaretli + fiyata uzaklık %", expanded=False):
+        st.markdown(render_levels_marked(tp.get("levels", []), base_px, s1, r1))
+
+    # -----------------------------
+    # Charts
+    # -----------------------------
+    st.subheader("📊 Fiyat + EMA + Bollinger + Sinyaller")
+    st.plotly_chart(fig_price, use_container_width=True)
+
+    st.subheader("📉 RSI / MACD / ATR%")
+    colA, colB, colC = st.columns(3)
+    colA.plotly_chart(fig_rsi, use_container_width=True)
+    colB.plotly_chart(fig_macd, use_container_width=True)
+    colC.plotly_chart(fig_atr, use_container_width=True)
+
+    st.subheader("🧪 Backtest Özeti (Long-only)")
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.metric("Total Return", f"{metrics['Total Return']*100:.1f}%")
+    m2.metric("Ann Return", f"{metrics['Annualized Return']*100:.1f}%")
+    m3.metric("Sharpe", f"{metrics['Sharpe']:.2f}")
+    m4.metric("Max DD", f"{metrics['Max Drawdown']*100:.1f}%")
+    m5.metric("Trades", f"{metrics['Trades']}")
+    m6.metric("Win Rate", f"{metrics['Win Rate']*100:.1f}%")
+
+    with st.expander("Trade listesi", expanded=False):
+        st.dataframe(tdf, use_container_width=True, height=240)
+
+    with st.expander("Equity curve", expanded=False):
+        st.plotly_chart(fig_eq, use_container_width=True)
+
+    # -----------------------------
+    # AI Chat
+    # -----------------------------
+    st.subheader("🤖 AI Analiz (Chat)")
+
+    if not ai_on:
+        st.info("AI Chat kapalı (soldan açabilirsin).")
+    else:
+        if not st.secrets.get("OPENAI_API_KEY", ""):
+            st.warning("OPENAI_API_KEY bulunamadı. Streamlit Cloud > Secrets'e OPENAI_API_KEY=... ekleyin.")
+        else:
+            ai_ctx = build_ai_context(ticker, market, latest, checkpoints, metrics, tp, live, df)
+            system_msg = {
+                "role": "system",
+                "content": (
+                    "Sen bir finansal analiz asistanısın. Kullanıcının verdiği veriler üzerinden eğitim amaçlı yorum yap. "
+                    "Kesin yatırım tavsiyesi verme. Çıktıda: (1) Özet, (2) Riskler, (3) Invalidation koşulları, (4) Senaryo bandı. "
+                    "Kısa, net, maddeli yaz."
+                ),
+            }
+
+            with st.expander("AI Chat", expanded=True):
+                user_msg = st.text_input("Sorun:", value="", placeholder="Örn: Riskler ne, hedef bant ne, invalidation nedir?")
+                if st.button("AI'ya Sor") and user_msg.strip():
+                    st.session_state.ai_messages.append({"role": "user", "content": user_msg.strip()})
+                    messages = [
+                        system_msg,
+                        {"role": "user", "content": "Context JSON:\n" + json.dumps(ai_ctx, ensure_ascii=False)},
+                    ]
+                    tail = st.session_state.ai_messages[-6:]
+                    messages += tail
+                    try:
+                        reply = call_openai(messages, model=ai_model, temperature=ai_temp)
+                        st.session_state.ai_messages.append({"role": "assistant", "content": reply})
+                    except Exception as e:
+                        st.error(f"AI hata: {e}")
+
+                for m in st.session_state.ai_messages:
+                    st.write(f"**{m['role'].upper()}**: {m['content']}")
+
+with tab_pdf:
+    st.subheader("📄 PDF Rapor (Seçili Hisse)")
+    st.caption("Bu sekme, mevcut ekrandaki verilerle bir rapor üretir ve PDF olarak indirmenizi sağlar.")
+
+    include_charts = st.checkbox("PDF'e grafikleri de ekle (Plotly export destekleniyorsa)", value=True)
+    include_trades = st.checkbox("Trade listesini ekle (ilk 25 satır)", value=True)
+
+    # Fundamentals for the selected ticker (always)
+    with st.spinner("Fundamental özet hazırlanıyor..."):
+        f_single = fetch_fundamentals_generic(ticker, market=market)
+        f_score, f_breakdown, f_pass = fundamental_score_row(f_single, fa_mode, thresholds)
+        fa_eval = {
+            "mode": fa_mode,
+            "score": f_score,
+            "passed": f_pass,
+            "ok_cnt": sum(1 for v in f_breakdown.values() if v.get("available") and v.get("ok")),
+            "coverage": sum(1 for v in f_breakdown.values() if v.get("available")),
         }
 
-        with st.expander("AI Chat", expanded=True):
-            user_msg = st.text_input("Sorun:", value="", placeholder="Örn: Riskler ne, hedef bant ne, invalidation nedir?")
-            if st.button("AI'ya Sor") and user_msg.strip():
-                st.session_state.ai_messages.append({"role": "user", "content": user_msg.strip()})
-                messages = [
-                    system_msg,
-                    {"role": "user", "content": "Context JSON:\n" + json.dumps(ai_ctx, ensure_ascii=False)},
-                ]
-                tail = st.session_state.ai_messages[-6:]
-                messages += tail
-                try:
-                    reply = call_openai(messages, model=ai_model, temperature=ai_temp)
-                    st.session_state.ai_messages.append({"role": "assistant", "content": reply})
-                except Exception as e:
-                    st.error(f"AI hata: {e}")
+    # PDF meta/summary
+    meta = {
+        "market": market,
+        "ticker": ticker,
+        "interval": interval,
+        "period": period,
+        "preset": preset_name,
+        "ema_fast": ema_fast,
+        "ema_slow": ema_slow,
+        "rsi_period": rsi_period,
+        "bb_period": bb_period,
+        "bb_std": bb_std,
+        "atr_period": atr_period,
+        "vol_sma": vol_sma,
+    }
 
-            for m in st.session_state.ai_messages:
-                st.write(f"**{m['role'].upper()}**: {m['content']}")
+    ta_summary = {
+        "rec": rec,
+        "close": fmt_num(float(latest["Close"]), 2),
+        "live": fmt_num(float(live_price), 2) if np.isfinite(live_price) else "N/A",
+        "score": fmt_num(float(latest.get("SCORE", np.nan)), 0),
+        "rsi": fmt_num(float(latest.get("RSI", np.nan)), 2),
+        "ema50": fmt_num(float(latest.get("EMA50", np.nan)), 2),
+        "ema200": fmt_num(float(latest.get("EMA200", np.nan)), 2),
+        "atr_pct": fmt_pct(float(latest.get("ATR_PCT", np.nan))) if pd.notna(latest.get("ATR_PCT", np.nan)) else "N/A",
+    }
+
+    figs = {
+        "Price + EMA + BB + Signals": fig_price,
+        "RSI": fig_rsi,
+        "MACD": fig_macd,
+        "ATR%": fig_atr,
+        "Equity Curve": fig_eq,
+    }
+
+    # Create report button
+    if st.button("🧾 Raporu Oluştur"):
+        with st.spinner("PDF oluşturuluyor..."):
+            pdf_bytes = generate_pdf_report(
+                title=f"FA→TA Trading Report - {ticker}",
+                subtitle="Educational analysis (not investment advice). Generated from Streamlit dashboard outputs.",
+                meta=meta,
+                checkpoints=checkpoints,
+                ta_summary=ta_summary,
+                target_band=tp,
+                rr_info=rr_info,
+                backtest_metrics=metrics,
+                fundamentals=f_single,
+                fa_eval=fa_eval,
+                levels=tp.get("levels", []),
+                trades_df=(tdf if include_trades else None),
+                figs=(figs if include_charts else None),
+                include_charts=include_charts,
+            )
+
+        st.success("PDF hazır ✅")
+        st.download_button(
+            "⬇️ PDF İndir",
+            data=pdf_bytes,
+            file_name=f"{ticker}_FA_TA_report.pdf",
+            mime="application/pdf",
+        )
+        st.info("Not: Eğer grafikler PDF'e gelmiyorsa, ortamda Plotly image export (kaleido) yoktur; PDF metin/tablo ağırlıklı oluşur.")
