@@ -2,6 +2,7 @@ import os
 import json
 import time
 from io import BytesIO
+from typing import Optional, Dict, Any, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -10,14 +11,20 @@ import streamlit as st
 import plotly.graph_objects as go
 import requests
 
-# PDF (reportlab)
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import cm
-from reportlab.lib.utils import ImageReader
-
 # OpenAI (new SDK)
 from openai import OpenAI
+
+# =============================
+# OPTIONAL PDF SUPPORT (ReportLab)
+# =============================
+REPORTLAB_OK = True
+try:
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import cm
+    from reportlab.lib.utils import ImageReader
+except Exception:
+    REPORTLAB_OK = False
 
 st.set_page_config(page_title="FA→TA Trading + AI", layout="wide")
 
@@ -29,7 +36,6 @@ def normalize_ticker(raw: str, market: str) -> str:
     if not t:
         return t
     if market == "BIST":
-        # BIST ticker'ları yfinance'te .IS ile
         if not t.endswith(".IS"):
             t = f"{t}.IS"
     return t
@@ -52,14 +58,20 @@ def _flatten_yf(df: pd.DataFrame) -> pd.DataFrame:
     return df.dropna()
 
 def fmt_pct(x: float) -> str:
-    if x is None or (isinstance(x, float) and not np.isfinite(x)):
+    try:
+        if x is None or (isinstance(x, float) and not np.isfinite(x)):
+            return "N/A"
+        return f"{x*100:.2f}%"
+    except Exception:
         return "N/A"
-    return f"{x*100:.2f}%"
 
 def fmt_num(x: float, nd=2) -> str:
-    if x is None or (isinstance(x, float) and not np.isfinite(x)):
+    try:
+        if x is None or (isinstance(x, float) and not np.isfinite(x)):
+            return "N/A"
+        return f"{float(x):.{nd}f}"
+    except Exception:
         return "N/A"
-    return f"{x:.{nd}f}"
 
 # =============================
 # Indicators
@@ -135,7 +147,7 @@ def get_spy_regime_ok() -> bool:
     spy = yf.download("SPY", period="10y", interval="1d", auto_adjust=False, progress=False)
     spy = _flatten_yf(spy)
     if spy.empty or len(spy) < 260:
-        return True  # fail-open
+        return True
     spy["EMA200"] = ema(spy["Close"], 200)
     last = spy.iloc[-1]
     return bool(last["Close"] > last["EMA200"])
@@ -340,7 +352,6 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
 # Fundamentals (USA + BIST) via yfinance info
 # =============================
 def _fix_debt_to_equity(x: float) -> float:
-    # yfinance bazen D/E'yi 120 gibi yüzde formatı verebiliyor
     if pd.notna(x) and x > 10:
         return x / 100.0
     return x
@@ -377,12 +388,7 @@ def fetch_fundamentals_generic(ticker: str, market: str) -> dict:
     out["debtToEquity"] = _fix_debt_to_equity(out["debtToEquity"])
     return out
 
-def fundamental_score_row(row: dict, mode: str, thresholds: dict) -> tuple[float, dict, bool]:
-    """
-    Not: USA'da metrik coverage genelde yüksek; BIST'te yfinance info boş gelebilir.
-    Bu fonksiyon, SADECE gelen (NaN olmayan) metrikleri skorlamaya dahil eder.
-    Böylece BIST'te "hiç çalışmıyor" yerine, "coverage düşük" uyarısıyla çalışır.
-    """
+def fundamental_score_row(row: dict, mode: str, thresholds: dict) -> Tuple[float, dict, bool]:
     b = {}
 
     def ok(name, cond, weight, available: bool):
@@ -394,7 +400,7 @@ def fundamental_score_row(row: dict, mode: str, thresholds: dict) -> tuple[float
     avail_cnt = 0
     ok_cnt = 0
 
-    def A(x):  # available?
+    def A(x):
         return pd.notna(x)
 
     if mode == "Quality":
@@ -443,7 +449,6 @@ def fundamental_score_row(row: dict, mode: str, thresholds: dict) -> tuple[float
         score += s; total_w += tw; avail_cnt += ac; ok_cnt += (1 if (A(row["debtToEquity"]) and row["debtToEquity"] <= thresholds["dte"]) else 0)
 
     score_pct = (score / total_w) * 100 if total_w > 0 else 0.0
-
     min_coverage = int(thresholds.get("min_coverage", 3))
     min_ok = int(thresholds["min_ok"])
     pass_bool = (score_pct >= thresholds["min_score"]) and (ok_cnt >= min_ok) and (avail_cnt >= min_coverage)
@@ -468,7 +473,7 @@ BIST100_FALLBACK = [
 ]
 
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
-def get_sp500_tickers() -> list[str]:
+def get_sp500_tickers() -> List[str]:
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
     headers = {"User-Agent": "Mozilla/5.0 (compatible; StreamlitApp/1.0; +https://streamlit.io)"}
     try:
@@ -481,7 +486,7 @@ def get_sp500_tickers() -> list[str]:
         return sorted(list(set(US_TICKERS + US_EXT)))
 
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
-def get_nasdaq100_tickers() -> list[str]:
+def get_nasdaq100_tickers() -> List[str]:
     url = "https://en.wikipedia.org/wiki/Nasdaq-100"
     headers = {"User-Agent": "Mozilla/5.0 (compatible; StreamlitApp/1.0; +https://streamlit.io)"}
     try:
@@ -496,11 +501,7 @@ def get_nasdaq100_tickers() -> list[str]:
         return []
 
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
-def get_bist100_tickers() -> list[str]:
-    """
-    Önce Borsa İstanbul sayfasından tablo çekmeyi dener.
-    Olmazsa fallback listeye döner.
-    """
+def get_bist100_tickers() -> List[str]:
     candidates = [
         "https://www.borsaistanbul.com/en/indices/bist-stock-indices/bist-100",
         "https://www.borsaistanbul.com/tr/sayfa/195/bist-pay-endeksleri",
@@ -531,7 +532,7 @@ def get_bist100_tickers() -> list[str]:
     return sorted(list(set(BIST100_FALLBACK)))
 
 # =============================
-# Target price band (non-LLM): scenario + levels
+# Target price band (non-LLM)
 # =============================
 def local_levels(close: pd.Series, lookback: int = 120):
     s = close.tail(lookback).dropna()
@@ -560,12 +561,7 @@ def target_price_band(df: pd.DataFrame):
     r1 = min(above) if above else None
     s1 = max(below) if below else None
 
-    return {
-        "base": px,
-        "bull": (bull1, bull2, r1),
-        "bear": (bear1, bear2, s1),
-        "levels": lv,
-    }
+    return {"base": px, "bull": (bull1, bull2, r1), "bear": (bear1, bear2, s1), "levels": lv}
 
 # =============================
 # Live price helper
@@ -594,12 +590,7 @@ def df_snapshot_for_llm(df: pd.DataFrame, n: int = 140) -> dict:
     cols = [c for c in use_cols if c in df.columns]
     tail = df[cols].tail(n).copy()
     tail.index = tail.index.astype(str)
-    return {
-        "cols": cols,
-        "n": int(len(tail)),
-        "last_index": str(tail.index[-1]) if len(tail) else None,
-        "rows": tail.to_dict(orient="records"),
-    }
+    return {"cols": cols, "n": int(len(tail)), "last_index": str(tail.index[-1]) if len(tail) else None, "rows": tail.to_dict(orient="records")}
 
 def build_ai_context(ticker: str, market: str, latest: pd.Series, checkpoints: dict, metrics: dict, tp: dict, live: dict, df: pd.DataFrame) -> dict:
     return {
@@ -645,25 +636,187 @@ PRESETS = {
 }
 
 # =============================
-# PDF helpers
+# Screener row finder + merge
 # =============================
-def _plotly_fig_to_png_bytes(fig) -> bytes | None:
-    """
-    Plotly fig'i PNG'ye çevirir (kaleido gerekir).
-    Ortamda yoksa None döner (metin ağırlıklı PDF ile devam edilir).
-    """
+def find_screener_row(sdf: pd.DataFrame, ticker: str) -> Optional[Dict[str, Any]]:
+    if sdf is None or sdf.empty or "ticker" not in sdf.columns:
+        return None
+    t = (ticker or "").upper().strip()
+    t_naked = t.replace(".IS", "")
+
+    tmp = sdf.copy()
+    tmp["_tk"] = tmp["ticker"].astype(str).str.upper().str.strip()
+    tmp["_tk_naked"] = tmp["_tk"].str.replace(".IS", "", regex=False)
+
+    m = tmp[(tmp["_tk"] == t) | (tmp["_tk"] == f"{t_naked}.IS") | (tmp["_tk_naked"] == t_naked)]
+    if m.empty:
+        return None
+    row = m.iloc[0].drop(labels=["_tk", "_tk_naked"], errors="ignore").to_dict()
+    return row
+
+def merge_fa_row(screener_row: Optional[Dict[str, Any]], fundamentals: Optional[Dict[str, Any]], fa_eval: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    if fundamentals:
+        out.update(fundamentals)
+    if screener_row:
+        out.update(screener_row)
+    if fa_eval:
+        out["FA_mode"] = fa_eval.get("mode")
+        out["FA_score"] = fa_eval.get("score")
+        out["FA_pass"] = fa_eval.get("passed")
+        out["FA_ok_count"] = fa_eval.get("ok_cnt")
+        out["FA_coverage"] = fa_eval.get("coverage")
+    return out
+
+# =============================
+# REPORT EXPORT (Robust): HTML always, PDF if available
+# =============================
+def build_html_report(
+    title: str,
+    meta: dict,
+    checkpoints: dict,
+    metrics: dict,
+    tp: dict,
+    rr_info: dict,
+    figs: Dict[str, go.Figure],
+    fa_row: Optional[Dict[str, Any]] = None
+) -> bytes:
+    def esc(x):
+        return (str(x)
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;"))
+
+    # Plotly figures (keeps charts exactly)
+    fig_blocks = []
+    first = True
+    for name, fig in (figs or {}).items():
+        fig_html = fig.to_html(full_html=False, include_plotlyjs=("cdn" if first else False))
+        first = False
+        fig_blocks.append(f"<h3>{esc(name)}</h3>{fig_html}")
+
+    cp_list = "".join([f"<li>{'✅' if v else '❌'} {esc(k)}</li>" for k, v in checkpoints.items()])
+
+    bull = tp.get("bull")
+    bear = tp.get("bear")
+    levels = tp.get("levels", []) or []
+    levels_txt = ", ".join([f"{x:.2f}" for x in levels[:120]])
+
+    show_cols = [
+        ("ticker", "Ticker"),
+        ("longName", "Name"),
+        ("FA_pass", "FA_pass"),
+        ("FA_score", "FA_score"),
+        ("FA_ok_count", "FA_ok_count"),
+        ("FA_coverage", "FA_coverage"),
+        ("sector", "Sector"),
+        ("industry", "Industry"),
+        ("trailingPE", "Trailing PE"),
+        ("forwardPE", "Forward PE"),
+        ("pegRatio", "PEG"),
+        ("priceToSalesTrailing12Months", "P/S"),
+        ("priceToBook", "P/B"),
+        ("returnOnEquity", "ROE"),
+        ("operatingMargins", "Op Margin"),
+        ("profitMargins", "Profit Margin"),
+        ("debtToEquity", "Debt/Equity"),
+        ("revenueGrowth", "Revenue Growth"),
+        ("earningsGrowth", "Earnings Growth"),
+        ("marketCap", "Market Cap"),
+    ]
+
+    fa_rows_html = ""
+    if fa_row:
+        for key, label in show_cols:
+            val = fa_row.get(key, "")
+            fa_rows_html += f"<tr><td><b>{esc(label)}</b></td><td>{esc(val)}</td></tr>"
+    else:
+        fa_rows_html = "<tr><td colspan='2'>Screener satırı bulunamadı (screener çalıştırılmamış olabilir).</td></tr>"
+
+    html = f"""
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>{esc(title)}</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 24px; }}
+    .muted {{ color: #666; font-size: 12px; }}
+    .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }}
+    .card {{ border: 1px solid #ddd; border-radius: 10px; padding: 14px; }}
+    h1,h2,h3 {{ margin: 0 0 8px 0; }}
+    ul {{ margin: 8px 0 0 18px; }}
+    table {{ width: 100%; border-collapse: collapse; }}
+    td {{ border-top: 1px solid #eee; padding: 6px 8px; vertical-align: top; }}
+    @media print {{
+      .no-print {{ display: none; }}
+      body {{ margin: 10mm; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="no-print card" style="background:#fff7e6;border-color:#ffd591;">
+    <b>PDF yapmak için:</b> Bu dosyayı indir → tarayıcıda aç → <b>Ctrl+P</b> → <b>Save as PDF</b>.
+  </div>
+
+  <h1>{esc(title)}</h1>
+  <div class="muted">
+    Generated: {esc(time.strftime('%Y-%m-%d %H:%M:%S'))}<br>
+    Market: {esc(meta.get('market'))} | Ticker: {esc(meta.get('ticker'))} | Interval: {esc(meta.get('interval'))} | Period: {esc(meta.get('period'))}<br>
+    Preset: {esc(meta.get('preset'))} | EMA: {esc(meta.get('ema_fast'))}/{esc(meta.get('ema_slow'))} | RSI: {esc(meta.get('rsi_period'))} | BB: {esc(meta.get('bb_period'))}/{esc(meta.get('bb_std'))} | ATR: {esc(meta.get('atr_period'))} | VolSMA: {esc(meta.get('vol_sma'))}
+  </div>
+
+  <div class="grid" style="margin-top:14px;">
+    <div class="card">
+      <h2>Checkpoints</h2>
+      <ul>{cp_list}</ul>
+    </div>
+    <div class="card">
+      <h2>Backtest</h2>
+      <div>Total Return: {metrics.get('Total Return',0)*100:.1f}%</div>
+      <div>Ann Return: {metrics.get('Annualized Return',0)*100:.1f}%</div>
+      <div>Sharpe: {metrics.get('Sharpe',0):.2f}</div>
+      <div>Max DD: {metrics.get('Max Drawdown',0)*100:.1f}%</div>
+      <div>Trades: {metrics.get('Trades',0)}</div>
+      <div>Win Rate: {metrics.get('Win Rate',0)*100:.1f}%</div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px;">
+    <h2>Target Band</h2>
+    <div>Base: {tp.get('base',0):.2f}</div>
+    <div>Bull: {(bull[0] if bull else 0):.2f} → {(bull[1] if bull else 0):.2f} | R1: {(bull[2] if bull else 'N/A')}</div>
+    <div>Bear: {(bear[0] if bear else 0):.2f} → {(bear[1] if bear else 0):.2f} | S1: {(bear[2] if bear else 'N/A')}</div>
+    <div>RR: {('N/A' if rr_info.get('rr') is None else f"1:{rr_info.get('rr'):.2f}")}</div>
+    <div class="muted">Levels: {esc(levels_txt)}</div>
+  </div>
+
+  <div class="card" style="margin-top:16px;">
+    <h2>Fundamental Screener Snapshot (Selected Ticker)</h2>
+    <table>{fa_rows_html}</table>
+  </div>
+
+  <div style="margin-top:18px;">
+    {''.join(fig_blocks)}
+  </div>
+</body>
+</html>
+"""
+    return html.encode("utf-8")
+
+def _plotly_fig_to_png_bytes(fig: go.Figure) -> Optional[bytes]:
+    # works if kaleido is available
     try:
-        # kaleido yüklüyse çalışır
         return fig.to_image(format="png", scale=2)
     except Exception:
         return None
 
-def _pdf_write_lines(c: canvas.Canvas, lines: list[str], x: float, y: float, lh: float, bottom: float):
+def _pdf_write_lines(c, lines: List[str], x: float, y: float, lh: float, bottom: float):
     for line in lines:
         if y <= bottom:
             c.showPage()
             y = A4[1] - 2.0 * cm
-        c.drawString(x, y, line[:220])
+        c.drawString(x, y, (line or "")[:220])
         y -= lh
     return y
 
@@ -677,13 +830,15 @@ def generate_pdf_report(
     target_band: dict,
     rr_info: dict,
     backtest_metrics: dict,
-    fundamentals: dict | None,
-    fa_eval: dict | None,
-    levels: list[float] | None,
-    trades_df: pd.DataFrame | None,
-    figs: dict[str, go.Figure] | None,
+    fa_row: Optional[Dict[str, Any]],
+    levels: Optional[List[float]],
+    trades_df: Optional[pd.DataFrame],
+    figs: Optional[Dict[str, go.Figure]],
     include_charts: bool = True,
-) -> bytes:
+) -> Optional[bytes]:
+    if not REPORTLAB_OK:
+        return None
+
     buf = BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
     W, H = A4
@@ -771,7 +926,7 @@ def generate_pdf_report(
     y = _pdf_write_lines(c, lv_lines, left, y, 11, bottom)
     y -= 6
 
-    # Backtest metrics
+    # Backtest
     c.setFont("Helvetica-Bold", 12)
     c.drawString(left, y, "Backtest Summary (Long-only)"); y -= 14
     c.setFont("Helvetica", 9)
@@ -787,35 +942,23 @@ def generate_pdf_report(
     )
     y -= 6
 
-    # Fundamentals
-    if fundamentals:
-        c.setFont("Helvetica-Bold", 12)
-        c.drawString(left, y, "Fundamentals (yfinance info)"); y -= 14
-        c.setFont("Helvetica", 9)
-        f = fundamentals
-        lines = [
-            f"Name: {f.get('longName','')} | Sector: {f.get('sector','')} | Industry: {f.get('industry','')}",
-            f"Market Cap: {fmt_num(f.get('marketCap'),0)} | Trailing PE: {fmt_num(f.get('trailingPE'))} | Forward PE: {fmt_num(f.get('forwardPE'))}",
-            f"PEG: {fmt_num(f.get('pegRatio'))} | P/S: {fmt_num(f.get('priceToSalesTrailing12Months'))} | P/B: {fmt_num(f.get('priceToBook'))}",
-            f"ROE: {fmt_pct(f.get('returnOnEquity'))} | Op Margin: {fmt_pct(f.get('operatingMargins'))} | Profit Margin: {fmt_pct(f.get('profitMargins'))}",
-            f"Debt/Equity: {fmt_num(f.get('debtToEquity'))} | Rev Growth: {fmt_pct(f.get('revenueGrowth'))} | Earn Growth: {fmt_pct(f.get('earningsGrowth'))}",
-            f"Free Cashflow: {fmt_num(f.get('freeCashflow'),0)} | Current Price(info): {fmt_num(f.get('currentPrice'))}",
+    # Fundamental Screener Snapshot (selected ticker row)
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(left, y, "Fundamental Screener Snapshot (Selected Ticker)"); y -= 14
+    c.setFont("Helvetica", 9)
+    if fa_row:
+        keys = [
+            "ticker","longName","FA_pass","FA_score","FA_ok_count","FA_coverage",
+            "sector","industry","trailingPE","forwardPE","pegRatio","priceToSalesTrailing12Months","priceToBook",
+            "returnOnEquity","operatingMargins","profitMargins","debtToEquity","revenueGrowth","earningsGrowth","marketCap"
         ]
-        y = _pdf_write_lines(c, lines, left, y, 11, bottom)
-        y -= 4
-
-        if fa_eval:
-            c.setFont("Helvetica-Bold", 11)
-            c.drawString(left, y, "Fundamental Scoring (current thresholds)"); y -= 13
-            c.setFont("Helvetica", 9)
-            y = _pdf_write_lines(
-                c,
-                [
-                    f"Mode: {fa_eval.get('mode','')} | Score: {fmt_num(fa_eval.get('score', np.nan),1)} | PASS: {fa_eval.get('passed', False)} | OK: {fa_eval.get('ok_cnt',0)} | Coverage: {fa_eval.get('coverage',0)}",
-                ],
-                left, y, 11, bottom
-            )
-            y -= 2
+        lines = [f"{k}: {fa_row.get(k)}" for k in keys if k in fa_row]
+        if not lines:
+            lines = ["(No fields)"]
+    else:
+        lines = ["Screener satırı bulunamadı (screener çalıştırılmamış olabilir)."]
+    y = _pdf_write_lines(c, lines, left, y, 11, bottom)
+    y -= 6
 
     # Trades (first rows)
     if trades_df is not None and not trades_df.empty:
@@ -823,39 +966,78 @@ def generate_pdf_report(
         c.drawString(left, y, "Trades (first 25 rows)"); y -= 14
         c.setFont("Helvetica", 8)
         td = trades_df.copy().head(25)
-        cols = [c for c in ["entry_date","entry_price","exit_date","exit_price","exit_reason","pnl","return_%","holding_days"] if c in td.columns]
-        # header
+        cols = [cc for cc in ["entry_date","entry_price","exit_date","exit_price","exit_reason","pnl","return_%","holding_days"] if cc in td.columns]
         header = " | ".join(cols)
         y = _pdf_write_lines(c, [header], left, y, 10, bottom)
-        # rows
         for _, r in td.iterrows():
             row_txt = " | ".join([str(r.get(k, ""))[:18] for k in cols])
             y = _pdf_write_lines(c, [row_txt], left, y, 10, bottom)
         y -= 6
 
     # Charts pages (optional)
+    chart_added = False
     if include_charts and figs:
         for name, fig in figs.items():
             img = _plotly_fig_to_png_bytes(fig)
             if not img:
                 continue
+            chart_added = True
             c.showPage()
             c.setFont("Helvetica-Bold", 14)
             c.drawString(left, top, f"Chart: {name}")
-            # fit image
             img_reader = ImageReader(BytesIO(img))
-            # A4 usable box
             usable_w = (right - left)
             usable_h = (H - 3.2*cm - 2.0*cm)
-            # draw image
             c.drawImage(img_reader, left, 2.0*cm, width=usable_w, height=usable_h, preserveAspectRatio=True, anchor='c')
+
+    # If charts were requested but couldn't be added, add a note
+    if include_charts and figs and not chart_added:
+        c.showPage()
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(left, top, "Charts could not be embedded.")
+        c.setFont("Helvetica", 10)
+        c.drawString(left, top - 18, "Reason: Plotly image export needs 'kaleido' in requirements.txt.")
+        c.drawString(left, top - 34, "Fallback: Download HTML report and print to PDF (keeps charts).")
 
     c.save()
     buf.seek(0)
     return buf.read()
 
 # =============================
-# UI
+# RR helper
+# =============================
+def rr_from_atr_stop(latest_row: pd.Series, tp_dict: dict, cfg: dict):
+    close = float(latest_row["Close"])
+    atrv = float(latest_row.get("ATR", np.nan)) if pd.notna(latest_row.get("ATR", np.nan)) else np.nan
+    if not np.isfinite(atrv) or atrv <= 0:
+        return {"rr": None, "stop": None, "risk": None, "reward": None}
+
+    stop = close - float(cfg["atr_stop_mult"]) * atrv
+    risk = close - stop
+
+    if not tp_dict.get("bull"):
+        return {"rr": None, "stop": stop, "risk": risk, "reward": None}
+
+    bull1, _bull2, _r1 = tp_dict["bull"]
+    reward = float(bull1) - close
+
+    if risk <= 0 or reward <= 0:
+        return {"rr": None, "stop": stop, "risk": risk, "reward": reward}
+
+    return {"rr": float(reward / risk), "stop": float(stop), "risk": float(risk), "reward": float(reward)}
+
+def fmt_rr(rr):
+    if rr is None or (isinstance(rr, float) and (not np.isfinite(rr))):
+        return "N/A"
+    return f"1:{rr:.2f}"
+
+def pct_dist(level: float, base: float):
+    if level is None or not np.isfinite(level) or base == 0:
+        return None
+    return (level / base - 1.0) * 100.0
+
+# =============================
+# UI State
 # =============================
 st.title("📈 FA→TA Trading Uygulaması + 🤖 AI Analiz")
 st.caption("Önce fundamental ile evreni daralt, sonra teknik analizle giriş/çıkış zamanla. Otomatik emir göndermez.")
@@ -865,20 +1047,20 @@ if "screener_df" not in st.session_state:
 if "selected_ticker" not in st.session_state:
     st.session_state.selected_ticker = None
 if "ai_messages" not in st.session_state:
-    st.session_state.ai_messages = [
-        {"role": "assistant", "content": "Sorunu yaz: örn. “Riskler ne, hedef bant ne, hangi şartta çıkarım?”"}
-    ]
+    st.session_state.ai_messages = [{"role": "assistant", "content": "Sorunu yaz: örn. “Riskler ne, hedef bant ne, hangi şartta çıkarım?”"}]
 if "ta_ran" not in st.session_state:
     st.session_state.ta_ran = False
 
+# =============================
+# Sidebar
+# =============================
 with st.sidebar:
     st.header("Piyasa")
     market = st.selectbox("Market", ["USA", "BIST"], index=0)
 
     st.header("1) Fundamental Screener (opsiyonel)")
-    use_fa_default = True if market in ["USA", "BIST"] else False
+    use_fa_default = True
     use_fa = st.checkbox("Fundamental filtreyi kullan", value=use_fa_default)
-
     fa_mode = st.selectbox("Fundamental Mod", ["Quality", "Value", "Growth"], index=0, disabled=(not use_fa))
 
     st.caption("Eşikler (Genel) — BIST'te coverage düşük olabilir")
@@ -901,19 +1083,10 @@ with st.sidebar:
     )
 
     thresholds = {
-        "roe": roe,
-        "op_margin": op_margin,
-        "profit_margin": profit_margin,
-        "dte": dte,
-        "fpe": fpe,
-        "peg": peg,
-        "ps": ps,
-        "pb": pb,
-        "rev_g": rev_g,
-        "earn_g": earn_g,
-        "min_score": min_score,
-        "min_ok": min_ok,
-        "min_coverage": min_coverage,
+        "roe": roe, "op_margin": op_margin, "profit_margin": profit_margin,
+        "dte": dte, "fpe": fpe, "peg": peg, "ps": ps, "pb": pb,
+        "rev_g": rev_g, "earn_g": earn_g,
+        "min_score": min_score, "min_ok": min_ok, "min_coverage": min_coverage,
     }
 
     # Universe
@@ -938,10 +1111,7 @@ with st.sidebar:
         st.caption(f"Screener seçimi: **{st.session_state.selected_ticker}**")
         raw_ticker = st.text_input("Sembol", value=st.session_state.selected_ticker)
     else:
-        raw_ticker = st.text_input(
-            "Sembol (USA: AAPL, SPY) / BIST: THYAO",
-            value="AAPL" if market == "USA" else "THYAO"
-        )
+        raw_ticker = st.text_input("Sembol (USA: AAPL, SPY) / BIST: THYAO", value="AAPL" if market == "USA" else "THYAO")
 
     ticker = normalize_ticker(raw_ticker, market)
 
@@ -980,13 +1150,12 @@ with st.sidebar:
         st.session_state.ta_ran = True
 
 # -----------------------------
-# Fundamental screener action (USA + BIST)
+# Fundamental screener action
 # -----------------------------
 if run_screener and use_fa:
     with st.spinner(f"Fundamental veriler çekiliyor ({market})..."):
         rows = []
-        universe_iter = universe
-        for tk in universe_iter:
+        for tk in universe:
             tk_norm = normalize_ticker(tk, market)
             f = fetch_fundamentals_generic(tk_norm, market=market)
             score, breakdown, passed = fundamental_score_row(f, fa_mode, thresholds)
@@ -1003,20 +1172,13 @@ if run_screener and use_fa:
         st.session_state.screener_df = sdf.copy()
 
 # -----------------------------
-# Technical run (single execution)
+# Data loader
 # -----------------------------
 cfg = {
-    "ema_fast": ema_fast,
-    "ema_slow": ema_slow,
-    "rsi_period": rsi_period,
-    "bb_period": bb_period,
-    "bb_std": bb_std,
-    "atr_period": atr_period,
-    "vol_sma": vol_sma,
-    "initial_capital": initial_capital,
-    "risk_per_trade": risk_per_trade,
-    "commission_bps": commission_bps,
-    "slippage_bps": slippage_bps,
+    "ema_fast": ema_fast, "ema_slow": ema_slow, "rsi_period": rsi_period,
+    "bb_period": bb_period, "bb_std": bb_std, "atr_period": atr_period, "vol_sma": vol_sma,
+    "initial_capital": initial_capital, "risk_per_trade": risk_per_trade,
+    "commission_bps": commission_bps, "slippage_bps": slippage_bps,
 }
 cfg.update(PRESETS[preset_name])
 
@@ -1025,9 +1187,8 @@ def load_data_cached(ticker: str, period: str, interval: str) -> pd.DataFrame:
     df = yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False)
     return _flatten_yf(df)
 
-# Eğer TA koşmadıysa: sadece screener ekranını gösterelim, sonra stop.
+# If TA not ran yet: show screener (if any) and stop
 if not st.session_state.ta_ran:
-    # Screener display (if available)
     if use_fa and not st.session_state.screener_df.empty:
         st.subheader(f"🧾 Fundamental Screener Sonuçları ({market})")
         sdf = st.session_state.screener_df.copy()
@@ -1094,44 +1255,10 @@ else:
 
 eq, tdf, metrics = backtest_long_only(df, cfg, risk_free_annual=risk_free_annual)
 tp = target_price_band(df)
-
-# -----------------------------
-# RR (ATR stop)
-# -----------------------------
-def rr_from_atr_stop(latest_row: pd.Series, tp_dict: dict, cfg: dict):
-    close = float(latest_row["Close"])
-    atrv = float(latest_row.get("ATR", np.nan)) if pd.notna(latest_row.get("ATR", np.nan)) else np.nan
-    if not np.isfinite(atrv) or atrv <= 0:
-        return {"rr": None, "stop": None, "risk": None, "reward": None}
-
-    stop = close - float(cfg["atr_stop_mult"]) * atrv
-    risk = close - stop
-
-    if not tp_dict.get("bull"):
-        return {"rr": None, "stop": stop, "risk": risk, "reward": None}
-
-    bull1, _bull2, _r1 = tp_dict["bull"]
-    reward = float(bull1) - close
-
-    if risk <= 0 or reward <= 0:
-        return {"rr": None, "stop": stop, "risk": risk, "reward": reward}
-
-    return {"rr": float(reward / risk), "stop": float(stop), "risk": float(risk), "reward": float(reward)}
-
 rr_info = rr_from_atr_stop(latest, tp, cfg)
 
-def fmt_rr(rr):
-    if rr is None or (isinstance(rr, float) and (not np.isfinite(rr))):
-        return "N/A"
-    return f"1:{rr:.2f}"
-
-def pct_dist(level: float, base: float):
-    if level is None or not np.isfinite(level) or base == 0:
-        return None
-    return (level / base - 1.0) * 100.0
-
 # =============================
-# Build figures once (Dashboard + PDF uses)
+# Build figures once (Dashboard + Export)
 # =============================
 fig_price = go.Figure()
 fig_price.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"))
@@ -1166,15 +1293,21 @@ fig_eq = go.Figure()
 fig_eq.add_trace(go.Scatter(x=eq.index, y=eq.values, name="Equity"))
 fig_eq.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
 
+figs_for_report = {
+    "Price + EMA + Bollinger + Signals": fig_price,
+    "RSI": fig_rsi,
+    "MACD": fig_macd,
+    "ATR%": fig_atr,
+    "Equity Curve": fig_eq,
+}
+
 # =============================
-# Main Tabs (Dashboard + PDF)
+# Tabs
 # =============================
-tab_dash, tab_pdf = st.tabs(["📊 Dashboard", "📄 PDF Rapor"])
+tab_dash, tab_export = st.tabs(["📊 Dashboard", "📄 Rapor (PDF/HTML)"])
 
 with tab_dash:
-    # -----------------------------
     # Screener display (if available)
-    # -----------------------------
     if use_fa and not st.session_state.screener_df.empty:
         st.subheader(f"🧾 Fundamental Screener Sonuçları ({market})")
         sdf = st.session_state.screener_df.copy()
@@ -1200,9 +1333,7 @@ with tab_dash:
                 st.session_state.selected_ticker = picked
                 st.rerun()
 
-    # -----------------------------
     # Summary metrics
-    # -----------------------------
     c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
     c1.metric("Market", market)
     c2.metric("Sembol", ticker)
@@ -1210,10 +1341,7 @@ with tab_dash:
     c4.metric("Live/Last", f"{live_price:.2f}" if np.isfinite(live_price) else "N/A")
     c5.metric("Skor", f"{latest['SCORE']:.0f}/100")
     c6.metric("Sinyal", rec)
-    c7.metric(
-        "SPY Rejim",
-        "BULL ✅" if (market == "USA" and market_filter_ok) else ("BEAR ❌" if market == "USA" else "N/A")
-    )
+    c7.metric("SPY Rejim", "BULL ✅" if (market == "USA" and market_filter_ok) else ("BEAR ❌" if market == "USA" else "N/A"))
 
     st.caption("Not: Daily Close (1d bar) ile Live/Last farklı olabilir. Piyasa açıkken 1d bar kapanışı güncellenmez.")
 
@@ -1223,11 +1351,8 @@ with tab_dash:
         with cp_cols[i % 3]:
             st.write(("🟢 " if v else "🔴 ") + k)
 
-    # -----------------------------
     # Target band + RR
-    # -----------------------------
     st.subheader("🎯 Hedef Fiyat Bandı (Senaryo)")
-
     base_px = float(tp["base"])
     rr_str = fmt_rr(rr_info.get("rr"))
 
@@ -1252,7 +1377,7 @@ with tab_dash:
         bcol3.metric("Bear Band", f"N/A  |  RR {rr_str}")
         s1 = None
 
-    def render_levels_marked(levels: list[float], base: float, s1, r1):
+    def render_levels_marked(levels: List[float], base: float, s1, r1):
         lines = []
         for lv in (levels or []):
             tag = ""
@@ -1268,9 +1393,7 @@ with tab_dash:
     with st.expander("Seviye listesi (yaklaşık) — işaretli + fiyata uzaklık %", expanded=False):
         st.markdown(render_levels_marked(tp.get("levels", []), base_px, s1, r1))
 
-    # -----------------------------
     # Charts
-    # -----------------------------
     st.subheader("📊 Fiyat + EMA + Bollinger + Sinyaller")
     st.plotly_chart(fig_price, use_container_width=True)
 
@@ -1295,11 +1418,8 @@ with tab_dash:
     with st.expander("Equity curve", expanded=False):
         st.plotly_chart(fig_eq, use_container_width=True)
 
-    # -----------------------------
     # AI Chat
-    # -----------------------------
     st.subheader("🤖 AI Analiz (Chat)")
-
     if not ai_on:
         st.info("AI Chat kapalı (soldan açabilirsin).")
     else:
@@ -1335,15 +1455,15 @@ with tab_dash:
                 for m in st.session_state.ai_messages:
                     st.write(f"**{m['role'].upper()}**: {m['content']}")
 
-with tab_pdf:
-    st.subheader("📄 PDF Rapor (Seçili Hisse)")
-    st.caption("Bu sekme, mevcut ekrandaki verilerle bir rapor üretir ve PDF olarak indirmenizi sağlar.")
+with tab_export:
+    st.subheader("📄 Rapor İndir (En sorunsuz: HTML → tarayıcıdan PDF)")
+    st.caption("HTML rapor: grafikler %100 gelir. PDF: reportlab + (grafikler için) kaleido varsa grafikleri gömer. Yoksa PDF metin ağırlıklı olur.")
 
-    include_charts = st.checkbox("PDF'e grafikleri de ekle (Plotly export destekleniyorsa)", value=True)
-    include_trades = st.checkbox("Trade listesini ekle (ilk 25 satır)", value=True)
+    include_charts = st.checkbox("Rapor grafikleri dahil et", value=True)
+    include_trades = st.checkbox("Trade listesi dahil et (ilk 25)", value=True)
 
-    # Fundamentals for the selected ticker (always)
-    with st.spinner("Fundamental özet hazırlanıyor..."):
+    # Build FA row (from screener + current fundamentals)
+    with st.spinner("Fundamental + screener satırı hazırlanıyor..."):
         f_single = fetch_fundamentals_generic(ticker, market=market)
         f_score, f_breakdown, f_pass = fundamental_score_row(f_single, fa_mode, thresholds)
         fa_eval = {
@@ -1353,8 +1473,9 @@ with tab_pdf:
             "ok_cnt": sum(1 for v in f_breakdown.values() if v.get("available") and v.get("ok")),
             "coverage": sum(1 for v in f_breakdown.values() if v.get("available")),
         }
+        screener_row = find_screener_row(st.session_state.get("screener_df", pd.DataFrame()), ticker)
+        fa_row = merge_fa_row(screener_row, f_single, fa_eval)
 
-    # PDF meta/summary
     meta = {
         "market": market,
         "ticker": ticker,
@@ -1381,39 +1502,58 @@ with tab_pdf:
         "atr_pct": fmt_pct(float(latest.get("ATR_PCT", np.nan))) if pd.notna(latest.get("ATR_PCT", np.nan)) else "N/A",
     }
 
-    figs = {
-        "Price + EMA + BB + Signals": fig_price,
-        "RSI": fig_rsi,
-        "MACD": fig_macd,
-        "ATR%": fig_atr,
-        "Equity Curve": fig_eq,
-    }
+    # Always provide HTML (most robust + charts)
+    html_bytes = build_html_report(
+        title=f"FA→TA Trading Report - {ticker}",
+        meta=meta,
+        checkpoints=checkpoints,
+        metrics=metrics,
+        tp=tp,
+        rr_info=rr_info,
+        figs=(figs_for_report if include_charts else {}),
+        fa_row=fa_row
+    )
+    st.download_button(
+        "⬇️ HTML İndir (Önerilen) — Tarayıcıdan PDF’ye Yazdır",
+        data=html_bytes,
+        file_name=f"{ticker}_FA_TA_report.html",
+        mime="text/html",
+        use_container_width=True
+    )
 
-    # Create report button
-    if st.button("🧾 Raporu Oluştur"):
-        with st.spinner("PDF oluşturuluyor..."):
-            pdf_bytes = generate_pdf_report(
-                title=f"FA→TA Trading Report - {ticker}",
-                subtitle="Educational analysis (not investment advice). Generated from Streamlit dashboard outputs.",
-                meta=meta,
-                checkpoints=checkpoints,
-                ta_summary=ta_summary,
-                target_band=tp,
-                rr_info=rr_info,
-                backtest_metrics=metrics,
-                fundamentals=f_single,
-                fa_eval=fa_eval,
-                levels=tp.get("levels", []),
-                trades_df=(tdf if include_trades else None),
-                figs=(figs if include_charts else None),
-                include_charts=include_charts,
-            )
+    st.divider()
 
-        st.success("PDF hazır ✅")
-        st.download_button(
-            "⬇️ PDF İndir",
-            data=pdf_bytes,
-            file_name=f"{ticker}_FA_TA_report.pdf",
-            mime="application/pdf",
-        )
-        st.info("Not: Eğer grafikler PDF'e gelmiyorsa, ortamda Plotly image export (kaleido) yoktur; PDF metin/tablo ağırlıklı oluşur.")
+    if not REPORTLAB_OK:
+        st.warning("Doğrudan PDF için 'reportlab' gerekli. requirements.txt içine `reportlab` ekleyip redeploy edersen PDF butonu da aktif olur.")
+    else:
+        # PDF generate (may or may not embed charts depending on kaleido)
+        if st.button("🧾 PDF Oluştur (reportlab)", use_container_width=True):
+            with st.spinner("PDF oluşturuluyor..."):
+                pdf_bytes = generate_pdf_report(
+                    title=f"FA→TA Trading Report - {ticker}",
+                    subtitle="Educational analysis (not investment advice). Generated from Streamlit dashboard outputs.",
+                    meta=meta,
+                    checkpoints=checkpoints,
+                    ta_summary=ta_summary,
+                    target_band=tp,
+                    rr_info=rr_info,
+                    backtest_metrics=metrics,
+                    fa_row=fa_row,
+                    levels=tp.get("levels", []),
+                    trades_df=(tdf if include_trades else None),
+                    figs=(figs_for_report if include_charts else None),
+                    include_charts=include_charts
+                )
+
+            if pdf_bytes:
+                st.success("PDF hazır ✅")
+                st.download_button(
+                    "⬇️ PDF İndir",
+                    data=pdf_bytes,
+                    file_name=f"{ticker}_FA_TA_report.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
+                st.info("Grafikler PDF’e gelmiyorsa: requirements.txt içine `kaleido` ekle. (HTML raporda grafikler her zaman gelir.)")
+            else:
+                st.error("PDF üretilemedi. HTML raporu indirip tarayıcıdan PDF’ye yazdırmanı öneririm.")
