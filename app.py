@@ -156,7 +156,7 @@ def get_spy_regime_ok() -> bool:
     return bool(last["Close"] > last["EMA200"])
 
 # =============================
-# Strategy: scoring + checkpoints (GELİŞTİRME: MTF ve RS Eklendi)
+# Strategy: scoring + checkpoints (MTF ve RS dahil)
 # =============================
 def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool):
     df = df.copy()
@@ -227,7 +227,7 @@ def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool)
     return df, cp
 
 # =============================
-# Backtest (long-only) + metrics (GELİŞTİRME: İleri Düzey Risk Yönetimi)
+# Backtest (long-only) + metrics (Gelişmiş Risk Yönetimi)
 # =============================
 def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
     df = df.copy()
@@ -371,7 +371,6 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
 
 # =============================
 # Fundamentals (USA + BIST) via yfinance info 
-# (SENİN İLK GÖNDERDİĞİN ORİJİNAL HALİ - HİÇ DOKUNULMADI)
 # =============================
 def _fix_debt_to_equity(x: float) -> float:
     if pd.notna(x) and x > 10:
@@ -477,7 +476,7 @@ def fundamental_score_row(row: dict, mode: str, thresholds: dict) -> Tuple[float
     return float(score_pct), b, bool(pass_bool)
 
 # =============================
-# Universe helpers (TÜM LİSTE EKLENDİ VE KISITLAMA KALDIRILDI)
+# Universe helpers
 # =============================
 US_TICKERS = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "NFLX", "JPM", "XOM", "SPY", "QQQ"]
 US_EXT = ["AVGO", "AMD", "ORCL", "COST", "KO", "PEP", "JNJ", "PG", "V", "MA", "UNH", "HD", "CRM", "ADBE"]
@@ -586,7 +585,7 @@ def target_price_band(df: pd.DataFrame):
     return {"base": px, "bull": (bull1, bull2, r1), "bear": (bear1, bear2, s1), "levels": lv}
 
 # =============================
-# Live price helper (ORİJİNAL - Dokunulmadı)
+# Live price helper
 # =============================
 @st.cache_data(ttl=30, show_spinner=False)
 def get_live_price(ticker: str) -> dict:
@@ -1148,7 +1147,7 @@ with st.sidebar:
         atr_period = st.number_input("ATR Period", min_value=5, max_value=30, value=14, step=1)
         vol_sma = st.number_input("Volume SMA", min_value=5, max_value=60, value=20, step=1)
 
-    # YENİ ÖZELLİKLER (Sol Menü)
+    # Gelişmiş Strateji Özellikleri
     st.subheader("Gelişmiş Strateji Özellikleri")
     use_spy_filter = st.checkbox("SPY > EMA200 filtresi (sadece USA)", value=True, disabled=(market != "USA"))
     do_walk_forward = st.checkbox("Walk-Forward Analizi (Backtest'i Böl)", value=False, help="%70 Eğitim (Geçmiş) - %30 Test (Yakın Zaman)")
@@ -1164,8 +1163,8 @@ with st.sidebar:
     st.header("3) AI Ayarları")
     ai_on = st.checkbox("AI Chat aktif", value=True)
     ai_model = st.text_input("Model", value="gpt-4o-mini", help="OpenAI model adı")
+    ai_temp = st.slider("Temperature", min_value=0.0, max_value=1.0, value=0.2, step=0.1)  # DÜZELTME: ai_temp eklendi
     
-    # GEMINI API EKLENTİSİ
     st.caption("Grafiği Okumak İçin Gemini API:")
     gemini_key_input = st.text_input("Gemini API Key", type="password", help="Gemini Vision (Grafik Analizi) için gereklidir.")
 
@@ -1265,11 +1264,28 @@ with tab_heatmap:
                 dl_period = p_map[hm_period]
                 
                 try:
-                    hist = yf.download(tk_list, period=dl_period, interval="1d", progress=False)["Close"]
-                    if isinstance(hist, pd.Series): 
-                        hist = hist.to_frame()
+                    # DÜZELTME: Hata yönetimi eklendi
+                    hist = yf.download(tk_list, period=dl_period, interval="1d", progress=False, group_by='ticker')
+                    if hist.empty:
+                        st.error("Veri indirilemedi. Lütfen daha sonra tekrar deneyin.")
+                        st.stop()
                     
-                    ret = (hist.iloc[-1] / hist.iloc[0] - 1) * 100
+                    # "Close" sütununu al
+                    if isinstance(hist, pd.DataFrame) and 'Close' in hist.columns:
+                        # Tek ticker durumu
+                        close_series = hist['Close']
+                    elif isinstance(hist, pd.DataFrame) and hist.columns.nlevels == 2:
+                        # Multi-index durumu (ticker, price)
+                        close_series = hist.xs('Close', axis=1, level=1)
+                    else:
+                        st.error("Beklenmeyen veri formatı.")
+                        st.stop()
+                    
+                    if isinstance(close_series, pd.Series):
+                        close_series = close_series.to_frame()
+                    
+                    # Getirileri hesapla
+                    ret = (close_series.iloc[-1] / close_series.iloc[0] - 1) * 100
                     ret_df = ret.reset_index()
                     ret_df.columns = ["ticker", "momentum"]
 
@@ -1296,7 +1312,6 @@ with tab_heatmap:
 if not st.session_state.ta_ran:
     st.stop()
 
-
 # =============================
 # Run TA pipeline
 # =============================
@@ -1320,7 +1335,7 @@ with st.spinner(f"Ana Veriler ve MTF İndiriliyor: {ticker}"):
         st.warning("Günlükte 260 bar altı: metrikler daha oynak olabilir. (5y/10y seçmek daha iyi)")
 
     # -----------------------------
-    # YENİ: Multi-Timeframe (MTF) Verisi Çekimi
+    # Multi-Timeframe (MTF) Verisi Çekimi
     # -----------------------------
     wk_df = load_data_cached(ticker, period, "1wk")
     if not wk_df.empty:
@@ -1332,7 +1347,7 @@ with st.spinner(f"Ana Veriler ve MTF İndiriliyor: {ticker}"):
         df_raw["MTF_OK"] = True
 
     # -----------------------------
-    # YENİ: Göreceli Güç (Relative Strength)
+    # Göreceli Güç (Relative Strength)
     # -----------------------------
     idx_sym = "SPY" if market == "USA" else "XU100.IS"
     idx_df = load_data_cached(idx_sym, period, interval)
@@ -1359,7 +1374,7 @@ else:
     rec = "İZLE (Güçlü Trend)" if latest["SCORE"] >= 80 else ("BEKLE (Orta)" if latest["SCORE"] >= 60 else "UZAK DUR")
 
 # -----------------------------
-# YENİ: Walk-Forward Backtest Mantığı
+# Walk-Forward Backtest Mantığı
 # -----------------------------
 if do_walk_forward and len(df) > 100:
     split_idx = int(len(df) * 0.7)
@@ -1514,9 +1529,7 @@ with tab_dash:
     st.subheader("📊 Fiyat + EMA + Bollinger + Sinyaller")
     st.plotly_chart(fig_price, use_container_width=True)
     
-    # -----------------------------
-    # YENİ: GEMINI VISION ENTEGRASYONU
-    # -----------------------------
+    # GEMINI VISION ENTEGRASYONU
     st.markdown("### 👁️ Gemini AI ile Grafik Yorumlama")
     if st.button("Grafiği Okut ve Formasyon Analizi Al", type="primary"):
         gemini_api = gemini_key_input or st.secrets.get("GEMINI_API_KEY", "")
@@ -1526,7 +1539,8 @@ with tab_dash:
             with st.spinner("Grafik işleniyor ve Gemini'ye iletiliyor..."):
                 try:
                     img_bytes = fig_price.to_image(format="png", width=1200, height=800, scale=2)
-                    img_pil = PILImage.open(io.BytesIO(img_bytes))
+                    # DÜZELTME: io.BytesIO yerine direkt BytesIO kullan
+                    img_pil = PILImage.open(BytesIO(img_bytes))
                     
                     genai.configure(api_key=gemini_api)
                     model = genai.GenerativeModel("gemini-1.5-pro")
@@ -1549,9 +1563,7 @@ with tab_dash:
     colB.plotly_chart(fig_macd, use_container_width=True)
     colC.plotly_chart(fig_atr, use_container_width=True)
 
-    # -----------------------------
-    # YENİ: WALK-FORWARD METRİKLERİ
-    # -----------------------------
+    # WALK-FORWARD METRİKLERİ
     st.subheader("🧪 Backtest Özeti")
     if do_walk_forward:
         st.write("📌 **Walk-Forward Analizi Aktif (Dinamik Risk Yönetimi Uygulandı)**")
@@ -1612,7 +1624,7 @@ with tab_dash:
                     tail = st.session_state.ai_messages[-6:]
                     messages += tail
                     try:
-                        reply = call_openai(messages, model=ai_model, temperature=ai_temp)
+                        reply = call_openai(messages, model=ai_model, temperature=ai_temp)  # DÜZELTME: ai_temp kullanıldı
                         st.session_state.ai_messages.append({"role": "assistant", "content": reply})
                     except Exception as e:
                         st.error(f"AI hata: {e}")
