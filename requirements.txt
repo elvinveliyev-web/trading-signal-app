@@ -1,10 +1,11 @@
 streamlit
-yfinance
 pandas
 numpy
+yfinance
 plotly
-lxml
-requests
-openai>=1.0.0
-reportlab
 kaleido
+openai
+google-generativeai
+Pillow
+requests
+reportlab
