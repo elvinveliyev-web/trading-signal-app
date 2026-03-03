@@ -3,7 +3,7 @@ pandas
 numpy
 yfinance
 plotly
-kaleido
+kaleido==0.2.1
 openai
 google-generativeai
 Pillow
