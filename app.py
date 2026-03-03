@@ -29,7 +29,7 @@ try:
 except Exception:
     REPORTLAB_OK = False
 
-st.set_page_config(page_title="FA→TA Trading + AI", layout="wide")
+st.set_page_config(page_title="FA→TA Trading + AI PRO", layout="wide")
 
 # =============================
 # Helpers
@@ -156,7 +156,7 @@ def get_spy_regime_ok() -> bool:
     return bool(last["Close"] > last["EMA200"])
 
 # =============================
-# Strategy: scoring + checkpoints (MTF + RS Added)
+# Strategy: scoring + checkpoints (GELİŞTİRME: MTF ve RS Eklendi)
 # =============================
 def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool):
     df = df.copy()
@@ -178,7 +178,6 @@ def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool)
 
     obv_ok = df["OBV"] > df["OBV_EMA"]
 
-    # YENİ: MTF (Haftalık Trend) ve RS (Göreceli Güç) Kontrolleri
     mtf_ok = df.get("MTF_OK", pd.Series(True, index=df.index))
     rs_ok = df.get("RS_OK", pd.Series(True, index=df.index))
 
@@ -228,7 +227,7 @@ def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool)
     return df, cp
 
 # =============================
-# Backtest (long-only) + metrics + Dynamic Risk Sizing
+# Backtest (long-only) + metrics (GELİŞTİRME: İleri Düzey Risk Yönetimi)
 # =============================
 def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
     df = df.copy()
@@ -244,8 +243,8 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
 
     commission = cfg["commission_bps"] / 10000.0
     slippage = cfg["slippage_bps"] / 10000.0
-
-    consecutive_losses = 0 # YENİ: Dinamik risk için
+    
+    consecutive_losses = 0 # Dinamik risk için
 
     for i in range(len(df)):
         row = df.iloc[i]
@@ -266,14 +265,14 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
                 gross = shares * sell_price
                 fee = gross * commission
                 cash += (gross - fee)
-
+                
                 pnl = cash - trades[-1]["equity_before"]
+
                 trades[-1]["exit_date"] = date
                 trades[-1]["exit_price"] = sell_price
                 trades[-1]["exit_reason"] = "STOP" if stop_hit else "RULE_EXIT"
                 trades[-1]["pnl"] = pnl
-
-                # YENİ: Zarar serisi takibi
+                
                 if pnl < 0:
                     consecutive_losses += 1
                 else:
@@ -286,9 +285,8 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
         equity = cash + position_value
 
         if shares == 0 and entry_sig.iloc[i] == 1 and pd.notna(row["ATR"]) and row["ATR"] > 0:
-            # YENİ: 2 ardışık zarardan sonra riski yarıya düşür
             current_risk_pct = cfg["risk_per_trade"] / 2.0 if consecutive_losses >= 2 else cfg["risk_per_trade"]
-
+            
             risk_cash = equity * current_risk_pct
             stop_dist = cfg["atr_stop_mult"] * float(row["ATR"])
             if stop_dist > 0:
@@ -372,7 +370,8 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
     return eq, tdf, metrics
 
 # =============================
-# Fundamentals (USA + BIST) via yfinance info (ORİJİNAL - Dokunulmadı)
+# Fundamentals (USA + BIST) via yfinance info 
+# (SENİN İLK GÖNDERDİĞİN ORİJİNAL HALİ - HİÇ DOKUNULMADI)
 # =============================
 def _fix_debt_to_equity(x: float) -> float:
     if pd.notna(x) and x > 10:
@@ -753,7 +752,7 @@ def build_html_report(
             val = fa_row.get(key, "")
             fa_rows_html += f"<tr><td><b>{esc(label)}</b></td><td>{esc(val)}</td></tr>"
     else:
-        fa_rows_html = "<tr><td colspan='2'>Screener satırı bulunamadı (screener çalıştırılmamış olabilir).</td></tr>"
+        fa_rows_html = "<tr><td colspan='2'>Screener satırı bulunamadı.</td></tr>"
 
     html = f"""
 <!doctype html>
@@ -977,7 +976,7 @@ def generate_pdf_report(
         if not lines:
             lines = ["(No fields)"]
     else:
-        lines = ["Screener satırı bulunamadı (screener çalıştırılmamış olabilir)."]
+        lines = ["Screener satırı bulunamadı."]
     y = _pdf_write_lines(c, lines, left, y, 11, bottom)
     y -= 6
 
@@ -1011,7 +1010,6 @@ def generate_pdf_report(
             usable_h = (H - 3.2*cm - 2.0*cm)
             c.drawImage(img_reader, left, 2.0*cm, width=usable_w, height=usable_h, preserveAspectRatio=True, anchor='c')
 
-    # If charts were requested but couldn't be added, add a note
     if include_charts and figs and not chart_added:
         c.showPage()
         c.setFont("Helvetica-Bold", 14)
@@ -1071,6 +1069,8 @@ if "ai_messages" not in st.session_state:
     st.session_state.ai_messages = [{"role": "assistant", "content": "Sorunu yaz: örn. “Riskler ne, hedef bant ne, hangi şartta çıkarım?”"}]
 if "ta_ran" not in st.session_state:
     st.session_state.ta_ran = False
+if "heatmap_data" not in st.session_state:
+    st.session_state.heatmap_data = pd.DataFrame()
 
 # =============================
 # Sidebar
@@ -1084,7 +1084,7 @@ with st.sidebar:
     use_fa = st.checkbox("Fundamental filtreyi kullan", value=use_fa_default)
     fa_mode = st.selectbox("Fundamental Mod", ["Quality", "Value", "Growth"], index=0, disabled=(not use_fa))
 
-    with st.expander("Eşik Ayarları (Veri boşsa coverage'ı 1 yap)"):
+    with st.expander("Eşik Ayarları (Veri boşsa Min Coverage'ı 1 yapın)"):
         roe = st.slider("ROE min", 0.0, 0.40, 0.15, 0.01, disabled=(not use_fa))
         op_margin = st.slider("Operating Margin min", 0.0, 0.40, 0.10, 0.01, disabled=(not use_fa))
         profit_margin = st.slider("Profit Margin min", 0.0, 0.40, 0.08, 0.01, disabled=(not use_fa))
@@ -1096,10 +1096,10 @@ with st.sidebar:
         rev_g = st.slider("Revenue Growth min", 0.0, 0.50, 0.10, 0.01, disabled=(not use_fa))
         earn_g = st.slider("Earnings Growth min", 0.0, 0.50, 0.10, 0.01, disabled=(not use_fa))
 
-        min_score = st.slider("Min Fundamental Score", 0, 100, 60, 1, disabled=(not use_fa))
-        min_ok = st.slider("Min OK sayısı", 1, 5, 3, 1, disabled=(not use_fa))
+        min_score = st.slider("Min Fundamental Score", 0, 100, 40, 1, disabled=(not use_fa))
+        min_ok = st.slider("Min OK sayısı", 1, 5, 2, 1, disabled=(not use_fa))
         min_coverage = st.slider(
-            "Min Coverage (NaN olmayan metrik sayısı)", 1, 5, 3, 1, disabled=(not use_fa)
+            "Min Coverage (NaN olmayan metrik sayısı)", 0, 5, 1, 1, disabled=(not use_fa)
         )
 
     thresholds = {
@@ -1163,8 +1163,7 @@ with st.sidebar:
     st.divider()
     st.header("3) AI Ayarları")
     ai_on = st.checkbox("AI Chat aktif", value=True)
-    ai_model = st.text_input("Model", value="gpt-4.1-mini", help="OpenAI model adı")
-    ai_temp = st.slider("Temperature", 0.0, 1.0, 0.2, 0.05)
+    ai_model = st.text_input("Model", value="gpt-4o-mini", help="OpenAI model adı")
     
     # GEMINI API EKLENTİSİ
     st.caption("Grafiği Okumak İçin Gemini API:")
@@ -1211,7 +1210,6 @@ cfg.update(PRESETS[preset_name])
 def load_data_cached(ticker: str, period: str, interval: str) -> pd.DataFrame:
     df = yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False)
     return _flatten_yf(df)
-
 
 # Sekmeleri en baştan oluştur (Isı haritası için)
 tab_dash, tab_heatmap, tab_export = st.tabs(["📊 Dashboard", "🗺️ Sektörel Isı Haritası", "📄 Rapor (PDF/HTML)"])
@@ -1267,7 +1265,6 @@ with tab_heatmap:
                 dl_period = p_map[hm_period]
                 
                 try:
-                    # Yfinance logic touched carefully just for download list
                     hist = yf.download(tk_list, period=dl_period, interval="1d", progress=False)["Close"]
                     if isinstance(hist, pd.Series): 
                         hist = hist.to_frame()
@@ -1528,7 +1525,6 @@ with tab_dash:
         else:
             with st.spinner("Grafik işleniyor ve Gemini'ye iletiliyor..."):
                 try:
-                    # Kaleido kurulu degilse graceful fail
                     img_bytes = fig_price.to_image(format="png", width=1200, height=800, scale=2)
                     img_pil = PILImage.open(io.BytesIO(img_bytes))
                     
@@ -1693,14 +1689,14 @@ with tab_export:
     st.divider()
 
     if not REPORTLAB_OK:
-        st.warning("Doğrudan PDF için 'reportlab' gerekli. requirements.txt içine `reportlab` ekleyip redeploy edersen PDF butonu da aktif olur.")
+        st.warning("Doğrudan PDF için 'reportlab' gerekli.")
     else:
         # PDF generate (may or may not embed charts depending on kaleido)
         if st.button("🧾 PDF Oluştur (reportlab)", use_container_width=True):
             with st.spinner("PDF oluşturuluyor..."):
                 pdf_bytes = generate_pdf_report(
                     title=f"FA→TA Trading Report - {ticker}",
-                    subtitle="Educational analysis (not investment advice). Generated from Streamlit dashboard outputs.",
+                    subtitle="Educational analysis (not investment advice).",
                     meta=meta,
                     checkpoints=checkpoints,
                     ta_summary=ta_summary,
@@ -1723,6 +1719,3 @@ with tab_export:
                     mime="application/pdf",
                     use_container_width=True
                 )
-                st.info("Grafikler PDF’e gelmiyorsa: requirements.txt içine `kaleido` ekle. (HTML raporda grafikler her zaman gelir.)")
-            else:
-                st.error("PDF üretilemedi. HTML raporu indirip tarayıcıdan PDF’ye yazdırmanı öneririm.")
