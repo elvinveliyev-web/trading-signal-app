@@ -372,7 +372,7 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
 
 # =============================
 # Fundamentals (USA + BIST) 
-# YFINANCE API DÜZELTİLDİ (Session Kullanımı Kaldırıldı)
+# YFINANCE API (Anti-Ban Bekleme ve Fallback Eklendi)
 # =============================
 def _fix_debt_to_equity(x: float) -> float:
     if pd.notna(x) and x > 10:
@@ -381,12 +381,22 @@ def _fix_debt_to_equity(x: float) -> float:
 
 @st.cache_data(ttl=12 * 3600, show_spinner=False)
 def fetch_fundamentals_generic(ticker: str, market: str) -> dict:
-    # Ticker direkt yalın haliyle çağrılıyor, session kaldırıldı.
     t = yf.Ticker(ticker)
+    info = {}
     try:
+        # info komutu bulut sunucularında engellenebiliyor.
         info = t.info or {}
     except Exception:
-        info = {}
+        pass
+    
+    # Eğer info tamamen boş gelirse (engellenmişsek), bari fiyat ve marketcap alalım
+    if not info:
+        try:
+            fast = t.fast_info
+            info["marketCap"] = fast.get("marketCap")
+            info["currentPrice"] = fast.get("lastPrice")
+        except Exception:
+            pass
 
     out = {
         "ticker": ticker,
@@ -405,9 +415,9 @@ def fetch_fundamentals_generic(ticker: str, market: str) -> dict:
         "earningsGrowth": safe_float(info.get("earningsGrowth")),
         "freeCashflow": safe_float(info.get("freeCashflow")),
         "currentPrice": safe_float(info.get("currentPrice")),
-        "sector": info.get("sector", ""),
-        "industry": info.get("industry", ""),
-        "longName": info.get("longName", "") or info.get("shortName", ""),
+        "sector": info.get("sector", "Bilinmiyor"),
+        "industry": info.get("industry", "Bilinmiyor"),
+        "longName": info.get("longName", "") or info.get("shortName", ticker),
     }
     out["debtToEquity"] = _fix_debt_to_equity(out["debtToEquity"])
     return out
@@ -499,7 +509,6 @@ BIST100_FALLBACK = [
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
 def get_sp500_tickers() -> List[str]:
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    # Basic requests get, no custom session
     try:
         r = requests.get(url, timeout=20)
         r.raise_for_status()
@@ -591,7 +600,6 @@ def target_price_band(df: pd.DataFrame):
 def get_live_price(ticker: str) -> dict:
     out = {"last_price": np.nan, "currency": "", "exchange": "", "asof": ""}
     try:
-        # Session kaldırıldı, tamamen varsayılan haline getirildi.
         t = yf.Ticker(ticker)
         fi = getattr(t, "fast_info", None)
         if fi:
@@ -888,7 +896,8 @@ with st.sidebar:
     use_fa = st.checkbox("Fundamental filtreyi kullan", value=True)
     fa_mode = st.selectbox("Fundamental Mod", ["Quality", "Value", "Growth"], index=0, disabled=(not use_fa))
     
-    with st.expander("Eşik Ayarları (Veriler boşsa Min Coverage'i 1'e düşür)"):
+    with st.expander("Eşik Ayarları"):
+        st.info("Eğer tabloda veriler None geliyorsa, Min Coverage'ı 1 veya 0 yapın.")
         roe = st.slider("ROE min", 0.0, 0.40, 0.15, 0.01)
         op_margin = st.slider("Operating Margin min", 0.0, 0.40, 0.10, 0.01)
         profit_margin = st.slider("Profit Margin min", 0.0, 0.40, 0.08, 0.01)
@@ -901,7 +910,7 @@ with st.sidebar:
         earn_g = st.slider("Earnings Growth min", 0.0, 0.50, 0.10, 0.01)
         min_score = st.slider("Min Fundamental Score", 0, 100, 40, 1)
         min_ok = st.slider("Min OK sayısı", 1, 5, 2, 1)
-        min_coverage = st.slider("Min Coverage", 1, 5, 1, 1)
+        min_coverage = st.slider("Min Coverage", 0, 5, 1, 1)
 
     thresholds = {"roe": roe, "op_margin": op_margin, "profit_margin": profit_margin, "dte": dte, "fpe": fpe, "peg": peg, "ps": ps, "pb": pb, "rev_g": rev_g, "earn_g": earn_g, "min_score": min_score, "min_ok": min_ok, "min_coverage": min_coverage}
 
@@ -957,7 +966,7 @@ with st.sidebar:
 # Fundamental screener action & Heatmap Data Pre-load
 # -----------------------------
 if run_screener and use_fa:
-    with st.spinner(f"Fundamental veriler çekiliyor ({market})..."):
+    with st.spinner(f"Fundamental veriler çekiliyor ({market}). Çok hızlı sorgularda Yahoo engelleyebilir, yavaş çekiliyor..."):
         rows = []
         for tk in universe:
             tk_norm = normalize_ticker(tk, market)
@@ -968,6 +977,7 @@ if run_screener and use_fa:
             f["FA_ok_count"] = sum(1 for v in breakdown.values() if v.get("available") and v.get("ok"))
             f["FA_coverage"] = sum(1 for v in breakdown.values() if v.get("available"))
             rows.append(f)
+            time.sleep(0.2) # Anti-Ban Bekleme Süresi
 
         sdf = pd.DataFrame(rows)
         if not sdf.empty:
@@ -1014,7 +1024,7 @@ with tab_dash:
 
         pass_list = sdf.loc[sdf["FA_pass"] == True, "ticker"].tolist()
         if len(pass_list) == 0:
-            st.warning("Bu eşiklerle PASS çıkan hisse yok. Sol menüden 'Min Coverage' ayarını 1'e veya 2'ye düşürüp tekrar deneyin.")
+            st.warning("Bu eşiklerle PASS çıkan hisse yok. Sol menüden 'Min Coverage' ayarını 1'e veya 0'a düşürüp tekrar deneyin.")
         else:
             st.success(f"PASS sayısı: {len(pass_list)}")
             picked = st.selectbox("PASS listesinden hisse seç (TA’ya gönder)", pass_list, index=0)
@@ -1044,7 +1054,6 @@ with tab_heatmap:
     else:
         st.warning("Sol menüden **Screener Çalıştır** butonuna bastığınızda ısı haritası otomatik olarak burada belirecektir.")
 
-# Eğer TA butonu basılmadıysa kodun devamını çalıştırmaya gerek yok
 if not st.session_state.ta_ran:
     st.stop()
 
@@ -1189,9 +1198,9 @@ with tab_dash:
     if st.button("Grafiği Gemini'ye Gönder ve Yorumlat", type="primary"):
         gemini_api = gemini_key_input or st.secrets.get("GEMINI_API_KEY", "")
         if not gemini_api:
-            st.error("Lütfen sol menüdeki 'AI Ayarları' kısmına Gemini API Key'inizi girin. (Google AI Studio üzerinden ücretsiz alabilirsiniz)")
+            st.error("Lütfen sol menüdeki 'AI Ayarları' kısmına Gemini API Key'inizi girin.")
         else:
-            with st.spinner("Grafik işleniyor ve Gemini'ye iletiliyor... (Birkaç saniye sürebilir)"):
+            with st.spinner("Grafik işleniyor ve Gemini'ye iletiliyor..."):
                 try:
                     img_bytes = fig_price.to_image(format="png", width=1200, height=800, scale=2)
                     img_pil = PILImage.open(io.BytesIO(img_bytes))
@@ -1202,13 +1211,13 @@ with tab_dash:
                         "Sen profesyonel bir kurumsal portföy yöneticisi ve teknik analistsin. "
                         "Grafikteki fiyat hareketlerini (Price Action), formasyon yapılarını, trendin durumunu (EMA'lara göre), "
                         "ve varsa gözle görülür destek/direnç kırılımlarını analiz et. "
-                        "Yorumun kısa, yapılandırılmış, profesyonel tonda olsun ve teknik sinyallerin güvenilirliğini değerlendir."
+                        "Yorumun kısa, yapılandırılmış, profesyonel tonda olsun."
                     )
                     response = model.generate_content([prompt, img_pil])
                     st.success("Analiz Tamamlandı!")
                     st.markdown(response.text)
                 except Exception as e:
-                    st.error(f"Grafik işlenemedi. Hatayı çözmek için GitHub 'requirements.txt' dosyasında sadece 'kaleido' yazdığından ve 'packages.txt' dosyasının bulunduğundan emin olun. Hata detayı: {e}")
+                    st.error(f"Grafik işlenemedi. Lütfen uygulamanın yeniden başlatılmasını bekleyin. Hata detayı: {e}")
 
     st.divider()
     st.subheader("🧪 Backtest Özeti")
@@ -1302,7 +1311,7 @@ with tab_export:
     st.divider()
 
     if not REPORTLAB_OK:
-        st.warning("Doğrudan PDF için 'reportlab' gerekli. requirements.txt içine `reportlab` ekleyip redeploy edersen PDF butonu da aktif olur.")
+        st.warning("Doğrudan PDF için 'reportlab' gerekli.")
     else:
         if st.button("🧾 PDF Oluştur (reportlab)", use_container_width=True):
             with st.spinner("PDF oluşturuluyor..."):
