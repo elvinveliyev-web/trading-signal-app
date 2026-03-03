@@ -1,4 +1,3 @@
-
 import os
 import json
 import time
@@ -10,10 +9,13 @@ import pandas as pd
 import yfinance as yf
 import streamlit as st
 import plotly.graph_objects as go
+import plotly.express as px
 import requests
 
-# OpenAI (new SDK)
+# AI SDKs
 from openai import OpenAI
+import google.generativeai as genai
+from PIL import Image as PILImage
 
 # =============================
 # OPTIONAL PDF SUPPORT (ReportLab)
@@ -154,7 +156,7 @@ def get_spy_regime_ok() -> bool:
     return bool(last["Close"] > last["EMA200"])
 
 # =============================
-# Strategy: scoring + checkpoints
+# Strategy: scoring + checkpoints (MTF + RS Added)
 # =============================
 def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool):
     df = df.copy()
@@ -176,7 +178,11 @@ def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool)
 
     obv_ok = df["OBV"] > df["OBV_EMA"]
 
-    w = {"liq": 10, "trend": 25, "rsi": 15, "macd": 15, "vol": 10, "bb": 15, "obv": 10}
+    # YENİ: MTF (Haftalık Trend) ve RS (Göreceli Güç) Kontrolleri
+    mtf_ok = df.get("MTF_OK", pd.Series(True, index=df.index))
+    rs_ok = df.get("RS_OK", pd.Series(True, index=df.index))
+
+    w = {"liq": 10, "trend": 20, "rsi": 10, "macd": 10, "vol": 10, "bb": 10, "obv": 10, "mtf": 10, "rs": 10}
     score = (
         w["liq"] * liq_ok.astype(int)
         + w["trend"] * trend_ok.astype(int)
@@ -185,10 +191,12 @@ def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool)
         + w["vol"] * vol_ok.astype(int)
         + w["bb"] * (bb_ok | bb_break).astype(int)
         + w["obv"] * obv_ok.astype(int)
+        + w["mtf"] * mtf_ok.astype(int)
+        + w["rs"] * rs_ok.astype(int)
     ).astype(float)
 
     entry_triggers = (rsi_cross.astype(int) + macd_turn.astype(int) + bb_break.astype(int)) >= 2
-    entry = trend_ok & vol_ok & liq_ok & entry_triggers & market_filter_ok
+    entry = trend_ok & vol_ok & liq_ok & mtf_ok & rs_ok & entry_triggers & market_filter_ok
 
     exit_ = (
         (df["Close"] < df["EMA50"])
@@ -204,6 +212,8 @@ def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool)
     last = df.iloc[-1]
     cp = {
         "Market Filter OK": bool(market_filter_ok),
+        "MTF (Haftalık Trend) OK": bool(last.get("MTF_OK", True)),
+        "Göreceli Güç (Endekse Karşı) OK": bool(last.get("RS_OK", True)),
         "Liquidity (Volume > VolSMA)": bool(last["Volume"] > last["VOL_SMA"]) if pd.notna(last["VOL_SMA"]) else False,
         "Trend (Close>EMA200 & EMA50>EMA200)": bool((last["Close"] > last["EMA200"]) and (last["EMA50"] > last["EMA200"]))
         if pd.notna(last["EMA200"]) else False,
@@ -218,7 +228,7 @@ def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool)
     return df, cp
 
 # =============================
-# Backtest (long-only) + metrics
+# Backtest (long-only) + metrics + Dynamic Risk Sizing
 # =============================
 def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
     df = df.copy()
@@ -234,6 +244,8 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
 
     commission = cfg["commission_bps"] / 10000.0
     slippage = cfg["slippage_bps"] / 10000.0
+
+    consecutive_losses = 0 # YENİ: Dinamik risk için
 
     for i in range(len(df)):
         row = df.iloc[i]
@@ -255,10 +267,17 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
                 fee = gross * commission
                 cash += (gross - fee)
 
+                pnl = cash - trades[-1]["equity_before"]
                 trades[-1]["exit_date"] = date
                 trades[-1]["exit_price"] = sell_price
                 trades[-1]["exit_reason"] = "STOP" if stop_hit else "RULE_EXIT"
-                trades[-1]["pnl"] = cash - trades[-1]["equity_before"]
+                trades[-1]["pnl"] = pnl
+
+                # YENİ: Zarar serisi takibi
+                if pnl < 0:
+                    consecutive_losses += 1
+                else:
+                    consecutive_losses = 0
 
                 shares = 0.0
                 stop = np.nan
@@ -267,7 +286,10 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
         equity = cash + position_value
 
         if shares == 0 and entry_sig.iloc[i] == 1 and pd.notna(row["ATR"]) and row["ATR"] > 0:
-            risk_cash = equity * cfg["risk_per_trade"]
+            # YENİ: 2 ardışık zarardan sonra riski yarıya düşür
+            current_risk_pct = cfg["risk_per_trade"] / 2.0 if consecutive_losses >= 2 else cfg["risk_per_trade"]
+
+            risk_cash = equity * current_risk_pct
             stop_dist = cfg["atr_stop_mult"] * float(row["ATR"])
             if stop_dist > 0:
                 qty = risk_cash / stop_dist
@@ -350,7 +372,7 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
     return eq, tdf, metrics
 
 # =============================
-# Fundamentals (USA + BIST) via yfinance info
+# Fundamentals (USA + BIST) via yfinance info (ORİJİNAL - Dokunulmadı)
 # =============================
 def _fix_debt_to_equity(x: float) -> float:
     if pd.notna(x) and x > 10:
@@ -456,7 +478,7 @@ def fundamental_score_row(row: dict, mode: str, thresholds: dict) -> Tuple[float
     return float(score_pct), b, bool(pass_bool)
 
 # =============================
-# Universe helpers
+# Universe helpers (ORİJİNAL - Dokunulmadı)
 # =============================
 US_TICKERS = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "NFLX", "JPM", "XOM", "SPY", "QQQ"]
 US_EXT = ["AVGO", "AMD", "ORCL", "COST", "KO", "PEP", "JNJ", "PG", "V", "MA", "UNH", "HD", "CRM", "ADBE"]
@@ -565,7 +587,7 @@ def target_price_band(df: pd.DataFrame):
     return {"base": px, "bull": (bull1, bull2, r1), "bear": (bear1, bear2, s1), "levels": lv}
 
 # =============================
-# Live price helper
+# Live price helper (ORİJİNAL - Dokunulmadı)
 # =============================
 @st.cache_data(ttl=30, show_spinner=False)
 def get_live_price(ticker: str) -> dict:
@@ -688,7 +710,6 @@ def build_html_report(
                 .replace("<", "&lt;")
                 .replace(">", "&gt;"))
 
-    # Plotly figures (keeps charts exactly)
     fig_blocks = []
     first = True
     for name, fig in (figs or {}).items():
@@ -806,7 +827,6 @@ def build_html_report(
     return html.encode("utf-8")
 
 def _plotly_fig_to_png_bytes(fig: go.Figure) -> Optional[bytes]:
-    # works if kaleido is available
     try:
         return fig.to_image(format="png", scale=2)
     except Exception:
@@ -1041,7 +1061,7 @@ def pct_dist(level: float, base: float):
 # UI State
 # =============================
 st.title("📈 FA→TA Trading Uygulaması + 🤖 AI Analiz")
-st.caption("Önce fundamental ile evreni daralt, sonra teknik analizle giriş/çıkış zamanla. Otomatik emir göndermez.")
+st.caption("Gelişmiş AI Analizi, Çoklu Zaman Dilimi (MTF), Walk-Forward Testi ve Isı Haritası Eklendi.")
 
 if "screener_df" not in st.session_state:
     st.session_state.screener_df = pd.DataFrame()
@@ -1064,24 +1084,23 @@ with st.sidebar:
     use_fa = st.checkbox("Fundamental filtreyi kullan", value=use_fa_default)
     fa_mode = st.selectbox("Fundamental Mod", ["Quality", "Value", "Growth"], index=0, disabled=(not use_fa))
 
-    st.caption("Eşikler (Genel) — BIST'te coverage düşük olabilir")
-    roe = st.slider("ROE min", 0.0, 0.40, 0.15, 0.01, disabled=(not use_fa))
-    op_margin = st.slider("Operating Margin min", 0.0, 0.40, 0.10, 0.01, disabled=(not use_fa))
-    profit_margin = st.slider("Profit Margin min", 0.0, 0.40, 0.08, 0.01, disabled=(not use_fa))
-    dte = st.slider("Debt/Equity max", 0.0, 3.0, 1.0, 0.05, disabled=(not use_fa))
-    fpe = st.slider("Forward P/E max", 0.0, 60.0, 20.0, 1.0, disabled=(not use_fa))
-    peg = st.slider("PEG max", 0.0, 5.0, 1.5, 0.1, disabled=(not use_fa))
-    ps = st.slider("P/S max", 0.0, 30.0, 6.0, 0.5, disabled=(not use_fa))
-    pb = st.slider("P/B max", 0.0, 30.0, 6.0, 0.5, disabled=(not use_fa))
-    rev_g = st.slider("Revenue Growth min", 0.0, 0.50, 0.10, 0.01, disabled=(not use_fa))
-    earn_g = st.slider("Earnings Growth min", 0.0, 0.50, 0.10, 0.01, disabled=(not use_fa))
+    with st.expander("Eşik Ayarları (Veri boşsa coverage'ı 1 yap)"):
+        roe = st.slider("ROE min", 0.0, 0.40, 0.15, 0.01, disabled=(not use_fa))
+        op_margin = st.slider("Operating Margin min", 0.0, 0.40, 0.10, 0.01, disabled=(not use_fa))
+        profit_margin = st.slider("Profit Margin min", 0.0, 0.40, 0.08, 0.01, disabled=(not use_fa))
+        dte = st.slider("Debt/Equity max", 0.0, 3.0, 1.0, 0.05, disabled=(not use_fa))
+        fpe = st.slider("Forward P/E max", 0.0, 60.0, 20.0, 1.0, disabled=(not use_fa))
+        peg = st.slider("PEG max", 0.0, 5.0, 1.5, 0.1, disabled=(not use_fa))
+        ps = st.slider("P/S max", 0.0, 30.0, 6.0, 0.5, disabled=(not use_fa))
+        pb = st.slider("P/B max", 0.0, 30.0, 6.0, 0.5, disabled=(not use_fa))
+        rev_g = st.slider("Revenue Growth min", 0.0, 0.50, 0.10, 0.01, disabled=(not use_fa))
+        earn_g = st.slider("Earnings Growth min", 0.0, 0.50, 0.10, 0.01, disabled=(not use_fa))
 
-    min_score = st.slider("Min Fundamental Score", 0, 100, 60, 1, disabled=(not use_fa))
-    min_ok = st.slider("Min OK sayısı", 1, 5, 3, 1, disabled=(not use_fa))
-    min_coverage = st.slider(
-        "Min Coverage (NaN olmayan metrik sayısı)", 1, 5, 3, 1, disabled=(not use_fa),
-        help="BIST'te yfinance bazı metrikleri boş getirebilir. Coverage düşükse PASS zorlaşır."
-    )
+        min_score = st.slider("Min Fundamental Score", 0, 100, 60, 1, disabled=(not use_fa))
+        min_ok = st.slider("Min OK sayısı", 1, 5, 3, 1, disabled=(not use_fa))
+        min_coverage = st.slider(
+            "Min Coverage (NaN olmayan metrik sayısı)", 1, 5, 3, 1, disabled=(not use_fa)
+        )
 
     thresholds = {
         "roe": roe, "op_margin": op_margin, "profit_margin": profit_margin,
@@ -1120,31 +1139,36 @@ with st.sidebar:
     interval = st.selectbox("Interval", ["1d", "1h", "30m"], index=0)
     period = st.selectbox("Periyot", ["6mo", "1y", "2y", "5y", "10y"], index=3)
 
-    st.divider()
-    st.subheader("Teknik Parametreler")
-    ema_fast = st.number_input("EMA Fast (trend içi)", min_value=5, max_value=100, value=50, step=1)
-    ema_slow = st.number_input("EMA Slow (trend filtresi)", min_value=50, max_value=400, value=200, step=1)
-    rsi_period = st.number_input("RSI Period", min_value=5, max_value=30, value=14, step=1)
-    bb_period = st.number_input("Bollinger Period", min_value=10, max_value=50, value=20, step=1)
-    bb_std = st.number_input("Bollinger Std", min_value=1.0, max_value=3.5, value=2.0, step=0.1)
-    atr_period = st.number_input("ATR Period", min_value=5, max_value=30, value=14, step=1)
-    vol_sma = st.number_input("Volume SMA", min_value=5, max_value=60, value=20, step=1)
+    with st.expander("Teknik Parametreler"):
+        ema_fast = st.number_input("EMA Fast (trend içi)", min_value=5, max_value=100, value=50, step=1)
+        ema_slow = st.number_input("EMA Slow (trend filtresi)", min_value=50, max_value=400, value=200, step=1)
+        rsi_period = st.number_input("RSI Period", min_value=5, max_value=30, value=14, step=1)
+        bb_period = st.number_input("Bollinger Period", min_value=10, max_value=50, value=20, step=1)
+        bb_std = st.number_input("Bollinger Std", min_value=1.0, max_value=3.5, value=2.0, step=0.1)
+        atr_period = st.number_input("ATR Period", min_value=5, max_value=30, value=14, step=1)
+        vol_sma = st.number_input("Volume SMA", min_value=5, max_value=60, value=20, step=1)
 
-    st.subheader("Market Filter")
+    # YENİ ÖZELLİKLER (Sol Menü)
+    st.subheader("Gelişmiş Strateji Özellikleri")
     use_spy_filter = st.checkbox("SPY > EMA200 filtresi (sadece USA)", value=True, disabled=(market != "USA"))
+    do_walk_forward = st.checkbox("Walk-Forward Analizi (Backtest'i Böl)", value=False, help="%70 Eğitim (Geçmiş) - %30 Test (Yakın Zaman)")
 
-    st.subheader("Risk / Backtest")
-    initial_capital = st.number_input("Başlangıç Sermayesi", min_value=100.0, value=10000.0, step=500.0)
-    risk_per_trade = st.slider("Trade başı risk (equity %)", min_value=0.002, max_value=0.05, value=0.01, step=0.001)
-    commission_bps = st.number_input("Komisyon (bps)", min_value=0.0, value=5.0, step=1.0)
-    slippage_bps = st.number_input("Slippage (bps)", min_value=0.0, value=2.0, step=1.0)
-    risk_free_annual = st.number_input("Risk-Free (yıllık, ör: 0.05 = %5)", min_value=0.0, value=0.0, step=0.01)
+    with st.expander("Risk / Backtest Ayarları"):
+        initial_capital = st.number_input("Başlangıç Sermayesi", min_value=100.0, value=10000.0, step=500.0)
+        risk_per_trade = st.slider("Trade başı risk (equity %)", min_value=0.002, max_value=0.05, value=0.01, step=0.001)
+        commission_bps = st.number_input("Komisyon (bps)", min_value=0.0, value=5.0, step=1.0)
+        slippage_bps = st.number_input("Slippage (bps)", min_value=0.0, value=2.0, step=1.0)
+        risk_free_annual = st.number_input("Risk-Free (yıllık, ör: 0.05 = %5)", min_value=0.0, value=0.0, step=0.01)
 
     st.divider()
     st.header("3) AI Ayarları")
     ai_on = st.checkbox("AI Chat aktif", value=True)
     ai_model = st.text_input("Model", value="gpt-4.1-mini", help="OpenAI model adı")
     ai_temp = st.slider("Temperature", 0.0, 1.0, 0.2, 0.05)
+    
+    # GEMINI API EKLENTİSİ
+    st.caption("Grafiği Okumak İçin Gemini API:")
+    gemini_key_input = st.text_input("Gemini API Key", type="password", help="Gemini Vision (Grafik Analizi) için gereklidir.")
 
     run_btn = st.button("🚀 Teknik Analizi Çalıştır", type="primary")
     if run_btn:
@@ -1188,35 +1212,93 @@ def load_data_cached(ticker: str, period: str, interval: str) -> pd.DataFrame:
     df = yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False)
     return _flatten_yf(df)
 
+
+# Sekmeleri en baştan oluştur (Isı haritası için)
+tab_dash, tab_heatmap, tab_export = st.tabs(["📊 Dashboard", "🗺️ Sektörel Isı Haritası", "📄 Rapor (PDF/HTML)"])
+
 # If TA not ran yet: show screener (if any) and stop
 if not st.session_state.ta_ran:
-    if use_fa and not st.session_state.screener_df.empty:
-        st.subheader(f"🧾 Fundamental Screener Sonuçları ({market})")
-        sdf = st.session_state.screener_df.copy()
+    with tab_dash:
+        if use_fa and not st.session_state.screener_df.empty:
+            st.subheader(f"🧾 Fundamental Screener Sonuçları ({market})")
+            sdf = st.session_state.screener_df.copy()
 
-        show_cols = [
-            "ticker", "longName", "FA_pass", "FA_score", "FA_ok_count", "FA_coverage",
-            "sector", "industry",
-            "trailingPE", "forwardPE", "pegRatio", "priceToSalesTrailing12Months", "priceToBook",
-            "returnOnEquity", "operatingMargins", "profitMargins", "debtToEquity",
-            "revenueGrowth", "earningsGrowth",
-            "marketCap"
-        ]
-        sdf_show = sdf[[c for c in show_cols if c in sdf.columns]].copy()
-        st.dataframe(sdf_show, use_container_width=True, height=360)
+            show_cols = [
+                "ticker", "longName", "FA_pass", "FA_score", "FA_ok_count", "FA_coverage",
+                "sector", "industry",
+                "trailingPE", "forwardPE", "pegRatio", "priceToSalesTrailing12Months", "priceToBook",
+                "returnOnEquity", "operatingMargins", "profitMargins", "debtToEquity",
+                "revenueGrowth", "earningsGrowth",
+                "marketCap"
+            ]
+            sdf_show = sdf[[c for c in show_cols if c in sdf.columns]].copy()
+            st.dataframe(sdf_show, use_container_width=True, height=360)
 
-        pass_list = sdf.loc[sdf["FA_pass"] == True, "ticker"].tolist()
-        if len(pass_list) == 0:
-            st.warning("Bu eşiklerle PASS çıkan hisse yok. Eşikleri gevşet / mode değiştir / coverage düşür.")
-        else:
-            st.success(f"PASS sayısı: {len(pass_list)}")
-            picked = st.selectbox("PASS listesinden hisse seç (TA’ya gönder)", pass_list, index=0)
-            if st.button("➡️ Seçimi Teknik Analize Aktar"):
-                st.session_state.selected_ticker = picked
-                st.rerun()
+            pass_list = sdf.loc[sdf["FA_pass"] == True, "ticker"].tolist()
+            if len(pass_list) == 0:
+                st.warning("Bu eşiklerle PASS çıkan hisse yok. Eşikleri gevşet / mode değiştir / coverage düşür.")
+            else:
+                st.success(f"PASS sayısı: {len(pass_list)}")
+                picked = st.selectbox("PASS listesinden hisse seç (TA’ya gönder)", pass_list, index=0)
+                if st.button("➡️ Seçimi Teknik Analize Aktar"):
+                    st.session_state.selected_ticker = picked
+                    st.rerun()
 
-    st.info("Soldan ayarları yapıp **Teknik Analizi Çalıştır**’a bas.")
+        st.info("Soldan ayarları yapıp **Teknik Analizi Çalıştır**’a bas veya **Isı Haritası** sekmesine geç.")
+
+# =============================
+# HEATMAP TAB (Bağımsız çalışabilir)
+# =============================
+with tab_heatmap:
+    st.subheader("🗺️ Sektörel Isı Haritası")
+    st.write("Screener listesindeki hisselerin seçilen periyottaki hacim/momentum akışını gösterir.")
+    
+    if st.session_state.screener_df.empty:
+        st.warning("⚠️ Lütfen önce sol menüden 'Screener Çalıştır' butonuna basarak temel verileri çekin.")
+    else:
+        hm_period = st.selectbox("Isı Haritası Periyodu Seçin:", ["Günlük (Son 5 Gün)", "Haftalık (Son 1 Ay)", "Aylık (Son 3 Ay)"])
+        
+        if st.button("Isı Haritasını Çiz", type="primary"):
+            with st.spinner("Seçilen periyot için veriler analiz ediliyor..."):
+                tk_list = st.session_state.screener_df["ticker"].tolist()
+                
+                # Fetch string map
+                p_map = {"Günlük (Son 5 Gün)": "5d", "Haftalık (Son 1 Ay)": "1mo", "Aylık (Son 3 Ay)": "3mo"}
+                dl_period = p_map[hm_period]
+                
+                try:
+                    # Yfinance logic touched carefully just for download list
+                    hist = yf.download(tk_list, period=dl_period, interval="1d", progress=False)["Close"]
+                    if isinstance(hist, pd.Series): 
+                        hist = hist.to_frame()
+                    
+                    ret = (hist.iloc[-1] / hist.iloc[0] - 1) * 100
+                    ret_df = ret.reset_index()
+                    ret_df.columns = ["ticker", "momentum"]
+
+                    merged = pd.merge(st.session_state.screener_df, ret_df, on="ticker")
+                    merged = merged.dropna(subset=["momentum", "sector"])
+                    
+                    merged["marketCap_viz"] = merged["marketCap"].fillna(0)
+                    merged.loc[merged["marketCap_viz"] <= 0, "marketCap_viz"] = 1
+
+                    fig_heat = px.treemap(
+                        merged, 
+                        path=[px.Constant("Tüm Piyasa"), "sector", "ticker"],
+                        values="marketCap_viz", 
+                        color="momentum",
+                        color_continuous_scale="RdYlGn",
+                        color_continuous_midpoint=0,
+                        title=f"{market} - Sektörel Momentum ({hm_period})"
+                    )
+                    fig_heat.update_layout(height=700, margin=dict(t=50, l=25, r=25, b=25))
+                    st.plotly_chart(fig_heat, use_container_width=True)
+                except Exception as e:
+                    st.error(f"Harita çizilirken hata oluştu: {e}")
+
+if not st.session_state.ta_ran:
     st.stop()
+
 
 # =============================
 # Run TA pipeline
@@ -1226,19 +1308,44 @@ if market == "USA" and use_spy_filter:
     with st.spinner("SPY rejimi kontrol ediliyor..."):
         market_filter_ok = get_spy_regime_ok()
 
-with st.spinner(f"Veri indiriliyor: {ticker}"):
+with st.spinner(f"Ana Veriler ve MTF İndiriliyor: {ticker}"):
     df_raw = load_data_cached(ticker, period, interval)
+    
+    if df_raw.empty:
+        st.error(
+            f"Veri gelmedi: {ticker}\n\n"
+            "BIST için THYAO formatı otomatik THYAO.IS olur.\n"
+            "BIST’te 1d interval ve 5y/10y periyot daha stabil."
+        )
+        st.stop()
 
-if df_raw.empty:
-    st.error(
-        f"Veri gelmedi: {ticker}\n\n"
-        "BIST için THYAO formatı otomatik THYAO.IS olur.\n"
-        "BIST’te 1d interval ve 5y/10y periyot daha stabil."
-    )
-    st.stop()
+    if len(df_raw) < 260 and interval == "1d":
+        st.warning("Günlükte 260 bar altı: metrikler daha oynak olabilir. (5y/10y seçmek daha iyi)")
 
-if len(df_raw) < 260 and interval == "1d":
-    st.warning("Günlükte 260 bar altı: metrikler daha oynak olabilir. (5y/10y seçmek daha iyi)")
+    # -----------------------------
+    # YENİ: Multi-Timeframe (MTF) Verisi Çekimi
+    # -----------------------------
+    wk_df = load_data_cached(ticker, period, "1wk")
+    if not wk_df.empty:
+        wk_df["EMA50_wk"] = ema(wk_df["Close"], 50)
+        wk_ema_daily = wk_df["EMA50_wk"].reindex(df_raw.index, method="ffill")
+        df_raw["EMA50_wk"] = wk_ema_daily
+        df_raw["MTF_OK"] = (df_raw["Close"] > df_raw["EMA50_wk"]).fillna(True)
+    else:
+        df_raw["MTF_OK"] = True
+
+    # -----------------------------
+    # YENİ: Göreceli Güç (Relative Strength)
+    # -----------------------------
+    idx_sym = "SPY" if market == "USA" else "XU100.IS"
+    idx_df = load_data_cached(idx_sym, period, interval)
+    if not idx_df.empty:
+        idx_close = idx_df["Close"].reindex(df_raw.index, method="ffill")
+        df_raw["RS"] = df_raw["Close"] / idx_close
+        df_raw["RS_EMA50"] = ema(df_raw["RS"], 50)
+        df_raw["RS_OK"] = (df_raw["RS"] > df_raw["RS_EMA50"]).fillna(True)
+    else:
+        df_raw["RS_OK"] = True
 
 df = build_features(df_raw, cfg)
 df, checkpoints = signal_with_checkpoints(df, cfg, market_filter_ok=market_filter_ok)
@@ -1254,7 +1361,22 @@ elif int(latest["EXIT"]) == 1:
 else:
     rec = "İZLE (Güçlü Trend)" if latest["SCORE"] >= 80 else ("BEKLE (Orta)" if latest["SCORE"] >= 60 else "UZAK DUR")
 
-eq, tdf, metrics = backtest_long_only(df, cfg, risk_free_annual=risk_free_annual)
+# -----------------------------
+# YENİ: Walk-Forward Backtest Mantığı
+# -----------------------------
+if do_walk_forward and len(df) > 100:
+    split_idx = int(len(df) * 0.7)
+    df_train = df.iloc[:split_idx]
+    df_test = df.iloc[split_idx:]
+    eq_train, tdf_train, metrics_train = backtest_long_only(df_train, cfg, risk_free_annual)
+    eq_test, tdf_test, metrics_test = backtest_long_only(df_test, cfg, risk_free_annual)
+    
+    # Tam grafik için bütünü de hesapla
+    eq, tdf, metrics = backtest_long_only(df, cfg, risk_free_annual)
+else:
+    eq, tdf, metrics = backtest_long_only(df, cfg, risk_free_annual)
+    do_walk_forward = False
+
 tp = target_price_band(df)
 rr_info = rr_from_atr_stop(latest, tp, cfg)
 
@@ -1292,6 +1414,8 @@ fig_atr.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), yaxis_tit
 
 fig_eq = go.Figure()
 fig_eq.add_trace(go.Scatter(x=eq.index, y=eq.values, name="Equity"))
+if do_walk_forward:
+    fig_eq.add_vline(x=df.index[split_idx], line_dash="dash", line_color="red", annotation_text="Test Başlangıcı")
 fig_eq.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
 
 figs_for_report = {
@@ -1301,11 +1425,6 @@ figs_for_report = {
     "ATR%": fig_atr,
     "Equity Curve": fig_eq,
 }
-
-# =============================
-# Tabs
-# =============================
-tab_dash, tab_export = st.tabs(["📊 Dashboard", "📄 Rapor (PDF/HTML)"])
 
 with tab_dash:
     # Screener display (if available)
@@ -1329,8 +1448,8 @@ with tab_dash:
             st.warning("Bu eşiklerle PASS çıkan hisse yok. Eşikleri gevşet / mode değiştir / coverage düşür.")
         else:
             st.success(f"PASS sayısı: {len(pass_list)}")
-            picked = st.selectbox("PASS listesinden hisse seç (TA’ya gönder)", pass_list, index=0)
-            if st.button("➡️ Seçimi Teknik Analize Aktar"):
+            picked = st.selectbox("PASS listesinden hisse seç (TA’ya gönder) - Dashboard", pass_list, index=0)
+            if st.button("➡️ Seçimi Teknik Analize Aktar - Dashboard"):
                 st.session_state.selected_ticker = picked
                 st.rerun()
 
@@ -1338,7 +1457,7 @@ with tab_dash:
     c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
     c1.metric("Market", market)
     c2.metric("Sembol", ticker)
-    c3.metric("Daily Close (bar)", f"{latest['Close']:.2f}")
+    c3.metric("Daily Close", f"{latest['Close']:.2f}")
     c4.metric("Live/Last", f"{live_price:.2f}" if np.isfinite(live_price) else "N/A")
     c5.metric("Skor", f"{latest['SCORE']:.0f}/100")
     c6.metric("Sinyal", rec)
@@ -1346,7 +1465,7 @@ with tab_dash:
 
     st.caption("Not: Daily Close (1d bar) ile Live/Last farklı olabilir. Piyasa açıkken 1d bar kapanışı güncellenmez.")
 
-    st.subheader("✅ Kontrol Noktaları (Son Bar)")
+    st.subheader("✅ Kontrol Noktaları (Son Bar - MTF & RS Dahil)")
     cp_cols = st.columns(3)
     for i, (k, v) in enumerate(checkpoints.items()):
         with cp_cols[i % 3]:
@@ -1397,6 +1516,36 @@ with tab_dash:
     # Charts
     st.subheader("📊 Fiyat + EMA + Bollinger + Sinyaller")
     st.plotly_chart(fig_price, use_container_width=True)
+    
+    # -----------------------------
+    # YENİ: GEMINI VISION ENTEGRASYONU
+    # -----------------------------
+    st.markdown("### 👁️ Gemini AI ile Grafik Yorumlama")
+    if st.button("Grafiği Okut ve Formasyon Analizi Al", type="primary"):
+        gemini_api = gemini_key_input or st.secrets.get("GEMINI_API_KEY", "")
+        if not gemini_api:
+            st.error("Lütfen sol menüdeki AI Ayarları kısmına Gemini API Key'inizi girin.")
+        else:
+            with st.spinner("Grafik işleniyor ve Gemini'ye iletiliyor..."):
+                try:
+                    # Kaleido kurulu degilse graceful fail
+                    img_bytes = fig_price.to_image(format="png", width=1200, height=800, scale=2)
+                    img_pil = PILImage.open(io.BytesIO(img_bytes))
+                    
+                    genai.configure(api_key=gemini_api)
+                    model = genai.GenerativeModel("gemini-1.5-pro")
+                    prompt = (
+                        "Sen profesyonel bir kurumsal portföy yöneticisi ve teknik analistsin. "
+                        "Aşağıdaki grafikteki fiyat hareketlerini (Price Action), formasyon yapılarını, "
+                        "trendin durumunu ve gözle görülür destek/direnç kırılımlarını analiz et. "
+                        "Yatırım tavsiyesi vermeden, yapılandırılmış ve profesyonel bir yorum yaz."
+                    )
+                    response = model.generate_content([prompt, img_pil])
+                    st.success("Gemini Analizi Tamamlandı!")
+                    st.markdown(response.text)
+                except Exception as e:
+                    st.error("Grafik resme çevrilemedi. Sunucuda 'kaleido' paketi yüklü olmayabilir. Lütfen GitHub deponuza 'packages.txt' eklediğinizden ve içine 'chromium' yazdığınızdan emin olun.")
+                    st.exception(e)
 
     st.subheader("📉 RSI / MACD / ATR%")
     colA, colB, colC = st.columns(3)
@@ -1404,14 +1553,33 @@ with tab_dash:
     colB.plotly_chart(fig_macd, use_container_width=True)
     colC.plotly_chart(fig_atr, use_container_width=True)
 
-    st.subheader("🧪 Backtest Özeti (Long-only)")
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
-    m1.metric("Total Return", f"{metrics['Total Return']*100:.1f}%")
-    m2.metric("Ann Return", f"{metrics['Annualized Return']*100:.1f}%")
-    m3.metric("Sharpe", f"{metrics['Sharpe']:.2f}")
-    m4.metric("Max DD", f"{metrics['Max Drawdown']*100:.1f}%")
-    m5.metric("Trades", f"{metrics['Trades']}")
-    m6.metric("Win Rate", f"{metrics['Win Rate']*100:.1f}%")
+    # -----------------------------
+    # YENİ: WALK-FORWARD METRİKLERİ
+    # -----------------------------
+    st.subheader("🧪 Backtest Özeti")
+    if do_walk_forward:
+        st.write("📌 **Walk-Forward Analizi Aktif (Dinamik Risk Yönetimi Uygulandı)**")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.info("Eğitim Dönemi (İlk %70 Veri)")
+            st.metric("Total Return", f"{metrics_train['Total Return']*100:.1f}%")
+            st.metric("Max Drawdown", f"{metrics_train['Max Drawdown']*100:.1f}%")
+            st.metric("Win Rate", f"{metrics_train['Win Rate']*100:.1f}%")
+            st.metric("Profit Factor", f"{metrics_train['Profit Factor']:.2f}")
+        with col2:
+            st.success("Test Dönemi (Son %30 OOS Veri)")
+            st.metric("Total Return", f"{metrics_test['Total Return']*100:.1f}%")
+            st.metric("Max Drawdown", f"{metrics_test['Max Drawdown']*100:.1f}%")
+            st.metric("Win Rate", f"{metrics_test['Win Rate']*100:.1f}%")
+            st.metric("Profit Factor", f"{metrics_test['Profit Factor']:.2f}")
+    else:
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
+        m1.metric("Total Return", f"{metrics['Total Return']*100:.1f}%")
+        m2.metric("Ann Return", f"{metrics['Annualized Return']*100:.1f}%")
+        m3.metric("Sharpe", f"{metrics['Sharpe']:.2f}")
+        m4.metric("Max DD", f"{metrics['Max Drawdown']*100:.1f}%")
+        m5.metric("Trades", f"{metrics['Trades']}")
+        m6.metric("Win Rate", f"{metrics['Win Rate']*100:.1f}%")
 
     with st.expander("Trade listesi", expanded=False):
         st.dataframe(tdf, use_container_width=True, height=240)
