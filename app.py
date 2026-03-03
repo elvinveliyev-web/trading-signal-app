@@ -372,7 +372,7 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
 
 # =============================
 # Fundamentals (USA + BIST) 
-# YFINANCE Session (Anti-bot hatasını önlemek için native haline döndürüldü)
+# YFINANCE API DÜZELTİLDİ (Session Kullanımı Kaldırıldı)
 # =============================
 def _fix_debt_to_equity(x: float) -> float:
     if pd.notna(x) and x > 10:
@@ -381,6 +381,7 @@ def _fix_debt_to_equity(x: float) -> float:
 
 @st.cache_data(ttl=12 * 3600, show_spinner=False)
 def fetch_fundamentals_generic(ticker: str, market: str) -> dict:
+    # Ticker direkt yalın haliyle çağrılıyor, session kaldırıldı.
     t = yf.Ticker(ticker)
     try:
         info = t.info or {}
@@ -498,9 +499,9 @@ BIST100_FALLBACK = [
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
 def get_sp500_tickers() -> List[str]:
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    # Basic requests get, no custom session
     try:
-        r = requests.get(url, headers=headers, timeout=20)
+        r = requests.get(url, timeout=20)
         r.raise_for_status()
         tables = pd.read_html(r.text)
         dfu = tables[0]
@@ -511,9 +512,8 @@ def get_sp500_tickers() -> List[str]:
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
 def get_nasdaq100_tickers() -> List[str]:
     url = "https://en.wikipedia.org/wiki/Nasdaq-100"
-    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        r = requests.get(url, headers=headers, timeout=20)
+        r = requests.get(url, timeout=20)
         r.raise_for_status()
         tables = pd.read_html(r.text)
         for t in tables:
@@ -530,11 +530,10 @@ def get_bist100_tickers() -> List[str]:
         "https://www.borsaistanbul.com/tr/sayfa/195/bist-pay-endeksleri",
         "https://www.borsaistanbul.com/tr/sayfa/194/endeksler",
     ]
-    headers = {"User-Agent": "Mozilla/5.0"}
 
     for url in candidates:
         try:
-            r = requests.get(url, headers=headers, timeout=20)
+            r = requests.get(url, timeout=20)
             r.raise_for_status()
             tables = pd.read_html(r.text)
             for t in tables:
@@ -592,6 +591,7 @@ def target_price_band(df: pd.DataFrame):
 def get_live_price(ticker: str) -> dict:
     out = {"last_price": np.nan, "currency": "", "exchange": "", "asof": ""}
     try:
+        # Session kaldırıldı, tamamen varsayılan haline getirildi.
         t = yf.Ticker(ticker)
         fi = getattr(t, "fast_info", None)
         if fi:
@@ -1208,7 +1208,7 @@ with tab_dash:
                     st.success("Analiz Tamamlandı!")
                     st.markdown(response.text)
                 except Exception as e:
-                    st.error(f"Grafik işlenemedi. Hatayı çözmek için GitHub 'requirements.txt' dosyasında 'kaleido==0.1.0.post1' olduğundan emin olun. Hata detayı: {e}")
+                    st.error(f"Grafik işlenemedi. Hatayı çözmek için GitHub 'requirements.txt' dosyasında sadece 'kaleido' yazdığından ve 'packages.txt' dosyasının bulunduğundan emin olun. Hata detayı: {e}")
 
     st.divider()
     st.subheader("🧪 Backtest Özeti")
