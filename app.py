@@ -156,7 +156,7 @@ def get_spy_regime_ok() -> bool:
     return bool(last["Close"] > last["EMA200"])
 
 # =============================
-# Strategy: scoring + checkpoints (MTF ve RS Eklendi)
+# Strategy: scoring + checkpoints (GELİŞTİRME: MTF ve RS Eklendi)
 # =============================
 def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool):
     df = df.copy()
@@ -227,7 +227,7 @@ def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool)
     return df, cp
 
 # =============================
-# Backtest (long-only) + metrics (Dinamik Risk Yönetimi)
+# Backtest (long-only) + metrics (GELİŞTİRME: İleri Düzey Risk Yönetimi)
 # =============================
 def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
     df = df.copy()
@@ -244,7 +244,7 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
     commission = cfg["commission_bps"] / 10000.0
     slippage = cfg["slippage_bps"] / 10000.0
     
-    consecutive_losses = 0
+    consecutive_losses = 0 # Dinamik risk için
 
     for i in range(len(df)):
         row = df.iloc[i]
@@ -371,7 +371,7 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
 
 # =============================
 # Fundamentals (USA + BIST) via yfinance info 
-# (ORİJİNAL - HİÇ DOKUNULMADI)
+# (SENİN İLK GÖNDERDİĞİN ORİJİNAL HALİ - HİÇ DOKUNULMADI)
 # =============================
 def _fix_debt_to_equity(x: float) -> float:
     if pd.notna(x) and x > 10:
@@ -477,7 +477,7 @@ def fundamental_score_row(row: dict, mode: str, thresholds: dict) -> Tuple[float
     return float(score_pct), b, bool(pass_bool)
 
 # =============================
-# Universe helpers (ORİJİNAL - Dokunulmadı)
+# Universe helpers (TÜM LİSTE EKLENDİ VE KISITLAMA KALDIRILDI)
 # =============================
 US_TICKERS = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "NFLX", "JPM", "XOM", "SPY", "QQQ"]
 US_EXT = ["AVGO", "AMD", "ORCL", "COST", "KO", "PEP", "JNJ", "PG", "V", "MA", "UNH", "HD", "CRM", "ADBE"]
@@ -1111,7 +1111,9 @@ with st.sidebar:
 
     # Universe
     if market == "USA":
-        universe = sorted(list(set(get_sp500_tickers() + get_nasdaq100_tickers())))
+        sp = get_sp500_tickers()
+        ndx = get_nasdaq100_tickers()
+        universe = sorted(list(set(sp + ndx)))
         st.caption(f"Universe: S&P500 + Nasdaq100 (unique: {len(universe)})")
     else:
         bist = get_bist100_tickers()
