@@ -179,7 +179,7 @@ def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool)
 
     obv_ok = df["OBV"] > df["OBV_EMA"]
     
-    # NEW: MTF & RS Checks
+    # MTF & RS Checks
     mtf_ok = df.get("MTF_OK", pd.Series(True, index=df.index))
     rs_ok = df.get("RS_OK", pd.Series(True, index=df.index))
 
@@ -246,7 +246,6 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
     commission = cfg["commission_bps"] / 10000.0
     slippage = cfg["slippage_bps"] / 10000.0
     
-    # Risk Management Tracker
     consecutive_losses = 0
 
     for i in range(len(df)):
@@ -288,7 +287,6 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
         equity = cash + position_value
 
         if shares == 0 and entry_sig.iloc[i] == 1 and pd.notna(row["ATR"]) and row["ATR"] > 0:
-            # Dynamic Position Sizing (Halve risk if on losing streak)
             current_risk_pct = cfg["risk_per_trade"] / 2.0 if consecutive_losses >= 2 else cfg["risk_per_trade"]
             
             risk_cash = equity * current_risk_pct
@@ -374,7 +372,7 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
     return eq, tdf, metrics
 
 # =============================
-# Fundamentals (USA + BIST) via yfinance info
+# Fundamentals (USA + BIST) Yfinance Anti-Bot Filter
 # =============================
 def _fix_debt_to_equity(x: float) -> float:
     if pd.notna(x) and x > 10:
@@ -383,7 +381,13 @@ def _fix_debt_to_equity(x: float) -> float:
 
 @st.cache_data(ttl=12 * 3600, show_spinner=False)
 def fetch_fundamentals_generic(ticker: str, market: str) -> dict:
-    t = yf.Ticker(ticker)
+    # yfinance API'sini kandırmak için Sahte Tarayıcı Kimliği (User-Agent) Ekliyoruz
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    })
+    
+    t = yf.Ticker(ticker, session=session)
     try:
         info = t.info or {}
     except Exception:
@@ -594,7 +598,9 @@ def target_price_band(df: pd.DataFrame):
 def get_live_price(ticker: str) -> dict:
     out = {"last_price": np.nan, "currency": "", "exchange": "", "asof": ""}
     try:
-        t = yf.Ticker(ticker)
+        session = requests.Session()
+        session.headers.update({"User-Agent": "Mozilla/5.0"})
+        t = yf.Ticker(ticker, session=session)
         fi = getattr(t, "fast_info", None)
         if fi:
             out["last_price"] = safe_float(fi.get("last_price") or fi.get("lastPrice"))
@@ -890,7 +896,7 @@ with st.sidebar:
     use_fa = st.checkbox("Fundamental filtreyi kullan", value=True)
     fa_mode = st.selectbox("Fundamental Mod", ["Quality", "Value", "Growth"], index=0, disabled=(not use_fa))
     
-    with st.expander("Eşik Ayarları"):
+    with st.expander("Eşik Ayarları (Veriler boşsa Min Coverage'i 1'e düşür)"):
         roe = st.slider("ROE min", 0.0, 0.40, 0.15, 0.01)
         op_margin = st.slider("Operating Margin min", 0.0, 0.40, 0.10, 0.01)
         profit_margin = st.slider("Profit Margin min", 0.0, 0.40, 0.08, 0.01)
@@ -901,9 +907,9 @@ with st.sidebar:
         pb = st.slider("P/B max", 0.0, 30.0, 6.0, 0.5)
         rev_g = st.slider("Revenue Growth min", 0.0, 0.50, 0.10, 0.01)
         earn_g = st.slider("Earnings Growth min", 0.0, 0.50, 0.10, 0.01)
-        min_score = st.slider("Min Fundamental Score", 0, 100, 60, 1)
-        min_ok = st.slider("Min OK sayısı", 1, 5, 3, 1)
-        min_coverage = st.slider("Min Coverage", 1, 5, 3, 1)
+        min_score = st.slider("Min Fundamental Score", 0, 100, 40, 1)
+        min_ok = st.slider("Min OK sayısı", 1, 5, 2, 1)
+        min_coverage = st.slider("Min Coverage", 1, 5, 1, 1)
 
     thresholds = {"roe": roe, "op_margin": op_margin, "profit_margin": profit_margin, "dte": dte, "fpe": fpe, "peg": peg, "ps": ps, "pb": pb, "rev_g": rev_g, "earn_g": earn_g, "min_score": min_score, "min_ok": min_ok, "min_coverage": min_coverage}
 
@@ -1001,12 +1007,11 @@ if run_screener and use_fa:
                 st.session_state.heatmap_data = pd.DataFrame()
 
 # =============================
-# Layout (Tabs) Defined BEFORE Execution to allow rendering UI
+# Layout (Tabs)
 # =============================
 tab_dash, tab_heatmap, tab_export = st.tabs(["📊 Dashboard & TA", "🗺️ Sektörel Isı Haritası", "📄 Rapor"])
 
 with tab_dash:
-    # 1. Screener Sonuçlarını Göster (Eğer varsa)
     if use_fa and "screener_df" in st.session_state and not st.session_state.screener_df.empty:
         st.subheader(f"🧾 Fundamental Screener Sonuçları ({market})")
         sdf = st.session_state.screener_df.copy()
@@ -1017,7 +1022,7 @@ with tab_dash:
 
         pass_list = sdf.loc[sdf["FA_pass"] == True, "ticker"].tolist()
         if len(pass_list) == 0:
-            st.warning("Bu eşiklerle PASS çıkan hisse yok. Eşikleri gevşetebilirsiniz.")
+            st.warning("Bu eşiklerle PASS çıkan hisse yok. Sol menüden 'Min Coverage' ayarını 1'e veya 2'ye düşürüp tekrar deneyin.")
         else:
             st.success(f"PASS sayısı: {len(pass_list)}")
             picked = st.selectbox("PASS listesinden hisse seç (TA’ya gönder)", pass_list, index=0)
@@ -1047,13 +1052,13 @@ with tab_heatmap:
     else:
         st.warning("Sol menüden **Screener Çalıştır** butonuna bastığınızda ısı haritası otomatik olarak burada belirecektir.")
 
-# Eğer TA butonu basılmadıysa kodun devamını çalıştırmaya gerek yok (sekmeler açık kalır)
+# Eğer TA butonu basılmadıysa kodun devamını çalıştırmaya gerek yok
 if not st.session_state.ta_ran:
     st.stop()
 
 
 # =============================
-# Run TA pipeline (If button was pressed)
+# Run TA pipeline
 # =============================
 cfg = {
     "ema_fast": ema_fast, "ema_slow": ema_slow, "rsi_period": rsi_period,
@@ -1146,7 +1151,6 @@ if do_walk_forward:
     fig_eq.add_vline(x=df.index[split_idx], line_dash="dash", line_color="red", annotation_text="Test Başlangıcı")
 fig_eq.update_layout(height=320, title="Sermaye Eğrisi (Equity Curve)")
 
-# YENI EKLENEN GRAFIKLER (RSI, MACD, ATR)
 fig_rsi = go.Figure()
 fig_rsi.add_trace(go.Scatter(x=df.index, y=df["RSI"], name="RSI"))
 fig_rsi.add_hline(y=70, line_dash="dot", line_color="red")
@@ -1163,8 +1167,7 @@ fig_atr = go.Figure()
 fig_atr.add_trace(go.Scatter(x=df.index, y=df["ATR_PCT"] * 100, name="ATR%"))
 fig_atr.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), title="ATR %")
 
-
-# Dash ve Export Tab'larını Teknik Analiz Verileriyle Doldurma
+# Dash Tab Devamı
 with tab_dash:
     st.divider()
     c1, c2, c3, c4, c5, c6 = st.columns(6)
@@ -1183,23 +1186,20 @@ with tab_dash:
 
     st.plotly_chart(fig_price, use_container_width=True)
     
-    # GERI EKLENEN GRAFIKLERIN GOSTERIMI
     st.subheader("📉 RSI / MACD / ATR%")
     colA, colB, colC = st.columns(3)
     colA.plotly_chart(fig_rsi, use_container_width=True)
     colB.plotly_chart(fig_macd, use_container_width=True)
     colC.plotly_chart(fig_atr, use_container_width=True)
     
-    # -----------------------------
-    # GEMINI VISION INTEGRATION
-    # -----------------------------
+    # GEMINI VISION
     st.markdown("### 👁️ Gemini Vision: Formasyon ve Grafik Yorumu")
     if st.button("Grafiği Gemini'ye Gönder ve Yorumlat", type="primary"):
         gemini_api = gemini_key_input or st.secrets.get("GEMINI_API_KEY", "")
         if not gemini_api:
             st.error("Lütfen sol menüdeki 'AI Ayarları' kısmına Gemini API Key'inizi girin. (Google AI Studio üzerinden ücretsiz alabilirsiniz)")
         else:
-            with st.spinner("Grafik işleniyor ve Gemini'ye iletiliyor... (Not: İlk kullanımda 'kaleido' paketi gerektirebilir)"):
+            with st.spinner("Grafik işleniyor ve Gemini'ye iletiliyor... (Birkaç saniye sürebilir)"):
                 try:
                     img_bytes = fig_price.to_image(format="png", width=1200, height=800, scale=2)
                     img_pil = PILImage.open(io.BytesIO(img_bytes))
@@ -1216,7 +1216,7 @@ with tab_dash:
                     st.success("Analiz Tamamlandı!")
                     st.markdown(response.text)
                 except Exception as e:
-                    st.error(f"Grafik işlenemedi. Sunucuda 'kaleido' kütüphanesi yüklü olmayabilir veya API hatası oluştu: {e}")
+                    st.error(f"Grafik işlenemedi. 'kaleido' hatası alıyorsanız lütfen GitHub deponuza 'packages.txt' dosyasını eklediğinizden emin olun. Hata detayı: {e}")
 
     st.divider()
     st.subheader("🧪 Backtest Özeti")
@@ -1244,9 +1244,8 @@ with tab_dash:
 
     st.plotly_chart(fig_eq, use_container_width=True)
 
-
 with tab_export:
-    st.subheader("📄 Rapor İndir (En sorunsuz: HTML → tarayıcıdan PDF)")
+    st.subheader("📄 Rapor İndir")
     st.caption("HTML rapor: grafikler %100 gelir. PDF: reportlab + kaleido varsa grafikleri gömer.")
 
     include_charts = st.checkbox("Rapor grafikleri dahil et", value=True)
@@ -1282,7 +1281,6 @@ with tab_export:
         "atr_pct": fmt_pct(float(latest.get("ATR_PCT", np.nan))) if pd.notna(latest.get("ATR_PCT", np.nan)) else "N/A",
     }
     
-    # HTML/PDF Raporuna Alt Grafikleri De Ekleme
     figs_for_report = {
         "Price + EMA + Bollinger + Signals": fig_price,
         "RSI": fig_rsi,
