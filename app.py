@@ -1,4 +1,3 @@
-
 import os
 import json
 import time
@@ -39,6 +38,9 @@ def normalize_ticker(raw: str, market: str) -> str:
     if market == "BIST":
         if not t.endswith(".IS"):
             t = f"{t}.IS"
+    else:  # USA
+        # yfinance class shares: BRK.B -> BRK-B, BF.B -> BF-B
+        t = t.replace(".", "-")
     return t
 
 def safe_float(x):
@@ -456,7 +458,7 @@ def fundamental_score_row(row: dict, mode: str, thresholds: dict) -> Tuple[float
     return float(score_pct), b, bool(pass_bool)
 
 # =============================
-# Universe helpers
+# Universe helpers (ROBUST)
 # =============================
 US_TICKERS = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "NFLX", "JPM", "XOM", "SPY", "QQQ"]
 US_EXT = ["AVGO", "AMD", "ORCL", "COST", "KO", "PEP", "JNJ", "PG", "V", "MA", "UNH", "HD", "CRM", "ADBE"]
@@ -473,33 +475,120 @@ BIST100_FALLBACK = [
     "YKBNK","ZOREN"
 ]
 
-@st.cache_data(ttl=24 * 3600, show_spinner=False)
-def get_sp500_tickers() -> List[str]:
-    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; StreamlitApp/1.0; +https://streamlit.io)"}
-    try:
-        r = requests.get(url, headers=headers, timeout=20)
-        r.raise_for_status()
-        tables = pd.read_html(r.text)
-        dfu = tables[0]
-        return sorted(dfu["Symbol"].astype(str).str.upper().tolist())
-    except Exception:
-        return sorted(list(set(US_TICKERS + US_EXT)))
+def _download_text(url: str, headers: dict, timeout: int = 20) -> str:
+    r = requests.get(url, headers=headers, timeout=timeout)
+    r.raise_for_status()
+    return r.text
 
-@st.cache_data(ttl=24 * 3600, show_spinner=False)
-def get_nasdaq100_tickers() -> List[str]:
-    url = "https://en.wikipedia.org/wiki/Nasdaq-100"
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; StreamlitApp/1.0; +https://streamlit.io)"}
-    try:
-        r = requests.get(url, headers=headers, timeout=20)
-        r.raise_for_status()
-        tables = pd.read_html(r.text)
-        for t in tables:
-            if "Ticker" in t.columns:
-                return sorted(t["Ticker"].astype(str).str.upper().tolist())
-        return []
-    except Exception:
-        return []
+def _download_bytes(url: str, headers: dict, timeout: int = 20) -> bytes:
+    r = requests.get(url, headers=headers, timeout=timeout)
+    r.raise_for_status()
+    return r.content
+
+def _extract_symbols_from_tables(tables: List[pd.DataFrame]) -> List[str]:
+    candidates = ["Symbol", "Ticker", "Ticker symbol", "Security Symbol", "Trading Symbol", "Code"]
+    for t in tables:
+        cols = [str(c) for c in t.columns]
+        for c in candidates:
+            if c in cols:
+                syms = t[c].astype(str).str.upper().str.strip().tolist()
+                return [s for s in syms if s and s != "NAN"]
+        for c in t.columns:
+            cl = str(c).lower()
+            if ("symbol" in cl) or ("ticker" in cl) or ("kod" in cl) or ("sembol" in cl):
+                syms = t[c].astype(str).str.upper().str.strip().tolist()
+                return [s for s in syms if s and s != "NAN"]
+    return []
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def get_sp500_tickers_robust() -> Tuple[List[str], str]:
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; StreamlitApp/1.0)"}
+    sources = [
+        ("yfiua_csv", "https://yfiua.github.io/index-constituents/constituents-sp500.csv", "csv"),
+        ("slickcharts", "https://www.slickcharts.com/sp500", "html"),
+        ("wikipedia", "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", "html"),
+    ]
+    for name, url, kind in sources:
+        try:
+            if kind == "csv":
+                b = _download_bytes(url, headers=headers, timeout=20)
+                dfu = pd.read_csv(BytesIO(b))
+                sym_col = None
+                for c in dfu.columns:
+                    cl = str(c).lower()
+                    if "symbol" in cl or "ticker" in cl:
+                        sym_col = c
+                        break
+                if sym_col is None:
+                    sym_col = dfu.columns[0]
+                syms = dfu[sym_col].astype(str).str.upper().str.strip().tolist()
+            else:
+                html = _download_text(url, headers=headers, timeout=20)
+                tables = pd.read_html(html)
+                syms = _extract_symbols_from_tables(tables)
+
+            syms = [s.replace(".", "-") for s in syms]
+            syms = [s for s in syms if s and s != "NAN"]
+            syms = sorted(list(set(syms)))
+            if len(syms) >= 450:
+                return syms, name
+        except Exception:
+            continue
+
+    fallback = sorted(list(set([s.replace(".", "-") for s in (US_TICKERS + US_EXT)])))
+    return fallback, "fallback_small"
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def get_nasdaq100_tickers_robust() -> Tuple[List[str], str]:
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; StreamlitApp/1.0)"}
+    sources = [
+        ("yfiua_csv", "https://yfiua.github.io/index-constituents/constituents-nasdaq100.csv", "csv"),
+        ("slickcharts", "https://www.slickcharts.com/nasdaq100", "html"),
+        ("wikipedia", "https://en.wikipedia.org/wiki/Nasdaq-100", "html"),
+    ]
+    for name, url, kind in sources:
+        try:
+            if kind == "csv":
+                b = _download_bytes(url, headers=headers, timeout=20)
+                dfu = pd.read_csv(BytesIO(b))
+                sym_col = None
+                for c in dfu.columns:
+                    cl = str(c).lower()
+                    if "symbol" in cl or "ticker" in cl:
+                        sym_col = c
+                        break
+                if sym_col is None:
+                    sym_col = dfu.columns[0]
+                syms = dfu[sym_col].astype(str).str.upper().str.strip().tolist()
+            else:
+                html = _download_text(url, headers=headers, timeout=20)
+                tables = pd.read_html(html)
+                syms = _extract_symbols_from_tables(tables)
+
+            syms = [s.replace(".", "-") for s in syms]
+            syms = [s for s in syms if s and s != "NAN"]
+            syms = sorted(list(set(syms)))
+            if len(syms) >= 80:
+                return syms, name
+        except Exception:
+            continue
+
+    fallback = sorted(list(set([s.replace(".", "-") for s in (US_TICKERS + US_EXT)])))
+    return fallback, "fallback_small"
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def get_usa_universe_robust() -> Tuple[List[str], Dict[str, Any]]:
+    sp, sp_src = get_sp500_tickers_robust()
+    ndx, ndx_src = get_nasdaq100_tickers_robust()
+    uni = sorted(list(set(sp + ndx)))
+    diag = {
+        "sp500_source": sp_src,
+        "nasdaq100_source": ndx_src,
+        "sp500_n": len(sp),
+        "nasdaq100_n": len(ndx),
+        "universe_n": len(uni),
+    }
+    return uni, diag
 
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
 def get_bist100_tickers() -> List[str]:
@@ -688,7 +777,6 @@ def build_html_report(
                 .replace("<", "&lt;")
                 .replace(">", "&gt;"))
 
-    # Plotly figures (keeps charts exactly)
     fig_blocks = []
     first = True
     for name, fig in (figs or {}).items():
@@ -806,7 +894,6 @@ def build_html_report(
     return html.encode("utf-8")
 
 def _plotly_fig_to_png_bytes(fig: go.Figure) -> Optional[bytes]:
-    # works if kaleido is available
     try:
         return fig.to_image(format="png", scale=2)
     except Exception:
@@ -850,7 +937,6 @@ def generate_pdf_report(
     bottom = 1.6 * cm
     y = top
 
-    # Title
     c.setFont("Helvetica-Bold", 16)
     c.drawString(left, y, title[:90]); y -= 18
     c.setFont("Helvetica", 10)
@@ -868,7 +954,6 @@ def generate_pdf_report(
     )
     y -= 6
 
-    # TA Summary
     c.setFont("Helvetica-Bold", 12)
     c.drawString(left, y, "Technical Summary"); y -= 14
     c.setFont("Helvetica", 9)
@@ -883,7 +968,6 @@ def generate_pdf_report(
     )
     y -= 6
 
-    # Checkpoints
     c.setFont("Helvetica-Bold", 12)
     c.drawString(left, y, "Checkpoints (Last Bar)"); y -= 14
     c.setFont("Helvetica", 9)
@@ -891,7 +975,6 @@ def generate_pdf_report(
     y = _pdf_write_lines(c, cp_lines, left, y, 11, bottom)
     y -= 6
 
-    # Target band + RR
     c.setFont("Helvetica-Bold", 12)
     c.drawString(left, y, "Target Price Band (Scenario)"); y -= 14
     c.setFont("Helvetica", 9)
@@ -916,7 +999,6 @@ def generate_pdf_report(
     y = _pdf_write_lines(c, band_lines, left, y, 12, bottom)
     y -= 6
 
-    # Levels
     c.setFont("Helvetica-Bold", 12)
     c.drawString(left, y, "Levels (Approx.)"); y -= 14
     c.setFont("Helvetica", 9)
@@ -927,7 +1009,6 @@ def generate_pdf_report(
     y = _pdf_write_lines(c, lv_lines, left, y, 11, bottom)
     y -= 6
 
-    # Backtest
     c.setFont("Helvetica-Bold", 12)
     c.drawString(left, y, "Backtest Summary (Long-only)"); y -= 14
     c.setFont("Helvetica", 9)
@@ -943,7 +1024,6 @@ def generate_pdf_report(
     )
     y -= 6
 
-    # Fundamental Screener Snapshot (selected ticker row)
     c.setFont("Helvetica-Bold", 12)
     c.drawString(left, y, "Fundamental Screener Snapshot (Selected Ticker)"); y -= 14
     c.setFont("Helvetica", 9)
@@ -961,7 +1041,6 @@ def generate_pdf_report(
     y = _pdf_write_lines(c, lines, left, y, 11, bottom)
     y -= 6
 
-    # Trades (first rows)
     if trades_df is not None and not trades_df.empty:
         c.setFont("Helvetica-Bold", 12)
         c.drawString(left, y, "Trades (first 25 rows)"); y -= 14
@@ -975,7 +1054,6 @@ def generate_pdf_report(
             y = _pdf_write_lines(c, [row_txt], left, y, 10, bottom)
         y -= 6
 
-    # Charts pages (optional)
     chart_added = False
     if include_charts and figs:
         for name, fig in figs.items():
@@ -991,7 +1069,6 @@ def generate_pdf_report(
             usable_h = (H - 3.2*cm - 2.0*cm)
             c.drawImage(img_reader, left, 2.0*cm, width=usable_w, height=usable_h, preserveAspectRatio=True, anchor='c')
 
-    # If charts were requested but couldn't be added, add a note
     if include_charts and figs and not chart_added:
         c.showPage()
         c.setFont("Helvetica-Bold", 14)
@@ -1059,6 +1136,11 @@ with st.sidebar:
     st.header("Piyasa")
     market = st.selectbox("Market", ["USA", "BIST"], index=0)
 
+    # Cache clear (fixes 24-hour stuck universe)
+    if st.button("♻️ Universe cache temizle", help="24 hisseye takılırsa buna bas (tüm cache temizlenir)"):
+        st.cache_data.clear()
+        st.rerun()
+
     st.header("1) Fundamental Screener (opsiyonel)")
     use_fa_default = True
     use_fa = st.checkbox("Fundamental filtreyi kullan", value=use_fa_default)
@@ -1092,10 +1174,14 @@ with st.sidebar:
 
     # Universe
     if market == "USA":
-        sp = get_sp500_tickers()
-        ndx = get_nasdaq100_tickers()
-        universe = sorted(list(set(sp + ndx)))
-        st.caption(f"Universe: S&P500 + Nasdaq100 (unique: {len(universe)})")
+        universe, uni_diag = get_usa_universe_robust()
+        st.caption(
+            f"Universe: S&P500 + Nasdaq100 (unique: {uni_diag['universe_n']}) | "
+            f"S&P500: {uni_diag['sp500_n']} ({uni_diag['sp500_source']}) | "
+            f"Nasdaq100: {uni_diag['nasdaq100_n']} ({uni_diag['nasdaq100_source']})"
+        )
+        if uni_diag["sp500_source"] == "fallback_small" or uni_diag["nasdaq100_source"] == "fallback_small":
+            st.warning("Universe küçük fallback’e düştü. 'Universe cache temizle' butonunu dene veya ağ/erişim engeli olabilir.")
     else:
         bist = get_bist100_tickers()
         universe = sorted(list(set(bist)))
@@ -1156,6 +1242,8 @@ with st.sidebar:
 if run_screener and use_fa:
     with st.spinner(f"Fundamental veriler çekiliyor ({market})..."):
         rows = []
+        # (Opsiyonel) çok hızlı art arda info çağrısı rate-limit yapabilir.
+        # Yine de senin önceki akışını bozmamak için throttle koymuyoruz.
         for tk in universe:
             tk_norm = normalize_ticker(tk, market)
             f = fetch_fundamentals_generic(tk_norm, market=market)
@@ -1308,7 +1396,6 @@ figs_for_report = {
 tab_dash, tab_export = st.tabs(["📊 Dashboard", "📄 Rapor (PDF/HTML)"])
 
 with tab_dash:
-    # Screener display (if available)
     if use_fa and not st.session_state.screener_df.empty:
         st.subheader(f"🧾 Fundamental Screener Sonuçları ({market})")
         sdf = st.session_state.screener_df.copy()
@@ -1334,7 +1421,6 @@ with tab_dash:
                 st.session_state.selected_ticker = picked
                 st.rerun()
 
-    # Summary metrics
     c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
     c1.metric("Market", market)
     c2.metric("Sembol", ticker)
@@ -1352,7 +1438,6 @@ with tab_dash:
         with cp_cols[i % 3]:
             st.write(("🟢 " if v else "🔴 ") + k)
 
-    # Target band + RR
     st.subheader("🎯 Hedef Fiyat Bandı (Senaryo)")
     base_px = float(tp["base"])
     rr_str = fmt_rr(rr_info.get("rr"))
@@ -1394,7 +1479,6 @@ with tab_dash:
     with st.expander("Seviye listesi (yaklaşık) — işaretli + fiyata uzaklık %", expanded=False):
         st.markdown(render_levels_marked(tp.get("levels", []), base_px, s1, r1))
 
-    # Charts
     st.subheader("📊 Fiyat + EMA + Bollinger + Sinyaller")
     st.plotly_chart(fig_price, use_container_width=True)
 
@@ -1419,7 +1503,6 @@ with tab_dash:
     with st.expander("Equity curve", expanded=False):
         st.plotly_chart(fig_eq, use_container_width=True)
 
-    # AI Chat
     st.subheader("🤖 AI Analiz (Chat)")
     if not ai_on:
         st.info("AI Chat kapalı (soldan açabilirsin).")
@@ -1463,7 +1546,6 @@ with tab_export:
     include_charts = st.checkbox("Rapor grafikleri dahil et", value=True)
     include_trades = st.checkbox("Trade listesi dahil et (ilk 25)", value=True)
 
-    # Build FA row (from screener + current fundamentals)
     with st.spinner("Fundamental + screener satırı hazırlanıyor..."):
         f_single = fetch_fundamentals_generic(ticker, market=market)
         f_score, f_breakdown, f_pass = fundamental_score_row(f_single, fa_mode, thresholds)
@@ -1503,7 +1585,6 @@ with tab_export:
         "atr_pct": fmt_pct(float(latest.get("ATR_PCT", np.nan))) if pd.notna(latest.get("ATR_PCT", np.nan)) else "N/A",
     }
 
-    # Always provide HTML (most robust + charts)
     html_bytes = build_html_report(
         title=f"FA→TA Trading Report - {ticker}",
         meta=meta,
@@ -1527,7 +1608,6 @@ with tab_export:
     if not REPORTLAB_OK:
         st.warning("Doğrudan PDF için 'reportlab' gerekli. requirements.txt içine `reportlab` ekleyip redeploy edersen PDF butonu da aktif olur.")
     else:
-        # PDF generate (may or may not embed charts depending on kaleido)
         if st.button("🧾 PDF Oluştur (reportlab)", use_container_width=True):
             with st.spinner("PDF oluşturuluyor..."):
                 pdf_bytes = generate_pdf_report(
