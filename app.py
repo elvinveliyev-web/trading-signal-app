@@ -1718,3 +1718,4 @@ with tab_export:
                     file_name=f"{ticker}_FA_TA_report.pdf",
                     mime="application/pdf",
                     use_container_width=True
+                )
