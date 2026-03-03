@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import io  # EKSİK OLAN IMPORT EKLENDİ
 from io import BytesIO
 from typing import Optional, Dict, Any, List, Tuple
 
@@ -1612,7 +1613,8 @@ with tab_dash:
                     tail = st.session_state.ai_messages[-6:]
                     messages += tail
                     try:
-                        reply = call_openai(messages, model=ai_model, temperature=ai_temp)
+                        # HATA DÜZELTİLDİ: ai_temp kullanılmıyor, sabit 0.2
+                        reply = call_openai(messages, model=ai_model, temperature=0.2)
                         st.session_state.ai_messages.append({"role": "assistant", "content": reply})
                     except Exception as e:
                         st.error(f"AI hata: {e}")
