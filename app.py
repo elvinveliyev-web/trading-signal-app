@@ -156,7 +156,7 @@ def get_spy_regime_ok() -> bool:
     return bool(last["Close"] > last["EMA200"])
 
 # =============================
-# Strategy: scoring + checkpoints (GELİŞTİRME: MTF ve RS Eklendi)
+# Strategy: scoring + checkpoints (MTF ve RS Eklendi)
 # =============================
 def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool):
     df = df.copy()
@@ -227,7 +227,7 @@ def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool)
     return df, cp
 
 # =============================
-# Backtest (long-only) + metrics (GELİŞTİRME: İleri Düzey Risk Yönetimi)
+# Backtest (long-only) + metrics (Dinamik Risk Yönetimi)
 # =============================
 def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
     df = df.copy()
@@ -244,7 +244,7 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
     commission = cfg["commission_bps"] / 10000.0
     slippage = cfg["slippage_bps"] / 10000.0
     
-    consecutive_losses = 0 # Dinamik risk için
+    consecutive_losses = 0
 
     for i in range(len(df)):
         row = df.iloc[i]
@@ -371,7 +371,7 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
 
 # =============================
 # Fundamentals (USA + BIST) via yfinance info 
-# (SENİN İLK GÖNDERDİĞİN ORİJİNAL HALİ - HİÇ DOKUNULMADI)
+# (ORİJİNAL - HİÇ DOKUNULMADI)
 # =============================
 def _fix_debt_to_equity(x: float) -> float:
     if pd.notna(x) and x > 10:
@@ -1111,9 +1111,7 @@ with st.sidebar:
 
     # Universe
     if market == "USA":
-        sp = get_sp500_tickers()
-        ndx = get_nasdaq100_tickers()
-        universe = sorted(list(set(sp + ndx)))
+        universe = sorted(list(set(get_sp500_tickers() + get_nasdaq100_tickers())))
         st.caption(f"Universe: S&P500 + Nasdaq100 (unique: {len(universe)})")
     else:
         bist = get_bist100_tickers()
@@ -1689,14 +1687,14 @@ with tab_export:
     st.divider()
 
     if not REPORTLAB_OK:
-        st.warning("Doğrudan PDF için 'reportlab' gerekli.")
+        st.warning("Doğrudan PDF için 'reportlab' gerekli. requirements.txt içine `reportlab` ekleyip redeploy edersen PDF butonu da aktif olur.")
     else:
         # PDF generate (may or may not embed charts depending on kaleido)
         if st.button("🧾 PDF Oluştur (reportlab)", use_container_width=True):
             with st.spinner("PDF oluşturuluyor..."):
                 pdf_bytes = generate_pdf_report(
                     title=f"FA→TA Trading Report - {ticker}",
-                    subtitle="Educational analysis (not investment advice).",
+                    subtitle="Educational analysis (not investment advice). Generated from Streamlit dashboard outputs.",
                     meta=meta,
                     checkpoints=checkpoints,
                     ta_summary=ta_summary,
@@ -1719,3 +1717,6 @@ with tab_export:
                     mime="application/pdf",
                     use_container_width=True
                 )
+                st.info("Grafikler PDF’e gelmiyorsa: requirements.txt içine `kaleido` ekle. (HTML raporda grafikler her zaman gelir.)")
+            else:
+                st.error("PDF üretilemedi. HTML raporu indirip tarayıcıdan PDF’ye yazdırmanı öneririm.")
