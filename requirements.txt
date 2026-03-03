@@ -1,10 +1,9 @@
 streamlit
 pandas
 numpy
-yfinance
-curl_cffi
+yfinance>=0.2.43
 plotly
-kaleido
+kaleido==0.1.0.post1
 openai
 google-generativeai
 Pillow
