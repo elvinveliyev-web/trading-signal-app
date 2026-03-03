@@ -179,7 +179,6 @@ def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool)
 
     obv_ok = df["OBV"] > df["OBV_EMA"]
     
-    # MTF & RS Checks
     mtf_ok = df.get("MTF_OK", pd.Series(True, index=df.index))
     rs_ok = df.get("RS_OK", pd.Series(True, index=df.index))
 
@@ -372,7 +371,8 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
     return eq, tdf, metrics
 
 # =============================
-# Fundamentals (USA + BIST) Yfinance Anti-Bot Filter
+# Fundamentals (USA + BIST) 
+# YFINANCE Session (Anti-bot hatasını önlemek için native haline döndürüldü)
 # =============================
 def _fix_debt_to_equity(x: float) -> float:
     if pd.notna(x) and x > 10:
@@ -381,13 +381,7 @@ def _fix_debt_to_equity(x: float) -> float:
 
 @st.cache_data(ttl=12 * 3600, show_spinner=False)
 def fetch_fundamentals_generic(ticker: str, market: str) -> dict:
-    # yfinance API'sini kandırmak için Sahte Tarayıcı Kimliği (User-Agent) Ekliyoruz
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    })
-    
-    t = yf.Ticker(ticker, session=session)
+    t = yf.Ticker(ticker)
     try:
         info = t.info or {}
     except Exception:
@@ -504,7 +498,7 @@ BIST100_FALLBACK = [
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
 def get_sp500_tickers() -> List[str]:
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; StreamlitApp/1.0; +https://streamlit.io)"}
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
         r = requests.get(url, headers=headers, timeout=20)
         r.raise_for_status()
@@ -517,7 +511,7 @@ def get_sp500_tickers() -> List[str]:
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
 def get_nasdaq100_tickers() -> List[str]:
     url = "https://en.wikipedia.org/wiki/Nasdaq-100"
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; StreamlitApp/1.0; +https://streamlit.io)"}
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
         r = requests.get(url, headers=headers, timeout=20)
         r.raise_for_status()
@@ -536,7 +530,7 @@ def get_bist100_tickers() -> List[str]:
         "https://www.borsaistanbul.com/tr/sayfa/195/bist-pay-endeksleri",
         "https://www.borsaistanbul.com/tr/sayfa/194/endeksler",
     ]
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; StreamlitApp/1.0; +https://streamlit.io)"}
+    headers = {"User-Agent": "Mozilla/5.0"}
 
     for url in candidates:
         try:
@@ -598,9 +592,7 @@ def target_price_band(df: pd.DataFrame):
 def get_live_price(ticker: str) -> dict:
     out = {"last_price": np.nan, "currency": "", "exchange": "", "asof": ""}
     try:
-        session = requests.Session()
-        session.headers.update({"User-Agent": "Mozilla/5.0"})
-        t = yf.Ticker(ticker, session=session)
+        t = yf.Ticker(ticker)
         fi = getattr(t, "fast_info", None)
         if fi:
             out["last_price"] = safe_float(fi.get("last_price") or fi.get("lastPrice"))
@@ -1216,7 +1208,7 @@ with tab_dash:
                     st.success("Analiz Tamamlandı!")
                     st.markdown(response.text)
                 except Exception as e:
-                    st.error(f"Grafik işlenemedi. 'kaleido' hatası alıyorsanız lütfen GitHub deponuza 'packages.txt' dosyasını eklediğinizden emin olun. Hata detayı: {e}")
+                    st.error(f"Grafik işlenemedi. Hatayı çözmek için GitHub 'requirements.txt' dosyasında 'kaleido==0.1.0.post1' olduğundan emin olun. Hata detayı: {e}")
 
     st.divider()
     st.subheader("🧪 Backtest Özeti")
