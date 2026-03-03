@@ -1131,4 +1131,204 @@ fig_price.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"],
 fig_price.add_trace(go.Scatter(x=df.index, y=df["EMA50"], name="EMA Fast", line=dict(color='blue')))
 fig_price.add_trace(go.Scatter(x=df.index, y=df["EMA200"], name="EMA Slow", line=dict(color='red')))
 fig_price.add_trace(go.Scatter(x=df.index, y=df["BB_upper"], name="BB Upper", line=dict(dash="dot", color='gray')))
-fig_price.add_trace(go.Scatter(x=df.index, y=df
+fig_price.add_trace(go.Scatter(x=df.index, y=df["BB_lower"], name="BB Lower", line=dict(dash="dot", color='gray')))
+entries = df[df["ENTRY"] == 1]
+exits = df[df["EXIT"] == 1]
+fig_price.add_trace(go.Scatter(x=entries.index, y=entries["Close"]*0.98, mode="markers", name="ENTRY", marker=dict(symbol="triangle-up", size=12, color="green")))
+fig_price.add_trace(go.Scatter(x=exits.index, y=exits["Close"]*1.02, mode="markers", name="EXIT", marker=dict(symbol="triangle-down", size=12, color="red")))
+fig_price.update_layout(height=600, xaxis_rangeslider_visible=False, title=f"{ticker} - Fiyat & Sinyaller")
+
+fig_eq = go.Figure()
+fig_eq.add_trace(go.Scatter(x=eq.index, y=eq.values, name="Equity", line=dict(color="purple")))
+if do_walk_forward:
+    fig_eq.add_vline(x=df.index[split_idx], line_dash="dash", line_color="red", annotation_text="Test Başlangıcı")
+fig_eq.update_layout(height=320, title="Sermaye Eğrisi (Equity Curve)")
+
+fig_rsi = go.Figure()
+fig_rsi.add_trace(go.Scatter(x=df.index, y=df["RSI"], name="RSI"))
+fig_rsi.add_hline(y=70, line_dash="dot", line_color="red")
+fig_rsi.add_hline(y=30, line_dash="dot", line_color="green")
+fig_rsi.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), title="RSI")
+
+fig_macd = go.Figure()
+fig_macd.add_trace(go.Scatter(x=df.index, y=df["MACD"], name="MACD"))
+fig_macd.add_trace(go.Scatter(x=df.index, y=df["MACD_signal"], name="Signal"))
+fig_macd.add_trace(go.Bar(x=df.index, y=df["MACD_hist"], name="Hist"))
+fig_macd.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), title="MACD")
+
+fig_atr = go.Figure()
+fig_atr.add_trace(go.Scatter(x=df.index, y=df["ATR_PCT"] * 100, name="ATR%"))
+fig_atr.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), title="ATR %")
+
+# Dash Tab Devamı
+with tab_dash:
+    st.divider()
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("Market", market)
+    c2.metric("Sembol", ticker)
+    c3.metric("Daily Close", f"{latest['Close']:.2f}")
+    c4.metric("Live/Last", f"{live_price:.2f}" if np.isfinite(live_price) else "N/A")
+    c5.metric("Skor", f"{latest['SCORE']:.0f}/100")
+    c6.metric("Sinyal", rec)
+
+    st.subheader("✅ Kontrol Noktaları (Genişletilmiş Filtreler)")
+    cp_cols = st.columns(3)
+    for i, (k, v) in enumerate(checkpoints.items()):
+        with cp_cols[i % 3]:
+            st.write(("🟢 " if v else "🔴 ") + k)
+
+    st.plotly_chart(fig_price, use_container_width=True)
+    
+    st.subheader("📉 RSI / MACD / ATR%")
+    colA, colB, colC = st.columns(3)
+    colA.plotly_chart(fig_rsi, use_container_width=True)
+    colB.plotly_chart(fig_macd, use_container_width=True)
+    colC.plotly_chart(fig_atr, use_container_width=True)
+    
+    # GEMINI VISION
+    st.markdown("### 👁️ Gemini Vision: Formasyon ve Grafik Yorumu")
+    if st.button("Grafiği Gemini'ye Gönder ve Yorumlat", type="primary"):
+        gemini_api = gemini_key_input or st.secrets.get("GEMINI_API_KEY", "")
+        if not gemini_api:
+            st.error("Lütfen sol menüdeki 'AI Ayarları' kısmına Gemini API Key'inizi girin.")
+        else:
+            with st.spinner("Grafik işleniyor ve Gemini'ye iletiliyor..."):
+                try:
+                    img_bytes = fig_price.to_image(format="png", width=1200, height=800, scale=2)
+                    img_pil = PILImage.open(io.BytesIO(img_bytes))
+                    
+                    genai.configure(api_key=gemini_api)
+                    model = genai.GenerativeModel("gemini-1.5-pro")
+                    prompt = (
+                        "Sen profesyonel bir kurumsal portföy yöneticisi ve teknik analistsin. "
+                        "Grafikteki fiyat hareketlerini (Price Action), formasyon yapılarını, trendin durumunu (EMA'lara göre), "
+                        "ve varsa gözle görülür destek/direnç kırılımlarını analiz et. "
+                        "Yorumun kısa, yapılandırılmış, profesyonel tonda olsun."
+                    )
+                    response = model.generate_content([prompt, img_pil])
+                    st.success("Analiz Tamamlandı!")
+                    st.markdown(response.text)
+                except Exception as e:
+                    st.error(f"Grafik işlenemedi. Lütfen uygulamanın yeniden başlatılmasını bekleyin. Hata detayı: {e}")
+
+    st.divider()
+    st.subheader("🧪 Backtest Özeti")
+    if do_walk_forward:
+        st.write("📌 **Walk-Forward Analizi Aktif (Risk Yönetimli)**")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.info("Eğitim Dönemi (Train - İlk %70)")
+            st.metric("Total Return", f"{metrics_train['Total Return']*100:.1f}%")
+            st.metric("Max Drawdown", f"{metrics_train['Max Drawdown']*100:.1f}%")
+            st.metric("Win Rate", f"{metrics_train['Win Rate']*100:.1f}%")
+        with col2:
+            st.success("Test Dönemi (Out-of-Sample - Son %30)")
+            st.metric("Total Return", f"{metrics_test['Total Return']*100:.1f}%")
+            st.metric("Max Drawdown", f"{metrics_test['Max Drawdown']*100:.1f}%")
+            st.metric("Win Rate", f"{metrics_test['Win Rate']*100:.1f}%")
+    else:
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
+        m1.metric("Total Return", f"{metrics['Total Return']*100:.1f}%")
+        m2.metric("Ann Return", f"{metrics['Annualized Return']*100:.1f}%")
+        m3.metric("Sharpe", f"{metrics['Sharpe']:.2f}")
+        m4.metric("Max DD", f"{metrics['Max Drawdown']*100:.1f}%")
+        m5.metric("Trades", f"{metrics['Trades']}")
+        m6.metric("Win Rate", f"{metrics['Win Rate']*100:.1f}%")
+
+    st.plotly_chart(fig_eq, use_container_width=True)
+
+with tab_export:
+    st.subheader("📄 Rapor İndir")
+    st.caption("HTML rapor: grafikler %100 gelir. PDF: reportlab + kaleido varsa grafikleri gömer.")
+
+    include_charts = st.checkbox("Rapor grafikleri dahil et", value=True)
+    include_trades = st.checkbox("Trade listesi dahil et (ilk 25)", value=True)
+
+    with st.spinner("Fundamental + screener satırı hazırlanıyor..."):
+        f_single = fetch_fundamentals_generic(ticker, market=market)
+        f_score, f_breakdown, f_pass = fundamental_score_row(f_single, fa_mode, thresholds)
+        fa_eval = {
+            "mode": fa_mode,
+            "score": f_score,
+            "passed": f_pass,
+            "ok_cnt": sum(1 for v in f_breakdown.values() if v.get("available") and v.get("ok")),
+            "coverage": sum(1 for v in f_breakdown.values() if v.get("available")),
+        }
+        screener_row = find_screener_row(st.session_state.get("screener_df", pd.DataFrame()), ticker)
+        fa_row = merge_fa_row(screener_row, f_single, fa_eval)
+
+    meta = {
+        "market": market, "ticker": ticker, "interval": interval, "period": period,
+        "preset": preset_name, "ema_fast": ema_fast, "ema_slow": ema_slow, "rsi_period": rsi_period,
+        "bb_period": bb_period, "bb_std": bb_std, "atr_period": atr_period, "vol_sma": vol_sma,
+    }
+
+    ta_summary = {
+        "rec": rec,
+        "close": fmt_num(float(latest["Close"]), 2),
+        "live": fmt_num(float(live_price), 2) if np.isfinite(live_price) else "N/A",
+        "score": fmt_num(float(latest.get("SCORE", np.nan)), 0),
+        "rsi": fmt_num(float(latest.get("RSI", np.nan)), 2),
+        "ema50": fmt_num(float(latest.get("EMA50", np.nan)), 2),
+        "ema200": fmt_num(float(latest.get("EMA200", np.nan)), 2),
+        "atr_pct": fmt_pct(float(latest.get("ATR_PCT", np.nan))) if pd.notna(latest.get("ATR_PCT", np.nan)) else "N/A",
+    }
+    
+    figs_for_report = {
+        "Price + EMA + Bollinger + Signals": fig_price,
+        "RSI": fig_rsi,
+        "MACD": fig_macd,
+        "ATR %": fig_atr,
+        "Equity Curve": fig_eq,
+    }
+
+    html_bytes = build_html_report(
+        title=f"FA→TA Trading Report - {ticker}",
+        meta=meta,
+        checkpoints=checkpoints,
+        metrics=metrics,
+        tp=tp,
+        rr_info=rr_info,
+        figs=(figs_for_report if include_charts else {}),
+        fa_row=fa_row
+    )
+    st.download_button(
+        "⬇️ HTML İndir (Önerilen) — Tarayıcıdan PDF’ye Yazdır",
+        data=html_bytes,
+        file_name=f"{ticker}_FA_TA_report.html",
+        mime="text/html",
+        use_container_width=True
+    )
+
+    st.divider()
+
+    if not REPORTLAB_OK:
+        st.warning("Doğrudan PDF için 'reportlab' gerekli.")
+    else:
+        if st.button("🧾 PDF Oluştur (reportlab)", use_container_width=True):
+            with st.spinner("PDF oluşturuluyor..."):
+                pdf_bytes = generate_pdf_report(
+                    title=f"FA→TA Trading Report - {ticker}",
+                    subtitle="Educational analysis (not investment advice).",
+                    meta=meta,
+                    checkpoints=checkpoints,
+                    ta_summary=ta_summary,
+                    target_band=tp,
+                    rr_info=rr_info,
+                    backtest_metrics=metrics,
+                    fa_row=fa_row,
+                    levels=tp.get("levels", []),
+                    trades_df=(tdf if include_trades else None),
+                    figs=(figs_for_report if include_charts else None),
+                    include_charts=include_charts
+                )
+
+            if pdf_bytes:
+                st.success("PDF hazır ✅")
+                st.download_button(
+                    "⬇️ PDF İndir",
+                    data=pdf_bytes,
+                    file_name=f"{ticker}_FA_TA_report.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
