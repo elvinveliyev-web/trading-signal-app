@@ -877,6 +877,7 @@ if "screener_df" not in st.session_state: st.session_state.screener_df = pd.Data
 if "selected_ticker" not in st.session_state: st.session_state.selected_ticker = None
 if "ai_messages" not in st.session_state: st.session_state.ai_messages = [{"role": "assistant", "content": "Sorunu yaz: örn. “Riskler ne, hedef bant ne?”"}]
 if "ta_ran" not in st.session_state: st.session_state.ta_ran = False
+if "heatmap_data" not in st.session_state: st.session_state.heatmap_data = pd.DataFrame()
 
 # =============================
 # Sidebar
@@ -949,13 +950,13 @@ with st.sidebar:
     ai_on = st.checkbox("OpenAI Metin Chat Aktif", value=True)
     ai_model = st.text_input("OpenAI Model", value="gpt-4o-mini")
     st.caption("Gemini Vision (Grafik Okuma) API Key:")
-    gemini_key_input = st.text_input("Gemini API Key", type="password", help="Grafiği yapay zekaya okutmak için gerekli")
+    gemini_key_input = st.text_input("Gemini API Key", type="password", help="Grafiği yapay zekaya okutmak için gerekli (ÜCRETSİZDİR)")
 
     run_btn = st.button("🚀 Teknik Analizi Çalıştır", type="primary")
     if run_btn: st.session_state.ta_ran = True
 
 # -----------------------------
-# Fundamental screener action
+# Fundamental screener action & Heatmap Data Pre-load
 # -----------------------------
 if run_screener and use_fa:
     with st.spinner(f"Fundamental veriler çekiliyor ({market})..."):
@@ -976,9 +977,84 @@ if run_screener and use_fa:
             sdf = sdf.sort_values(["FA_pass_int", "FA_score", "FA_coverage"], ascending=[False, False, False]).drop(columns=["FA_pass_int"])
         st.session_state.screener_df = sdf.copy()
 
-# -----------------------------
-# Data loader
-# -----------------------------
+    # Heatmap hesaplama eklentisi
+    with st.spinner("Isı Haritası verileri (Son 1 Ay) hesaplanıyor..."):
+        if not sdf.empty:
+            tk_list = sdf["ticker"].tolist()
+            try:
+                hist = yf.download(tk_list, period="1mo", interval="1d", progress=False)["Close"]
+                if isinstance(hist, pd.Series): 
+                    hist = hist.to_frame()
+                
+                ret = (hist.iloc[-1] / hist.iloc[0] - 1) * 100
+                ret_df = ret.reset_index()
+                ret_df.columns = ["ticker", "momentum"]
+
+                merged = pd.merge(sdf, ret_df, on="ticker")
+                merged = merged.dropna(subset=["momentum", "sector"])
+                
+                merged["marketCap_viz"] = merged["marketCap"].fillna(0)
+                merged.loc[merged["marketCap_viz"] <= 0, "marketCap_viz"] = 1
+                st.session_state.heatmap_data = merged
+            except Exception as e:
+                st.error(f"Isı haritası oluşturulamadı: {e}")
+                st.session_state.heatmap_data = pd.DataFrame()
+
+# =============================
+# Layout (Tabs) Defined BEFORE Execution to allow rendering UI
+# =============================
+tab_dash, tab_heatmap, tab_export = st.tabs(["📊 Dashboard & TA", "🗺️ Sektörel Isı Haritası", "📄 Rapor"])
+
+with tab_dash:
+    # 1. Screener Sonuçlarını Göster (Eğer varsa)
+    if use_fa and "screener_df" in st.session_state and not st.session_state.screener_df.empty:
+        st.subheader(f"🧾 Fundamental Screener Sonuçları ({market})")
+        sdf = st.session_state.screener_df.copy()
+
+        show_cols = ["ticker", "longName", "FA_pass", "FA_score", "FA_ok_count", "FA_coverage", "sector", "industry", "trailingPE", "forwardPE", "pegRatio", "priceToSalesTrailing12Months", "priceToBook", "returnOnEquity", "operatingMargins", "profitMargins", "debtToEquity", "revenueGrowth", "earningsGrowth", "marketCap"]
+        sdf_show = sdf[[c for c in show_cols if c in sdf.columns]].copy()
+        st.dataframe(sdf_show, use_container_width=True, height=360)
+
+        pass_list = sdf.loc[sdf["FA_pass"] == True, "ticker"].tolist()
+        if len(pass_list) == 0:
+            st.warning("Bu eşiklerle PASS çıkan hisse yok. Eşikleri gevşetebilirsiniz.")
+        else:
+            st.success(f"PASS sayısı: {len(pass_list)}")
+            picked = st.selectbox("PASS listesinden hisse seç (TA’ya gönder)", pass_list, index=0)
+            if st.button("➡️ Seçimi Teknik Analize Aktar"):
+                st.session_state.selected_ticker = picked
+                st.rerun()
+                
+    if not st.session_state.ta_ran:
+        st.info("Sol menüden ayarları yapıp **Teknik Analizi Çalıştır**’a bas.")
+
+with tab_heatmap:
+    st.subheader("🗺️ Sektörel Isı Haritası (1 Aylık Para Akışı)")
+    st.write("Piyasadaki sektörlerin son 1 aylık momentumunu ve ağırlıklarını gösterir.")
+    if "heatmap_data" in st.session_state and not st.session_state.heatmap_data.empty:
+        merged = st.session_state.heatmap_data
+        fig_heat = px.treemap(
+            merged, 
+            path=[px.Constant("Tüm Piyasa"), "sector", "ticker"],
+            values="marketCap_viz", 
+            color="momentum",
+            color_continuous_scale="RdYlGn",
+            color_continuous_midpoint=0,
+            title=f"{market} - Sektörel Momentum (1 Ay)"
+        )
+        fig_heat.update_layout(height=700, margin=dict(t=50, l=25, r=25, b=25))
+        st.plotly_chart(fig_heat, use_container_width=True)
+    else:
+        st.warning("Sol menüden **Screener Çalıştır** butonuna bastığınızda ısı haritası otomatik olarak burada belirecektir.")
+
+# Eğer TA butonu basılmadıysa kodun devamını çalıştırmaya gerek yok (sekmeler açık kalır)
+if not st.session_state.ta_ran:
+    st.stop()
+
+
+# =============================
+# Run TA pipeline (If button was pressed)
+# =============================
 cfg = {
     "ema_fast": ema_fast, "ema_slow": ema_slow, "rsi_period": rsi_period,
     "bb_period": bb_period, "bb_std": bb_std, "atr_period": atr_period, "vol_sma": vol_sma,
@@ -992,13 +1068,6 @@ def load_data_cached(ticker: str, period: str, interval: str) -> pd.DataFrame:
     df = yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False)
     return _flatten_yf(df)
 
-if not st.session_state.ta_ran:
-    st.info("Soldan ayarları yapıp **Teknik Analizi Çalıştır**’a bas.")
-    st.stop()
-
-# =============================
-# Run TA pipeline
-# =============================
 market_filter_ok = True
 if market == "USA" and use_spy_filter:
     with st.spinner("SPY rejimi kontrol ediliyor..."):
@@ -1011,22 +1080,18 @@ with st.spinner(f"Ana Veri & MTF & Göreceli Güç İndiriliyor: {ticker}"):
         st.error(f"Veri gelmedi: {ticker}")
         st.stop()
         
-    # NEW: Multi-Timeframe (MTF) Data Fetching
     wk_df = load_data_cached(ticker, period, "1wk")
     if not wk_df.empty:
         wk_df["EMA50_wk"] = ema(wk_df["Close"], 50)
-        # Reindex to daily
         wk_ema_daily = wk_df["EMA50_wk"].reindex(df_raw.index, method="ffill")
         df_raw["EMA50_wk"] = wk_ema_daily
         df_raw["MTF_OK"] = (df_raw["Close"] > df_raw["EMA50_wk"]).fillna(True)
     else:
         df_raw["MTF_OK"] = True
 
-    # NEW: Relative Strength (RS)
     idx_sym = "SPY" if market == "USA" else "XU100.IS"
     idx_df = load_data_cached(idx_sym, period, interval)
     if not idx_df.empty:
-        # Align indexes
         idx_close = idx_df["Close"].reindex(df_raw.index, method="ffill")
         df_raw["RS"] = df_raw["Close"] / idx_close
         df_raw["RS_EMA50"] = ema(df_raw["RS"], 50)
@@ -1045,7 +1110,6 @@ if int(latest["ENTRY"]) == 1: rec = "AL"
 elif int(latest["EXIT"]) == 1: rec = "SAT"
 else: rec = "İZLE (Güçlü Trend)" if latest["SCORE"] >= 80 else ("BEKLE (Orta)" if latest["SCORE"] >= 60 else "UZAK DUR")
 
-# Backtest Logic (Standard or Walk-Forward)
 if do_walk_forward and len(df) > 100:
     split_idx = int(len(df) * 0.7)
     df_train = df.iloc[:split_idx]
@@ -1053,7 +1117,6 @@ if do_walk_forward and len(df) > 100:
     eq_train, tdf_train, metrics_train = backtest_long_only(df_train, cfg, risk_free_annual)
     eq_test, tdf_test, metrics_test = backtest_long_only(df_test, cfg, risk_free_annual)
     
-    # Merge for overall display
     eq, tdf, metrics = backtest_long_only(df, cfg, risk_free_annual)
 else:
     eq, tdf, metrics = backtest_long_only(df, cfg, risk_free_annual)
@@ -1083,12 +1146,27 @@ if do_walk_forward:
     fig_eq.add_vline(x=df.index[split_idx], line_dash="dash", line_color="red", annotation_text="Test Başlangıcı")
 fig_eq.update_layout(height=320, title="Sermaye Eğrisi (Equity Curve)")
 
-# =============================
-# Tabs
-# =============================
-tab_dash, tab_heatmap, tab_export = st.tabs(["📊 Dashboard & TA", "🗺️ Sektörel Isı Haritası", "📄 Rapor"])
+# YENI EKLENEN GRAFIKLER (RSI, MACD, ATR)
+fig_rsi = go.Figure()
+fig_rsi.add_trace(go.Scatter(x=df.index, y=df["RSI"], name="RSI"))
+fig_rsi.add_hline(y=70, line_dash="dot", line_color="red")
+fig_rsi.add_hline(y=30, line_dash="dot", line_color="green")
+fig_rsi.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), title="RSI")
 
+fig_macd = go.Figure()
+fig_macd.add_trace(go.Scatter(x=df.index, y=df["MACD"], name="MACD"))
+fig_macd.add_trace(go.Scatter(x=df.index, y=df["MACD_signal"], name="Signal"))
+fig_macd.add_trace(go.Bar(x=df.index, y=df["MACD_hist"], name="Hist"))
+fig_macd.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), title="MACD")
+
+fig_atr = go.Figure()
+fig_atr.add_trace(go.Scatter(x=df.index, y=df["ATR_PCT"] * 100, name="ATR%"))
+fig_atr.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), title="ATR %")
+
+
+# Dash ve Export Tab'larını Teknik Analiz Verileriyle Doldurma
 with tab_dash:
+    st.divider()
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Market", market)
     c2.metric("Sembol", ticker)
@@ -1105,6 +1183,13 @@ with tab_dash:
 
     st.plotly_chart(fig_price, use_container_width=True)
     
+    # GERI EKLENEN GRAFIKLERIN GOSTERIMI
+    st.subheader("📉 RSI / MACD / ATR%")
+    colA, colB, colC = st.columns(3)
+    colA.plotly_chart(fig_rsi, use_container_width=True)
+    colB.plotly_chart(fig_macd, use_container_width=True)
+    colC.plotly_chart(fig_atr, use_container_width=True)
+    
     # -----------------------------
     # GEMINI VISION INTEGRATION
     # -----------------------------
@@ -1112,7 +1197,7 @@ with tab_dash:
     if st.button("Grafiği Gemini'ye Gönder ve Yorumlat", type="primary"):
         gemini_api = gemini_key_input or st.secrets.get("GEMINI_API_KEY", "")
         if not gemini_api:
-            st.error("Lütfen sol menüdeki 'AI Ayarları' kısmına Gemini API Key'inizi girin.")
+            st.error("Lütfen sol menüdeki 'AI Ayarları' kısmına Gemini API Key'inizi girin. (Google AI Studio üzerinden ücretsiz alabilirsiniz)")
         else:
             with st.spinner("Grafik işleniyor ve Gemini'ye iletiliyor... (Not: İlk kullanımda 'kaleido' paketi gerektirebilir)"):
                 try:
@@ -1160,47 +1245,6 @@ with tab_dash:
     st.plotly_chart(fig_eq, use_container_width=True)
 
 
-with tab_heatmap:
-    st.subheader("🗺️ Sektörel Isı Haritası (1 Aylık Para Akışı)")
-    st.write("Piyasadaki sektörlerin son 1 aylık momentumunu ve ağırlıklarını gösterir.")
-    
-    if st.session_state.screener_df.empty:
-        st.warning("⚠️ Lütfen önce sol menüden 'Screener Çalıştır' butonuna basarak piyasanın temel verilerini çekin. (Hisselerin sektör bilgileri için gereklidir).")
-    else:
-        if st.button("Isı Haritasını Çiz / Güncelle", type="primary"):
-            with st.spinner("Son 1 aylık fiyat hareketleri analiz ediliyor..."):
-                tk_list = st.session_state.screener_df["ticker"].tolist()
-                try:
-                    hist = yf.download(tk_list, period="1mo", interval="1d", progress=False)["Close"]
-                    if isinstance(hist, pd.Series): 
-                        hist = hist.to_frame()
-                    
-                    ret = (hist.iloc[-1] / hist.iloc[0] - 1) * 100
-                    ret_df = ret.reset_index()
-                    ret_df.columns = ["ticker", "momentum"]
-
-                    merged = pd.merge(st.session_state.screener_df, ret_df, on="ticker")
-                    merged = merged.dropna(subset=["momentum", "sector"])
-                    
-                    # Ensure positive market cap for visualization scaling
-                    merged["marketCap_viz"] = merged["marketCap"].fillna(0)
-                    merged.loc[merged["marketCap_viz"] <= 0, "marketCap_viz"] = 1
-
-                    fig_heat = px.treemap(
-                        merged, 
-                        path=[px.Constant("Tüm Piyasa"), "sector", "ticker"],
-                        values="marketCap_viz", 
-                        color="momentum",
-                        color_continuous_scale="RdYlGn",
-                        color_continuous_midpoint=0,
-                        title=f"{market} - Sektörel Momentum (1 Ay)"
-                    )
-                    fig_heat.update_layout(height=700, margin=dict(t=50, l=25, r=25, b=25))
-                    st.plotly_chart(fig_heat, use_container_width=True)
-                except Exception as e:
-                    st.error(f"Isı haritası çizilirken hata oluştu: {e}")
-
-
 with tab_export:
     st.subheader("📄 Rapor İndir (En sorunsuz: HTML → tarayıcıdan PDF)")
     st.caption("HTML rapor: grafikler %100 gelir. PDF: reportlab + kaleido varsa grafikleri gömer.")
@@ -1238,8 +1282,12 @@ with tab_export:
         "atr_pct": fmt_pct(float(latest.get("ATR_PCT", np.nan))) if pd.notna(latest.get("ATR_PCT", np.nan)) else "N/A",
     }
     
+    # HTML/PDF Raporuna Alt Grafikleri De Ekleme
     figs_for_report = {
         "Price + EMA + Bollinger + Signals": fig_price,
+        "RSI": fig_rsi,
+        "MACD": fig_macd,
+        "ATR %": fig_atr,
         "Equity Curve": fig_eq,
     }
 
