@@ -4,7 +4,6 @@ numpy
 yfinance
 plotly
 kaleido
-openai
 google-generativeai
 Pillow
 requests
