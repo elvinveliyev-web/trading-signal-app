@@ -12,6 +12,13 @@ import streamlit as st
 import plotly.graph_objects as go
 import requests
 
+# OpenAI import (artık kullanılmıyor ama projede kalabilir; yoksa uygulama crash olmasın diye try/except)
+try:
+    from openai import OpenAI  # noqa: F401
+    OPENAI_OK = True
+except Exception:
+    OPENAI_OK = False
+
 # =============================
 # OPTIONAL PDF SUPPORT (ReportLab)
 # =============================
@@ -31,8 +38,10 @@ st.set_page_config(page_title="FA→TA Trading + AI", layout="wide")
 # =============================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
 
+
 def pjoin(*parts) -> str:
     return os.path.join(BASE_DIR, *parts)
+
 
 # =============================
 # Universe Loader (from repo files)
@@ -56,6 +65,7 @@ def load_universe_file(path: str) -> List[str]:
     except Exception:
         return []
 
+
 # =============================
 # Helpers
 # =============================
@@ -68,6 +78,7 @@ def normalize_ticker(raw: str, market: str) -> str:
             t = f"{t}.IS"
     return t
 
+
 def safe_float(x):
     try:
         if x is None:
@@ -78,12 +89,14 @@ def safe_float(x):
     except Exception:
         return np.nan
 
+
 def _flatten_yf(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [c[0] for c in df.columns]
     return df.dropna()
+
 
 def fmt_pct(x: float) -> str:
     try:
@@ -93,6 +106,7 @@ def fmt_pct(x: float) -> str:
     except Exception:
         return "N/A"
 
+
 def fmt_num(x: float, nd=2) -> str:
     try:
         if x is None or (isinstance(x, float) and not np.isfinite(x)):
@@ -101,11 +115,13 @@ def fmt_num(x: float, nd=2) -> str:
     except Exception:
         return "N/A"
 
+
 # =============================
 # Indicators
 # =============================
 def ema(s: pd.Series, span: int) -> pd.Series:
     return s.ewm(span=span, adjust=False).mean()
+
 
 def rsi(close: pd.Series, period: int = 14) -> pd.Series:
     delta = close.diff()
@@ -117,11 +133,13 @@ def rsi(close: pd.Series, period: int = 14) -> pd.Series:
     out = 100 - (100 / (1 + rs))
     return out.fillna(50)
 
+
 def macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
     macd_line = ema(close, fast) - ema(close, slow)
     signal_line = ema(macd_line, signal)
     hist = macd_line - signal_line
     return macd_line, signal_line, hist
+
 
 def bollinger(close: pd.Series, period: int = 20, std_mult: float = 2.0):
     mid = close.rolling(period).mean()
@@ -130,18 +148,22 @@ def bollinger(close: pd.Series, period: int = 20, std_mult: float = 2.0):
     lower = mid - std_mult * sd
     return mid, upper, lower
 
+
 def true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
     prev_close = close.shift(1)
     tr = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
     return tr
 
+
 def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
     tr = true_range(high, low, close)
     return tr.ewm(alpha=1 / period, adjust=False).mean()
 
+
 def obv(close: pd.Series, volume: pd.Series) -> pd.Series:
     direction = np.sign(close.diff()).fillna(0)
     return (direction * volume).cumsum()
+
 
 def max_drawdown(eq: pd.Series) -> float:
     if eq is None or len(eq) == 0:
@@ -149,6 +171,7 @@ def max_drawdown(eq: pd.Series) -> float:
     peak = eq.cummax()
     dd = (eq / peak) - 1.0
     return float(dd.min())
+
 
 # =============================
 # Feature builder
@@ -167,6 +190,7 @@ def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     df["ATR_PCT"] = (df["ATR"] / df["Close"]).replace([np.inf, -np.inf], np.nan)
     return df
 
+
 # =============================
 # Market regime filter (SPY) - only USA
 # =============================
@@ -179,6 +203,7 @@ def get_spy_regime_ok() -> bool:
     spy["EMA200"] = ema(spy["Close"], 200)
     last = spy.iloc[-1]
     return bool(last["Close"] > last["EMA200"])
+
 
 # =============================
 # Strategy: scoring + checkpoints
@@ -243,6 +268,7 @@ def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool)
         "OBV > OBV_EMA": bool(last["OBV"] > last["OBV_EMA"]) if pd.notna(last["OBV_EMA"]) else False,
     }
     return df, cp
+
 
 # =============================
 # Backtest (long-only) + metrics
@@ -376,6 +402,7 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float):
     }
     return eq, tdf, metrics
 
+
 # =============================
 # Fundamentals (USA + BIST) via yfinance info
 # =============================
@@ -383,6 +410,7 @@ def _fix_debt_to_equity(x: float) -> float:
     if pd.notna(x) and x > 10:
         return x / 100.0
     return x
+
 
 @st.cache_data(ttl=12 * 3600, show_spinner=False)
 def fetch_fundamentals_generic(ticker: str, market: str) -> dict:
@@ -415,6 +443,7 @@ def fetch_fundamentals_generic(ticker: str, market: str) -> dict:
     }
     out["debtToEquity"] = _fix_debt_to_equity(out["debtToEquity"])
     return out
+
 
 def fundamental_score_row(row: dict, mode: str, thresholds: dict) -> Tuple[float, dict, bool]:
     b = {}
@@ -482,6 +511,7 @@ def fundamental_score_row(row: dict, mode: str, thresholds: dict) -> Tuple[float
     pass_bool = (score_pct >= thresholds["min_score"]) and (ok_cnt >= min_ok) and (avail_cnt >= min_coverage)
     return float(score_pct), b, bool(pass_bool)
 
+
 # =============================
 # Target price band (non-LLM)
 # =============================
@@ -493,6 +523,7 @@ def local_levels(close: pd.Series, lookback: int = 120):
     levels += [float(s.tail(20).max()), float(s.tail(20).min())]
     levels = sorted(list(set([round(float(x), 2) for x in levels if np.isfinite(x)])))
     return levels
+
 
 def target_price_band(df: pd.DataFrame):
     last = df.iloc[-1]
@@ -514,6 +545,7 @@ def target_price_band(df: pd.DataFrame):
 
     return {"base": px, "bull": (bull1, bull2, r1), "bear": (bear1, bear2, s1), "levels": lv}
 
+
 # =============================
 # Live price helper
 # =============================
@@ -532,8 +564,9 @@ def get_live_price(ticker: str) -> dict:
         pass
     return out
 
+
 # =============================
-# LLM helpers (GEMINI)
+# LLM helpers (Context builder)
 # =============================
 def df_snapshot_for_llm(df: pd.DataFrame, n: int = 140) -> dict:
     use_cols = ["Open","High","Low","Close","Volume","EMA50","EMA200","RSI","MACD","MACD_signal","MACD_hist",
@@ -542,6 +575,7 @@ def df_snapshot_for_llm(df: pd.DataFrame, n: int = 140) -> dict:
     tail = df[cols].tail(n).copy()
     tail.index = tail.index.astype(str)
     return {"cols": cols, "n": int(len(tail)), "last_index": str(tail.index[-1]) if len(tail) else None, "rows": tail.to_dict(orient="records")}
+
 
 def build_ai_context(ticker: str, market: str, latest: pd.Series, checkpoints: dict, metrics: dict, tp: dict, live: dict, df: pd.DataFrame) -> dict:
     return {
@@ -566,68 +600,9 @@ def build_ai_context(ticker: str, market: str, latest: pd.Series, checkpoints: d
             "Yatırım tavsiyesi verme. Sadece eğitim amaçlı analiz.",
             "Hedef fiyatı tek sayı değil; senaryo (bull/base/bear) bandı olarak açıkla.",
             "Mutlaka riskler ve geçersiz kılacak koşulları yaz (invalidations).",
-            "Grafik yorumu: OHLC + EMA/RSI/MACD/Bollinger/ATR + sinyaller + backtest metriklerine dayan.",
         ],
     }
 
-def _gemini_messages_to_prompt(messages: List[Dict[str, str]]) -> str:
-    """
-    Gemini REST API için chat mesajlarını tek metin prompt'a çevirir.
-    (Gemini 'system' rolünü ayrı desteklese bile, en stabil yöntem: tek prompt.)
-    """
-    lines = []
-    for m in (messages or []):
-        role = (m.get("role") or "user").upper()
-        content = m.get("content") or ""
-        lines.append(f"{role}:\n{content}".strip())
-    return "\n\n".join(lines).strip()
-
-def call_gemini(messages, model: str, temperature: float = 0.2):
-    """
-    Gemini API (REST) - Streamlit Cloud Secrets: GEMINI_API_KEY
-    """
-    api_key = st.secrets.get("GEMINI_API_KEY", "").strip()
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY bulunamadı. Streamlit Cloud > Edit secrets'e GEMINI_API_KEY=... ekleyin.")
-
-    prompt = _gemini_messages_to_prompt(messages)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-    payload = {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [{"text": prompt}]
-            }
-        ],
-        "generationConfig": {
-            "temperature": float(temperature),
-            "maxOutputTokens": 1024
-        }
-    }
-
-    headers = {
-        "x-goog-api-key": api_key,
-        "Content-Type": "application/json"
-    }
-
-    r = requests.post(url, headers=headers, json=payload, timeout=90)
-    if r.status_code >= 400:
-        try:
-            err = r.json()
-        except Exception:
-            err = {"error": r.text}
-        raise RuntimeError(f"Gemini API hata ({r.status_code}): {err}")
-
-    data = r.json() or {}
-    # En yaygın dönüş:
-    # { candidates: [ { content: { parts: [ { text: "..." } ] } } ] }
-    try:
-        parts = data["candidates"][0]["content"]["parts"]
-        text_parts = [p.get("text", "") for p in parts if isinstance(p, dict)]
-        out = "\n".join([t for t in text_parts if t.strip()]).strip()
-        return out or "(Gemini boş yanıt döndürdü.)"
-    except Exception:
-        return str(data)
 
 # =============================
 # Presets
@@ -637,6 +612,7 @@ PRESETS = {
     "Dengeli": {"rsi_entry_level": 50, "rsi_exit_level": 45, "atr_pct_max": 0.08, "atr_stop_mult": 3.0},
     "Agresif": {"rsi_entry_level": 48, "rsi_exit_level": 43, "atr_pct_max": 0.10, "atr_stop_mult": 2.5},
 }
+
 
 # =============================
 # Screener row finder + merge
@@ -657,6 +633,7 @@ def find_screener_row(sdf: pd.DataFrame, ticker: str) -> Optional[Dict[str, Any]
     row = m.iloc[0].drop(labels=["_tk", "_tk_naked"], errors="ignore").to_dict()
     return row
 
+
 def merge_fa_row(screener_row: Optional[Dict[str, Any]], fundamentals: Optional[Dict[str, Any]], fa_eval: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     if fundamentals:
@@ -670,6 +647,7 @@ def merge_fa_row(screener_row: Optional[Dict[str, Any]], fundamentals: Optional[
         out["FA_ok_count"] = fa_eval.get("ok_cnt")
         out["FA_coverage"] = fa_eval.get("coverage")
     return out
+
 
 # =============================
 # REPORT EXPORT (Robust): HTML always, PDF if available
@@ -807,12 +785,14 @@ def build_html_report(
 """
     return html.encode("utf-8")
 
+
 def _plotly_fig_to_png_bytes(fig: go.Figure) -> Optional[bytes]:
     # works if kaleido is available
     try:
         return fig.to_image(format="png", scale=2)
     except Exception:
         return None
+
 
 def _pdf_write_lines(c, lines: List[str], x: float, y: float, lh: float, bottom: float):
     for line in lines:
@@ -822,6 +802,7 @@ def _pdf_write_lines(c, lines: List[str], x: float, y: float, lh: float, bottom:
         c.drawString(x, y, (line or "")[:220])
         y -= lh
     return y
+
 
 def generate_pdf_report(
     *,
@@ -1006,6 +987,7 @@ def generate_pdf_report(
     buf.seek(0)
     return buf.read()
 
+
 # =============================
 # RR helper
 # =============================
@@ -1029,15 +1011,18 @@ def rr_from_atr_stop(latest_row: pd.Series, tp_dict: dict, cfg: dict):
 
     return {"rr": float(reward / risk), "stop": float(stop), "risk": float(risk), "reward": float(reward)}
 
+
 def fmt_rr(rr):
     if rr is None or (isinstance(rr, float) and (not np.isfinite(rr))):
         return "N/A"
     return f"1:{rr:.2f}"
 
+
 def pct_dist(level: float, base: float):
     if level is None or not np.isfinite(level) or base == 0:
         return None
     return (level / base - 1.0) * 100.0
+
 
 # =============================
 # UI State
@@ -1053,6 +1038,7 @@ if "ai_messages" not in st.session_state:
     st.session_state.ai_messages = [{"role": "assistant", "content": "Sorunu yaz: örn. “Riskler ne, hedef bant ne, hangi şartta çıkarım?”"}]
 if "ta_ran" not in st.session_state:
     st.session_state.ta_ran = False
+
 
 # =============================
 # Sidebar
@@ -1097,7 +1083,7 @@ with st.sidebar:
         "min_score": min_score, "min_ok": min_ok, "min_coverage": min_coverage,
     }
 
-    # ✅ NEW: Universe from files (GitHub repo)
+    # ✅ Universe from files (GitHub repo)
     if market == "USA":
         if usa_bucket == "S&P 500":
             universe = load_universe_file(pjoin("universes", "sp500.txt"))
@@ -1154,12 +1140,13 @@ with st.sidebar:
     st.divider()
     st.header("3) AI Ayarları")
     ai_on = st.checkbox("AI Chat aktif", value=True)
-    ai_model = st.text_input("Model", value="gemini-3-flash-preview", help="Gemini model adı (ör: gemini-3-flash-preview)")
+    ai_model = st.text_input("Model", value="gemini-2.5-flash", help="Gemini model adı (ör: gemini-2.5-flash)")
     ai_temp = st.slider("Temperature", 0.0, 1.0, 0.2, 0.05)
 
     run_btn = st.button("🚀 Teknik Analizi Çalıştır", type="primary")
     if run_btn:
         st.session_state.ta_ran = True
+
 
 # -----------------------------
 # Fundamental screener action
@@ -1183,6 +1170,7 @@ if run_screener and use_fa:
             sdf = sdf.sort_values(["FA_pass_int", "FA_score", "FA_coverage"], ascending=[False, False, False]).drop(columns=["FA_pass_int"])
         st.session_state.screener_df = sdf.copy()
 
+
 # -----------------------------
 # Data loader
 # -----------------------------
@@ -1194,10 +1182,12 @@ cfg = {
 }
 cfg.update(PRESETS[preset_name])
 
+
 @st.cache_data(show_spinner=False)
 def load_data_cached(ticker: str, period: str, interval: str) -> pd.DataFrame:
     df = yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False)
     return _flatten_yf(df)
+
 
 # If TA not ran yet: show screener (if any) and stop
 if not st.session_state.ta_ran:
@@ -1228,6 +1218,7 @@ if not st.session_state.ta_ran:
 
     st.info("Soldan ayarları yapıp **Teknik Analizi Çalıştır**’a bas.")
     st.stop()
+
 
 # =============================
 # Run TA pipeline
@@ -1430,46 +1421,223 @@ with tab_dash:
     with st.expander("Equity curve", expanded=False):
         st.plotly_chart(fig_eq, use_container_width=True)
 
-    # AI Chat (GEMINI)
+    # =============================
+    # AI Chat (Gemini) — Robust (503/429 Retry + Fallback + Local fallback)
+    # =============================
+    import random
+
     st.subheader("🤖 AI Analiz (Chat) — Gemini")
+
+    GEMINI_ENDPOINT_TMPL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+    def _get_gemini_key() -> str:
+        key = (
+            (st.secrets.get("GEMINI_API_KEY", "") or "").strip()
+            or (st.secrets.get("GOOGLE_API_KEY", "") or "").strip()
+            or (os.getenv("GEMINI_API_KEY", "") or "").strip()
+            or (os.getenv("GOOGLE_API_KEY", "") or "").strip()
+        )
+        return key
+
+    def _extract_gemini_text(resp_json: dict) -> str:
+        cands = resp_json.get("candidates") or []
+        if not cands:
+            return ""
+        content = (cands[0].get("content") or {})
+        parts = content.get("parts") or []
+        out = []
+        for p in parts:
+            t = p.get("text")
+            if t:
+                out.append(t)
+        return ("\n".join(out)).strip()
+
+    def _gemini_call_once(model: str, prompt_text: str, temperature: float, max_tokens: int):
+        key = _get_gemini_key()
+        if not key:
+            raise ValueError(
+                'GEMINI_API_KEY bulunamadı. Streamlit Cloud > Manage app > Settings > Secrets içine '
+                'GEMINI_API_KEY = "..." ekleyin.'
+            )
+
+        url = GEMINI_ENDPOINT_TMPL.format(model=model)
+        headers = {
+            "x-goog-api-key": key,
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "contents": [{"parts": [{"text": prompt_text}]}],
+            "generationConfig": {
+                "temperature": float(temperature),
+                "maxOutputTokens": int(max_tokens),
+            },
+        }
+        r = requests.post(url, headers=headers, json=payload, timeout=60)
+        return r
+
+    def gemini_generate_with_retry(
+        prompt_text: str,
+        model: str,
+        temperature: float,
+        max_tokens: int = 1024,
+        max_retries: int = 4,
+        fallback_models=None,
+    ):
+        if fallback_models is None:
+            fallback_models = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"]
+
+        try_order = []
+        for m in [model] + list(fallback_models):
+            m = (m or "").strip()
+            if m and m not in try_order:
+                try_order.append(m)
+
+        last_err = None
+
+        for m in try_order:
+            for attempt in range(max_retries + 1):
+                try:
+                    r = _gemini_call_once(m, prompt_text, temperature, max_tokens)
+
+                    if r.status_code == 200:
+                        data = r.json()
+                        txt = _extract_gemini_text(data)
+                        if not txt:
+                            return "(Gemini yanıtı boş geldi. Daha kısa bir soru deneyin.)", m
+                        return txt, m
+
+                    try:
+                        errj = r.json()
+                    except Exception:
+                        errj = {}
+
+                    e = (errj.get("error") or {})
+                    code = int(e.get("code") or r.status_code)
+                    status = (e.get("status") or "").upper()
+                    msg = (e.get("message") or r.text or "").strip()
+                    last_err = f"{code} {status}: {msg}"
+
+                    transient = (code in (429, 500, 503)) or (status in ("UNAVAILABLE", "RESOURCE_EXHAUSTED", "INTERNAL", "DEADLINE_EXCEEDED"))
+                    if transient and attempt < max_retries:
+                        sleep_s = min(16.0, (2 ** attempt) + random.uniform(0.0, 0.6))
+                        time.sleep(sleep_s)
+                        continue
+
+                    break
+
+                except Exception as ex:
+                    last_err = str(ex)
+                    if attempt < max_retries:
+                        sleep_s = min(16.0, (2 ** attempt) + random.uniform(0.0, 0.6))
+                        time.sleep(sleep_s)
+                        continue
+                    break
+
+        raise RuntimeError(f"Gemini çağrısı başarısız. Son hata: {last_err}")
+
+    def _build_gemini_prompt(ai_ctx: dict, chat_tail: list, user_msg: str) -> str:
+        sys_rules = (
+            "Sen bir finansal analiz asistanısın. Kullanıcının verdiği veriler üzerinden eğitim amaçlı yorum yap.\n"
+            "Kesin yatırım tavsiyesi verme.\n"
+            "Çıktı formatı:\n"
+            "1) Özet\n2) Riskler\n3) Invalidation koşulları\n4) Senaryo bandı (bull/base/bear)\n"
+            "Kısa, net, maddeli yaz.\n"
+        )
+
+        hist = ""
+        for m in (chat_tail or []):
+            role = (m.get("role") or "").upper()
+            content = (m.get("content") or "")
+            hist += f"{role}: {content}\n"
+
+        ctx_txt = json.dumps(ai_ctx, ensure_ascii=False)
+        return (
+            f"{sys_rules}\n"
+            f"CONTEXT_JSON:\n{ctx_txt}\n\n"
+            f"CHAT_HISTORY (last turns):\n{hist}\n"
+            f"USER_QUESTION:\n{user_msg}\n"
+        )
+
+    def _local_fallback_analysis() -> str:
+        score = float(latest.get("SCORE", np.nan))
+        rsi_v = float(latest.get("RSI", np.nan))
+        close = float(latest.get("Close", np.nan))
+
+        bull = tp.get("bull")
+        bear = tp.get("bear")
+        rr = rr_info.get("rr")
+
+        failed = [k for k, v in (checkpoints or {}).items() if not v]
+        ok = [k for k, v in (checkpoints or {}).items() if v]
+
+        lines = []
+        lines.append("**Özet**")
+        lines.append(f"- Market: {market} | Ticker: {ticker}")
+        lines.append(f"- Son kapanış: {close:.2f} | Skor: {score:.0f}/100 | RSI: {rsi_v:.1f}")
+        lines.append(f"- Checkpoint OK: {len(ok)} | Fail: {len(failed)}")
+
+        lines.append("\n**Riskler**")
+        if failed:
+            lines.append("- Zayıf noktalar (checkpoint fail):")
+            for x in failed[:10]:
+                lines.append(f"  - {x}")
+        else:
+            lines.append("- Checkpoint’lerde belirgin kırmızı yok; yine de piyasa/volatilite riski devam eder.")
+        lines.append(f"- Backtest Max DD: {metrics.get('Max Drawdown', 0)*100:.1f}% | Trades: {metrics.get('Trades', 0)}")
+
+        lines.append("\n**Invalidation (geçersiz kılan koşullar)**")
+        lines.append("- Fiyat EMA50 altına kalıcı sarkarsa / MACD hist negatife dönerse / RSI belirgin zayıflarsa senaryo bozulur.")
+        lines.append("- ATR stop mantığıyla risk sınırı koy (stop seviyesi = close - ATR*mult).")
+
+        lines.append("\n**Senaryo bandı**")
+        lines.append(f"- Base: {tp.get('base', close):.2f}")
+        if bull:
+            lines.append(f"- Bull: {bull[0]:.2f} → {bull[1]:.2f} | Yakın direnç: {bull[2]}")
+        else:
+            lines.append("- Bull: N/A")
+        if bear:
+            lines.append(f"- Bear: {bear[0]:.2f} → {bear[1]:.2f} | Yakın destek: {bear[2]}")
+        else:
+            lines.append("- Bear: N/A")
+        lines.append(f"- RR (bull1 vs ATR stop): {'N/A' if rr is None else f'1:{rr:.2f}'}")
+        lines.append("\n_(Not: Gemini geçici yoğun/ulaşılamaz olduğunda otomatik yerel fallback özetidir.)_")
+        return "\n".join(lines)
+
     if not ai_on:
         st.info("AI Chat kapalı (soldan açabilirsin).")
     else:
-        if not st.secrets.get("GEMINI_API_KEY", ""):
-            st.warning("GEMINI_API_KEY bulunamadı. Streamlit Cloud > Edit secrets'e GEMINI_API_KEY=... ekleyin.")
+        if not _get_gemini_key():
+            st.warning('GEMINI_API_KEY bulunamadı. Streamlit Cloud > Settings > Secrets içine GEMINI_API_KEY = "..." ekleyin.')
         else:
             ai_ctx = build_ai_context(ticker, market, latest, checkpoints, metrics, tp, live, df)
 
-            system_msg = {
-                "role": "system",
-                "content": (
-                    "Sen bir finansal analiz asistanısın. Kullanıcının verdiği veriler üzerinden eğitim amaçlı yorum yap. "
-                    "Kesin yatırım tavsiyesi verme. Çıktıda: (1) Özet, (2) Riskler, (3) Invalidation koşulları, (4) Senaryo bandı. "
-                    "Grafik yorumu gibi konuş: EMA/RSI/MACD/Bollinger/ATR ve sinyallerin anlamını net anlat. "
-                    "Kısa, net, maddeli yaz."
-                ),
-            }
-
             with st.expander("AI Chat", expanded=True):
-                user_msg = st.text_input("Sorun:", value="", placeholder="Örn: Grafik ne diyor, riskler ne, invalidation nedir?")
+                user_msg = st.text_input("Sorun:", value="", placeholder="Örn: Riskler ne, hedef bant ne, invalidation nedir?")
+
                 if st.button("AI'ya Sor") and user_msg.strip():
                     st.session_state.ai_messages.append({"role": "user", "content": user_msg.strip()})
 
-                    messages = [
-                        system_msg,
-                        {"role": "user", "content": "Context JSON:\n" + json.dumps(ai_ctx, ensure_ascii=False)},
-                    ]
-                    tail = st.session_state.ai_messages[-6:]
-                    messages += tail
+                    chat_tail = st.session_state.ai_messages[-6:]
+                    prompt_text = _build_gemini_prompt(ai_ctx, chat_tail, user_msg.strip())
 
                     try:
-                        reply = call_gemini(messages, model=ai_model, temperature=ai_temp)
+                        reply, used_model = gemini_generate_with_retry(
+                            prompt_text=prompt_text,
+                            model=(ai_model.strip() if ai_model else "gemini-2.5-flash"),
+                            temperature=ai_temp,
+                            max_tokens=1024,
+                            max_retries=4,
+                            fallback_models=["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"],
+                        )
                         st.session_state.ai_messages.append({"role": "assistant", "content": reply})
+                        st.caption(f"Model: {used_model}")
                     except Exception as e:
-                        st.error(f"AI hata: {e}")
+                        st.error(f"AI hata (Gemini): {e}")
+                        st.session_state.ai_messages.append({"role": "assistant", "content": _local_fallback_analysis()})
 
                 for m in st.session_state.ai_messages:
                     st.write(f"**{m['role'].upper()}**: {m['content']}")
+
 
 with tab_export:
     st.subheader("📄 Rapor İndir (En sorunsuz: HTML → tarayıcıdan PDF)")
