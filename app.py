@@ -12,9 +12,6 @@ import streamlit as st
 import plotly.graph_objects as go
 import requests
 
-# OpenAI (new SDK)
-from openai import OpenAI
-
 # =============================
 # OPTIONAL PDF SUPPORT (ReportLab)
 # =============================
@@ -536,7 +533,7 @@ def get_live_price(ticker: str) -> dict:
     return out
 
 # =============================
-# LLM helpers
+# LLM helpers (GEMINI)
 # =============================
 def df_snapshot_for_llm(df: pd.DataFrame, n: int = 140) -> dict:
     use_cols = ["Open","High","Low","Close","Volume","EMA50","EMA200","RSI","MACD","MACD_signal","MACD_hist",
@@ -569,16 +566,68 @@ def build_ai_context(ticker: str, market: str, latest: pd.Series, checkpoints: d
             "Yatırım tavsiyesi verme. Sadece eğitim amaçlı analiz.",
             "Hedef fiyatı tek sayı değil; senaryo (bull/base/bear) bandı olarak açıkla.",
             "Mutlaka riskler ve geçersiz kılacak koşulları yaz (invalidations).",
+            "Grafik yorumu: OHLC + EMA/RSI/MACD/Bollinger/ATR + sinyaller + backtest metriklerine dayan.",
         ],
     }
 
-def call_openai(messages, model: str, temperature: float = 0.2):
-    api_key = st.secrets.get("OPENAI_API_KEY", "").strip()
+def _gemini_messages_to_prompt(messages: List[Dict[str, str]]) -> str:
+    """
+    Gemini REST API için chat mesajlarını tek metin prompt'a çevirir.
+    (Gemini 'system' rolünü ayrı desteklese bile, en stabil yöntem: tek prompt.)
+    """
+    lines = []
+    for m in (messages or []):
+        role = (m.get("role") or "user").upper()
+        content = m.get("content") or ""
+        lines.append(f"{role}:\n{content}".strip())
+    return "\n\n".join(lines).strip()
+
+def call_gemini(messages, model: str, temperature: float = 0.2):
+    """
+    Gemini API (REST) - Streamlit Cloud Secrets: GEMINI_API_KEY
+    """
+    api_key = st.secrets.get("GEMINI_API_KEY", "").strip()
     if not api_key:
-        raise ValueError("OPENAI_API_KEY bulunamadı. Streamlit Cloud > Secrets'e OPENAI_API_KEY=... ekleyin.")
-    client = OpenAI(api_key=api_key)
-    resp = client.chat.completions.create(model=model, messages=messages, temperature=temperature)
-    return resp.choices[0].message.content
+        raise ValueError("GEMINI_API_KEY bulunamadı. Streamlit Cloud > Edit secrets'e GEMINI_API_KEY=... ekleyin.")
+
+    prompt = _gemini_messages_to_prompt(messages)
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    payload = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": prompt}]
+            }
+        ],
+        "generationConfig": {
+            "temperature": float(temperature),
+            "maxOutputTokens": 1024
+        }
+    }
+
+    headers = {
+        "x-goog-api-key": api_key,
+        "Content-Type": "application/json"
+    }
+
+    r = requests.post(url, headers=headers, json=payload, timeout=90)
+    if r.status_code >= 400:
+        try:
+            err = r.json()
+        except Exception:
+            err = {"error": r.text}
+        raise RuntimeError(f"Gemini API hata ({r.status_code}): {err}")
+
+    data = r.json() or {}
+    # En yaygın dönüş:
+    # { candidates: [ { content: { parts: [ { text: "..." } ] } } ] }
+    try:
+        parts = data["candidates"][0]["content"]["parts"]
+        text_parts = [p.get("text", "") for p in parts if isinstance(p, dict)]
+        out = "\n".join([t for t in text_parts if t.strip()]).strip()
+        return out or "(Gemini boş yanıt döndürdü.)"
+    except Exception:
+        return str(data)
 
 # =============================
 # Presets
@@ -1105,7 +1154,7 @@ with st.sidebar:
     st.divider()
     st.header("3) AI Ayarları")
     ai_on = st.checkbox("AI Chat aktif", value=True)
-    ai_model = st.text_input("Model", value="gpt-4.1-mini", help="OpenAI model adı")
+    ai_model = st.text_input("Model", value="gemini-3-flash-preview", help="Gemini model adı (ör: gemini-3-flash-preview)")
     ai_temp = st.slider("Temperature", 0.0, 1.0, 0.2, 0.05)
 
     run_btn = st.button("🚀 Teknik Analizi Çalıştır", type="primary")
@@ -1381,36 +1430,40 @@ with tab_dash:
     with st.expander("Equity curve", expanded=False):
         st.plotly_chart(fig_eq, use_container_width=True)
 
-    # AI Chat
-    st.subheader("🤖 AI Analiz (Chat)")
+    # AI Chat (GEMINI)
+    st.subheader("🤖 AI Analiz (Chat) — Gemini")
     if not ai_on:
         st.info("AI Chat kapalı (soldan açabilirsin).")
     else:
-        if not st.secrets.get("OPENAI_API_KEY", ""):
-            st.warning("OPENAI_API_KEY bulunamadı. Streamlit Cloud > Secrets'e OPENAI_API_KEY=... ekleyin.")
+        if not st.secrets.get("GEMINI_API_KEY", ""):
+            st.warning("GEMINI_API_KEY bulunamadı. Streamlit Cloud > Edit secrets'e GEMINI_API_KEY=... ekleyin.")
         else:
             ai_ctx = build_ai_context(ticker, market, latest, checkpoints, metrics, tp, live, df)
+
             system_msg = {
                 "role": "system",
                 "content": (
                     "Sen bir finansal analiz asistanısın. Kullanıcının verdiği veriler üzerinden eğitim amaçlı yorum yap. "
                     "Kesin yatırım tavsiyesi verme. Çıktıda: (1) Özet, (2) Riskler, (3) Invalidation koşulları, (4) Senaryo bandı. "
+                    "Grafik yorumu gibi konuş: EMA/RSI/MACD/Bollinger/ATR ve sinyallerin anlamını net anlat. "
                     "Kısa, net, maddeli yaz."
                 ),
             }
 
             with st.expander("AI Chat", expanded=True):
-                user_msg = st.text_input("Sorun:", value="", placeholder="Örn: Riskler ne, hedef bant ne, invalidation nedir?")
+                user_msg = st.text_input("Sorun:", value="", placeholder="Örn: Grafik ne diyor, riskler ne, invalidation nedir?")
                 if st.button("AI'ya Sor") and user_msg.strip():
                     st.session_state.ai_messages.append({"role": "user", "content": user_msg.strip()})
+
                     messages = [
                         system_msg,
                         {"role": "user", "content": "Context JSON:\n" + json.dumps(ai_ctx, ensure_ascii=False)},
                     ]
                     tail = st.session_state.ai_messages[-6:]
                     messages += tail
+
                     try:
-                        reply = call_openai(messages, model=ai_model, temperature=ai_temp)
+                        reply = call_gemini(messages, model=ai_model, temperature=ai_temp)
                         st.session_state.ai_messages.append({"role": "assistant", "content": reply})
                     except Exception as e:
                         st.error(f"AI hata: {e}")
