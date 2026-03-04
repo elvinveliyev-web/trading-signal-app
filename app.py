@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 from io import BytesIO
@@ -28,67 +29,35 @@ except Exception:
 
 st.set_page_config(page_title="FA→TA Trading + AI", layout="wide")
 
-# ============================================================
-# ✅ UNIVERSES (MANUAL / STATIC)
-# - Buraya "tek sefer" kendi tam listeni koyarsan Wikipedia yok.
-# - Tickerlar: USA için normal (AAPL), BIST için çıplak (THYAO) yaz.
-# ============================================================
-# İstersen bunları tam S&P500 ve Nasdaq100 listelerinle değiştir.
-SP500_TICKERS = [
-    "AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","TSLA","BRK.B","JPM","V","MA","LLY","AVGO","XOM",
-    "UNH","COST","PG","JNJ","HD","MRK","ABBV","KO","PEP","WMT","CRM","BAC","NFLX","ADBE","AMD",
-    "ORCL","TMO","CSCO","ACN","MCD","CVX","ABT","LIN","NKE","DHR","WFC","TXN","PM","INTU","QCOM",
-    "AMGN","IBM","NOW","GE","CAT","GS","SPGI","ISRG","AMAT","BKNG","BA","RTX","LOW","UNP","HON",
-]
-NASDAQ100_TICKERS = [
-    "AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","TSLA","AVGO","COST","NFLX","ADBE","AMD",
-    "ORCL","CSCO","INTU","QCOM","AMAT","BKNG","ISRG","PEP","TXN","AMGN","HON","SBUX","MDLZ",
-    "ADI","MU","LRCX","GILD","PANW","VRTX","REGN","SNPS","CDNS","INTC","KLAC","MELI","CTAS",
-    "MAR","PYPL","CHTR","CSX","NXPI","WDAY","MRVL","ADP","FTNT","KDP","ROST",
-]
+# =============================
+# BASE DIR (GitHub/Streamlit Cloud path safe)
+# =============================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
 
-BIST100_TICKERS = [
-    "AEFES","AGHOL","AHGAZ","AKBNK","AKFGY","AKSA","AKSEN","ALARK","ALBRK","ALFAS",
-    "ARCLK","ARDYZ","ASELS","ASTOR","BIMAS","BRSAN","BRYAT","BSOKE","CCOLA","CEMTS",
-    "CIMSA","DOAS","ECILC","EGEEN","EKGYO","ENJSA","ENKAI","EREGL","EUPWR","FROTO",
-    "GARAN","GESAN","GUBRF","HALKB","HEKTS","ISCTR","ISGYO","ISMEN","KARDM","KCAER",
-    "KCHOL","KLGYO","KONTR","KOZAA","KOZAL","KRDMD","MAVI","MGROS","ODAS","OTKAR",
-    "OYAKC","PETKM","PGSUS","QNBFB","SAHOL","SASA","SDTTR","SISE","SKBNK","SMRTG",
-    "SOKM","SRVGY","TAVHL","TCELL","THYAO","TKFEN","TMSN","TOASO","TRGYO","TSKB",
-    "TSPOR","TTKOM","TTRAK","TUKAS","TUPRS","TURSG","ULKER","VAKBN","VESBE","VESTL",
-    "YKBNK","ZOREN"
-]
+def pjoin(*parts) -> str:
+    return os.path.join(BASE_DIR, *parts)
 
-# (Opsiyonel) İstersen kod dışından yönetmek için universes.json da koyabilirsin.
-# Format:
-# {
-#   "SP500": ["AAPL", "..."],
-#   "NASDAQ100": ["AAPL", "..."],
-#   "BIST100": ["THYAO", "..."]
-# }
-def load_universes_from_json(path: str = "universes.json") -> Dict[str, List[str]]:
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            out = {
-                "SP500": [str(x).upper().strip() for x in data.get("SP500", []) if str(x).strip()],
-                "NASDAQ100": [str(x).upper().strip() for x in data.get("NASDAQ100", []) if str(x).strip()],
-                "BIST100": [str(x).upper().strip() for x in data.get("BIST100", []) if str(x).strip()],
-            }
-            # boşsa fallback
-            if not out["SP500"]:
-                out["SP500"] = SP500_TICKERS
-            if not out["NASDAQ100"]:
-                out["NASDAQ100"] = NASDAQ100_TICKERS
-            if not out["BIST100"]:
-                out["BIST100"] = BIST100_TICKERS
-            return out
-        except Exception:
-            pass
-    return {"SP500": SP500_TICKERS, "NASDAQ100": NASDAQ100_TICKERS, "BIST100": BIST100_TICKERS}
+# =============================
+# Universe Loader (from repo files)
+# =============================
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
+def load_universe_file(path: str) -> List[str]:
+    """
+    Reads tickers from a txt file. Supports line-separated tickers (recommended),
+    but also accepts comma/semicolon/whitespace separated content.
+    Returns unique, sorted tickers (uppercased).
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = f.read()
 
-UNIVERSES = load_universes_from_json()
+        toks = re.split(r"[\s,;]+", raw.strip())
+        tickers = [t.strip().upper() for t in toks if t.strip()]
+        # unique + keep order then sort
+        tickers = list(dict.fromkeys(tickers))
+        return sorted(tickers)
+    except Exception:
+        return []
 
 # =============================
 # Helpers
@@ -672,6 +641,7 @@ def build_html_report(
                 .replace("<", "&lt;")
                 .replace(">", "&gt;"))
 
+    # Plotly figures (keeps charts exactly)
     fig_blocks = []
     first = True
     for name, fig in (figs or {}).items():
@@ -746,7 +716,7 @@ def build_html_report(
   <h1>{esc(title)}</h1>
   <div class="muted">
     Generated: {esc(time.strftime('%Y-%m-%d %H:%M:%S'))}<br>
-    Market: {esc(meta.get('market'))} | Universe: {esc(meta.get('universe_name',''))} | Ticker: {esc(meta.get('ticker'))} | Interval: {esc(meta.get('interval'))} | Period: {esc(meta.get('period'))}<br>
+    Market: {esc(meta.get('market'))} | Ticker: {esc(meta.get('ticker'))} | Interval: {esc(meta.get('interval'))} | Period: {esc(meta.get('period'))}<br>
     Preset: {esc(meta.get('preset'))} | EMA: {esc(meta.get('ema_fast'))}/{esc(meta.get('ema_slow'))} | RSI: {esc(meta.get('rsi_period'))} | BB: {esc(meta.get('bb_period'))}/{esc(meta.get('bb_std'))} | ATR: {esc(meta.get('atr_period'))} | VolSMA: {esc(meta.get('vol_sma'))}
   </div>
 
@@ -789,6 +759,7 @@ def build_html_report(
     return html.encode("utf-8")
 
 def _plotly_fig_to_png_bytes(fig: go.Figure) -> Optional[bytes]:
+    # works if kaleido is available
     try:
         return fig.to_image(format="png", scale=2)
     except Exception:
@@ -832,6 +803,7 @@ def generate_pdf_report(
     bottom = 1.6 * cm
     y = top
 
+    # Title
     c.setFont("Helvetica-Bold", 16)
     c.drawString(left, y, title[:90]); y -= 18
     c.setFont("Helvetica", 10)
@@ -842,13 +814,14 @@ def generate_pdf_report(
         c,
         [
             f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}",
-            f"Market: {meta.get('market','')} | Universe: {meta.get('universe_name','')} | Ticker: {meta.get('ticker','')} | Interval: {meta.get('interval','')} | Period: {meta.get('period','')}",
+            f"Market: {meta.get('market','')} | Ticker: {meta.get('ticker','')} | Interval: {meta.get('interval','')} | Period: {meta.get('period','')}",
             f"Preset: {meta.get('preset','')} | EMA: {meta.get('ema_fast','')}/{meta.get('ema_slow','')} | RSI: {meta.get('rsi_period','')} | BB: {meta.get('bb_period','')}/{meta.get('bb_std','')} | ATR: {meta.get('atr_period','')} | VolSMA: {meta.get('vol_sma','')}",
         ],
         left, y, 12, bottom
     )
     y -= 6
 
+    # TA Summary
     c.setFont("Helvetica-Bold", 12)
     c.drawString(left, y, "Technical Summary"); y -= 14
     c.setFont("Helvetica", 9)
@@ -863,6 +836,7 @@ def generate_pdf_report(
     )
     y -= 6
 
+    # Checkpoints
     c.setFont("Helvetica-Bold", 12)
     c.drawString(left, y, "Checkpoints (Last Bar)"); y -= 14
     c.setFont("Helvetica", 9)
@@ -870,6 +844,7 @@ def generate_pdf_report(
     y = _pdf_write_lines(c, cp_lines, left, y, 11, bottom)
     y -= 6
 
+    # Target band + RR
     c.setFont("Helvetica-Bold", 12)
     c.drawString(left, y, "Target Price Band (Scenario)"); y -= 14
     c.setFont("Helvetica", 9)
@@ -894,6 +869,7 @@ def generate_pdf_report(
     y = _pdf_write_lines(c, band_lines, left, y, 12, bottom)
     y -= 6
 
+    # Levels
     c.setFont("Helvetica-Bold", 12)
     c.drawString(left, y, "Levels (Approx.)"); y -= 14
     c.setFont("Helvetica", 9)
@@ -904,6 +880,7 @@ def generate_pdf_report(
     y = _pdf_write_lines(c, lv_lines, left, y, 11, bottom)
     y -= 6
 
+    # Backtest
     c.setFont("Helvetica-Bold", 12)
     c.drawString(left, y, "Backtest Summary (Long-only)"); y -= 14
     c.setFont("Helvetica", 9)
@@ -919,6 +896,7 @@ def generate_pdf_report(
     )
     y -= 6
 
+    # Fundamental Screener Snapshot (selected ticker row)
     c.setFont("Helvetica-Bold", 12)
     c.drawString(left, y, "Fundamental Screener Snapshot (Selected Ticker)"); y -= 14
     c.setFont("Helvetica", 9)
@@ -936,6 +914,7 @@ def generate_pdf_report(
     y = _pdf_write_lines(c, lines, left, y, 11, bottom)
     y -= 6
 
+    # Trades (first rows)
     if trades_df is not None and not trades_df.empty:
         c.setFont("Helvetica-Bold", 12)
         c.drawString(left, y, "Trades (first 25 rows)"); y -= 14
@@ -949,6 +928,7 @@ def generate_pdf_report(
             y = _pdf_write_lines(c, [row_txt], left, y, 10, bottom)
         y -= 6
 
+    # Charts pages (optional)
     chart_added = False
     if include_charts and figs:
         for name, fig in figs.items():
@@ -964,6 +944,7 @@ def generate_pdf_report(
             usable_h = (H - 3.2*cm - 2.0*cm)
             c.drawImage(img_reader, left, 2.0*cm, width=usable_w, height=usable_h, preserveAspectRatio=True, anchor='c')
 
+    # If charts were requested but couldn't be added, add a note
     if include_charts and figs and not chart_added:
         c.showPage()
         c.setFont("Helvetica-Bold", 14)
@@ -1031,13 +1012,10 @@ with st.sidebar:
     st.header("Piyasa")
     market = st.selectbox("Market", ["USA", "BIST"], index=0)
 
-    # ✅ USA içini ikiye böldük: S&P500 / Nasdaq100
-    universe_name = "BIST100"
+    # ✅ NEW: USA Universe split (S&P vs Nasdaq)
+    usa_bucket = None
     if market == "USA":
-        usa_universe = st.selectbox("USA Universe", ["S&P500", "Nasdaq100"], index=0)
-        universe_name = "SP500" if usa_universe == "S&P500" else "NASDAQ100"
-    else:
-        universe_name = "BIST100"
+        usa_bucket = st.selectbox("USA Universe", ["S&P 500", "Nasdaq 100"], index=0)
 
     st.header("1) Fundamental Screener (opsiyonel)")
     use_fa_default = True
@@ -1070,16 +1048,20 @@ with st.sidebar:
         "min_score": min_score, "min_ok": min_ok, "min_coverage": min_coverage,
     }
 
-    # ✅ Universe: artık sadece sabit listeler
-    if universe_name == "SP500":
-        universe = UNIVERSES["SP500"]
-        st.caption(f"Universe: S&P500 (static) | count: {len(universe)}")
-    elif universe_name == "NASDAQ100":
-        universe = UNIVERSES["NASDAQ100"]
-        st.caption(f"Universe: Nasdaq100 (static) | count: {len(universe)}")
+    # ✅ NEW: Universe from files (GitHub repo)
+    if market == "USA":
+        if usa_bucket == "S&P 500":
+            universe = load_universe_file(pjoin("universes", "sp500.txt"))
+        else:
+            universe = load_universe_file(pjoin("universes", "nasdaq100.txt"))
+        st.caption(f"Universe: {usa_bucket} (count: {len(universe)})")
     else:
-        universe = UNIVERSES["BIST100"]
-        st.caption(f"Universe: BIST100 (static) | count: {len(universe)}")
+        universe = load_universe_file(pjoin("universes", "bist100.txt"))
+        st.caption(f"Universe: BIST100 (count: {len(universe)})")
+
+    if not universe:
+        st.error("Universe listesi boş! GitHub repo içinde universes/*.txt dosyalarını ve dosya yollarını kontrol et.")
+        st.stop()
 
     run_screener = st.button("🔎 Screener Çalıştır", type="secondary", disabled=(not use_fa))
 
@@ -1134,12 +1116,9 @@ with st.sidebar:
 # Fundamental screener action
 # -----------------------------
 if run_screener and use_fa:
-    with st.spinner(f"Fundamental veriler çekiliyor ({market} / {universe_name})..."):
+    with st.spinner(f"Fundamental veriler çekiliyor ({market})..."):
         rows = []
-        prog = st.progress(0.0)
-        total = max(1, len(universe))
-
-        for i, tk in enumerate(universe):
+        for tk in universe:
             tk_norm = normalize_ticker(tk, market)
             f = fetch_fundamentals_generic(tk_norm, market=market)
             score, breakdown, passed = fundamental_score_row(f, fa_mode, thresholds)
@@ -1148,9 +1127,6 @@ if run_screener and use_fa:
             f["FA_ok_count"] = sum(1 for v in breakdown.values() if v.get("available") and v.get("ok"))
             f["FA_coverage"] = sum(1 for v in breakdown.values() if v.get("available"))
             rows.append(f)
-
-            if (i % 10 == 0) or (i == total - 1):
-                prog.progress((i + 1) / total)
 
         sdf = pd.DataFrame(rows)
         if not sdf.empty:
@@ -1177,7 +1153,7 @@ def load_data_cached(ticker: str, period: str, interval: str) -> pd.DataFrame:
 # If TA not ran yet: show screener (if any) and stop
 if not st.session_state.ta_ran:
     if use_fa and not st.session_state.screener_df.empty:
-        st.subheader(f"🧾 Fundamental Screener Sonuçları ({market} / {universe_name})")
+        st.subheader(f"🧾 Fundamental Screener Sonuçları ({market})")
         sdf = st.session_state.screener_df.copy()
 
         show_cols = [
@@ -1294,8 +1270,9 @@ figs_for_report = {
 tab_dash, tab_export = st.tabs(["📊 Dashboard", "📄 Rapor (PDF/HTML)"])
 
 with tab_dash:
+    # Screener display (if available)
     if use_fa and not st.session_state.screener_df.empty:
-        st.subheader(f"🧾 Fundamental Screener Sonuçları ({market} / {universe_name})")
+        st.subheader(f"🧾 Fundamental Screener Sonuçları ({market})")
         sdf = st.session_state.screener_df.copy()
 
         show_cols = [
@@ -1319,14 +1296,15 @@ with tab_dash:
                 st.session_state.selected_ticker = picked
                 st.rerun()
 
+    # Summary metrics
     c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
     c1.metric("Market", market)
-    c2.metric("Universe", universe_name)
-    c3.metric("Sembol", ticker)
-    c4.metric("Daily Close (bar)", f"{latest['Close']:.2f}")
-    c5.metric("Live/Last", f"{live_price:.2f}" if np.isfinite(live_price) else "N/A")
-    c6.metric("Skor", f"{latest['SCORE']:.0f}/100")
-    c7.metric("Sinyal", rec)
+    c2.metric("Sembol", ticker)
+    c3.metric("Daily Close (bar)", f"{latest['Close']:.2f}")
+    c4.metric("Live/Last", f"{live_price:.2f}" if np.isfinite(live_price) else "N/A")
+    c5.metric("Skor", f"{latest['SCORE']:.0f}/100")
+    c6.metric("Sinyal", rec)
+    c7.metric("SPY Rejim", "BULL ✅" if (market == "USA" and market_filter_ok) else ("BEAR ❌" if market == "USA" else "N/A"))
 
     st.caption("Not: Daily Close (1d bar) ile Live/Last farklı olabilir. Piyasa açıkken 1d bar kapanışı güncellenmez.")
 
@@ -1336,6 +1314,7 @@ with tab_dash:
         with cp_cols[i % 3]:
             st.write(("🟢 " if v else "🔴 ") + k)
 
+    # Target band + RR
     st.subheader("🎯 Hedef Fiyat Bandı (Senaryo)")
     base_px = float(tp["base"])
     rr_str = fmt_rr(rr_info.get("rr"))
@@ -1377,6 +1356,7 @@ with tab_dash:
     with st.expander("Seviye listesi (yaklaşık) — işaretli + fiyata uzaklık %", expanded=False):
         st.markdown(render_levels_marked(tp.get("levels", []), base_px, s1, r1))
 
+    # Charts
     st.subheader("📊 Fiyat + EMA + Bollinger + Sinyaller")
     st.plotly_chart(fig_price, use_container_width=True)
 
@@ -1401,6 +1381,7 @@ with tab_dash:
     with st.expander("Equity curve", expanded=False):
         st.plotly_chart(fig_eq, use_container_width=True)
 
+    # AI Chat
     st.subheader("🤖 AI Analiz (Chat)")
     if not ai_on:
         st.info("AI Chat kapalı (soldan açabilirsin).")
@@ -1444,6 +1425,7 @@ with tab_export:
     include_charts = st.checkbox("Rapor grafikleri dahil et", value=True)
     include_trades = st.checkbox("Trade listesi dahil et (ilk 25)", value=True)
 
+    # Build FA row (from screener + current fundamentals)
     with st.spinner("Fundamental + screener satırı hazırlanıyor..."):
         f_single = fetch_fundamentals_generic(ticker, market=market)
         f_score, f_breakdown, f_pass = fundamental_score_row(f_single, fa_mode, thresholds)
@@ -1459,7 +1441,6 @@ with tab_export:
 
     meta = {
         "market": market,
-        "universe_name": universe_name,
         "ticker": ticker,
         "interval": interval,
         "period": period,
@@ -1484,6 +1465,7 @@ with tab_export:
         "atr_pct": fmt_pct(float(latest.get("ATR_PCT", np.nan))) if pd.notna(latest.get("ATR_PCT", np.nan)) else "N/A",
     }
 
+    # Always provide HTML (most robust + charts)
     html_bytes = build_html_report(
         title=f"FA→TA Trading Report - {ticker}",
         meta=meta,
@@ -1507,6 +1489,7 @@ with tab_export:
     if not REPORTLAB_OK:
         st.warning("Doğrudan PDF için 'reportlab' gerekli. requirements.txt içine `reportlab` ekleyip redeploy edersen PDF butonu da aktif olur.")
     else:
+        # PDF generate (may or may not embed charts depending on kaleido)
         if st.button("🧾 PDF Oluştur (reportlab)", use_container_width=True):
             with st.spinner("PDF oluşturuluyor..."):
                 pdf_bytes = generate_pdf_report(
