@@ -28,6 +28,68 @@ except Exception:
 
 st.set_page_config(page_title="FA→TA Trading + AI", layout="wide")
 
+# ============================================================
+# ✅ UNIVERSES (MANUAL / STATIC)
+# - Buraya "tek sefer" kendi tam listeni koyarsan Wikipedia yok.
+# - Tickerlar: USA için normal (AAPL), BIST için çıplak (THYAO) yaz.
+# ============================================================
+# İstersen bunları tam S&P500 ve Nasdaq100 listelerinle değiştir.
+SP500_TICKERS = [
+    "AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","TSLA","BRK.B","JPM","V","MA","LLY","AVGO","XOM",
+    "UNH","COST","PG","JNJ","HD","MRK","ABBV","KO","PEP","WMT","CRM","BAC","NFLX","ADBE","AMD",
+    "ORCL","TMO","CSCO","ACN","MCD","CVX","ABT","LIN","NKE","DHR","WFC","TXN","PM","INTU","QCOM",
+    "AMGN","IBM","NOW","GE","CAT","GS","SPGI","ISRG","AMAT","BKNG","BA","RTX","LOW","UNP","HON",
+]
+NASDAQ100_TICKERS = [
+    "AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","TSLA","AVGO","COST","NFLX","ADBE","AMD",
+    "ORCL","CSCO","INTU","QCOM","AMAT","BKNG","ISRG","PEP","TXN","AMGN","HON","SBUX","MDLZ",
+    "ADI","MU","LRCX","GILD","PANW","VRTX","REGN","SNPS","CDNS","INTC","KLAC","MELI","CTAS",
+    "MAR","PYPL","CHTR","CSX","NXPI","WDAY","MRVL","ADP","FTNT","KDP","ROST",
+]
+
+BIST100_TICKERS = [
+    "AEFES","AGHOL","AHGAZ","AKBNK","AKFGY","AKSA","AKSEN","ALARK","ALBRK","ALFAS",
+    "ARCLK","ARDYZ","ASELS","ASTOR","BIMAS","BRSAN","BRYAT","BSOKE","CCOLA","CEMTS",
+    "CIMSA","DOAS","ECILC","EGEEN","EKGYO","ENJSA","ENKAI","EREGL","EUPWR","FROTO",
+    "GARAN","GESAN","GUBRF","HALKB","HEKTS","ISCTR","ISGYO","ISMEN","KARDM","KCAER",
+    "KCHOL","KLGYO","KONTR","KOZAA","KOZAL","KRDMD","MAVI","MGROS","ODAS","OTKAR",
+    "OYAKC","PETKM","PGSUS","QNBFB","SAHOL","SASA","SDTTR","SISE","SKBNK","SMRTG",
+    "SOKM","SRVGY","TAVHL","TCELL","THYAO","TKFEN","TMSN","TOASO","TRGYO","TSKB",
+    "TSPOR","TTKOM","TTRAK","TUKAS","TUPRS","TURSG","ULKER","VAKBN","VESBE","VESTL",
+    "YKBNK","ZOREN"
+]
+
+# (Opsiyonel) İstersen kod dışından yönetmek için universes.json da koyabilirsin.
+# Format:
+# {
+#   "SP500": ["AAPL", "..."],
+#   "NASDAQ100": ["AAPL", "..."],
+#   "BIST100": ["THYAO", "..."]
+# }
+def load_universes_from_json(path: str = "universes.json") -> Dict[str, List[str]]:
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            out = {
+                "SP500": [str(x).upper().strip() for x in data.get("SP500", []) if str(x).strip()],
+                "NASDAQ100": [str(x).upper().strip() for x in data.get("NASDAQ100", []) if str(x).strip()],
+                "BIST100": [str(x).upper().strip() for x in data.get("BIST100", []) if str(x).strip()],
+            }
+            # boşsa fallback
+            if not out["SP500"]:
+                out["SP500"] = SP500_TICKERS
+            if not out["NASDAQ100"]:
+                out["NASDAQ100"] = NASDAQ100_TICKERS
+            if not out["BIST100"]:
+                out["BIST100"] = BIST100_TICKERS
+            return out
+        except Exception:
+            pass
+    return {"SP500": SP500_TICKERS, "NASDAQ100": NASDAQ100_TICKERS, "BIST100": BIST100_TICKERS}
+
+UNIVERSES = load_universes_from_json()
+
 # =============================
 # Helpers
 # =============================
@@ -455,83 +517,6 @@ def fundamental_score_row(row: dict, mode: str, thresholds: dict) -> Tuple[float
     return float(score_pct), b, bool(pass_bool)
 
 # =============================
-# Universe helpers
-# =============================
-US_TICKERS = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "NFLX", "JPM", "XOM", "SPY", "QQQ"]
-US_EXT = ["AVGO", "AMD", "ORCL", "COST", "KO", "PEP", "JNJ", "PG", "V", "MA", "UNH", "HD", "CRM", "ADBE"]
-
-BIST100_FALLBACK = [
-    "AEFES","AGHOL","AHGAZ","AKBNK","AKFGY","AKSA","AKSEN","ALARK","ALBRK","ALFAS",
-    "ARCLK","ARDYZ","ASELS","ASTOR","BIMAS","BRSAN","BRYAT","BSOKE","CCOLA","CEMTS",
-    "CIMSA","DOAS","ECILC","EGEEN","EKGYO","ENJSA","ENKAI","EREGL","EUPWR","FROTO",
-    "GARAN","GESAN","GUBRF","HALKB","HEKTS","ISCTR","ISGYO","ISMEN","KARDM","KCAER",
-    "KCHOL","KLGYO","KONTR","KOZAA","KOZAL","KRDMD","MAVI","MGROS","ODAS","OTKAR",
-    "OYAKC","PETKM","PGSUS","QNBFB","SAHOL","SASA","SDTTR","SISE","SKBNK","SMRTG",
-    "SOKM","SRVGY","TAVHL","TCELL","THYAO","TKFEN","TMSN","TOASO","TRGYO","TSKB",
-    "TSPOR","TTKOM","TTRAK","TUKAS","TUPRS","TURSG","ULKER","VAKBN","VESBE","VESTL",
-    "YKBNK","ZOREN"
-]
-
-@st.cache_data(ttl=24 * 3600, show_spinner=False)
-def get_sp500_tickers() -> List[str]:
-    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; StreamlitApp/1.0; +https://streamlit.io)"}
-    try:
-        r = requests.get(url, headers=headers, timeout=20)
-        r.raise_for_status()
-        tables = pd.read_html(r.text)
-        dfu = tables[0]
-        return sorted(dfu["Symbol"].astype(str).str.upper().tolist())
-    except Exception:
-        return sorted(list(set(US_TICKERS + US_EXT)))
-
-@st.cache_data(ttl=24 * 3600, show_spinner=False)
-def get_nasdaq100_tickers() -> List[str]:
-    url = "https://en.wikipedia.org/wiki/Nasdaq-100"
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; StreamlitApp/1.0; +https://streamlit.io)"}
-    try:
-        r = requests.get(url, headers=headers, timeout=20)
-        r.raise_for_status()
-        tables = pd.read_html(r.text)
-        for t in tables:
-            if "Ticker" in t.columns:
-                return sorted(t["Ticker"].astype(str).str.upper().tolist())
-        return []
-    except Exception:
-        return []
-
-@st.cache_data(ttl=24 * 3600, show_spinner=False)
-def get_bist100_tickers() -> List[str]:
-    candidates = [
-        "https://www.borsaistanbul.com/en/indices/bist-stock-indices/bist-100",
-        "https://www.borsaistanbul.com/tr/sayfa/195/bist-pay-endeksleri",
-        "https://www.borsaistanbul.com/tr/sayfa/194/endeksler",
-    ]
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; StreamlitApp/1.0; +https://streamlit.io)"}
-
-    for url in candidates:
-        try:
-            r = requests.get(url, headers=headers, timeout=20)
-            r.raise_for_status()
-            tables = pd.read_html(r.text)
-            for t in tables:
-                sym_col = None
-                for c in t.columns:
-                    cl = str(c).lower()
-                    if "kod" in cl or "symbol" in cl or "sembol" in cl or "ticker" in cl:
-                        sym_col = c
-                        break
-                if sym_col is not None:
-                    syms = t[sym_col].astype(str).str.upper().str.replace(".IS", "", regex=False).tolist()
-                    syms = [s.strip() for s in syms if s.strip()]
-                    if len(syms) >= 50:
-                        return sorted(list(set(syms)))
-        except Exception:
-            pass
-
-    return sorted(list(set(BIST100_FALLBACK)))
-
-# =============================
 # Target price band (non-LLM)
 # =============================
 def local_levels(close: pd.Series, lookback: int = 120):
@@ -687,7 +672,6 @@ def build_html_report(
                 .replace("<", "&lt;")
                 .replace(">", "&gt;"))
 
-    # Plotly figures (keeps charts exactly)
     fig_blocks = []
     first = True
     for name, fig in (figs or {}).items():
@@ -762,7 +746,7 @@ def build_html_report(
   <h1>{esc(title)}</h1>
   <div class="muted">
     Generated: {esc(time.strftime('%Y-%m-%d %H:%M:%S'))}<br>
-    Market: {esc(meta.get('market'))} | Ticker: {esc(meta.get('ticker'))} | Interval: {esc(meta.get('interval'))} | Period: {esc(meta.get('period'))}<br>
+    Market: {esc(meta.get('market'))} | Universe: {esc(meta.get('universe_name',''))} | Ticker: {esc(meta.get('ticker'))} | Interval: {esc(meta.get('interval'))} | Period: {esc(meta.get('period'))}<br>
     Preset: {esc(meta.get('preset'))} | EMA: {esc(meta.get('ema_fast'))}/{esc(meta.get('ema_slow'))} | RSI: {esc(meta.get('rsi_period'))} | BB: {esc(meta.get('bb_period'))}/{esc(meta.get('bb_std'))} | ATR: {esc(meta.get('atr_period'))} | VolSMA: {esc(meta.get('vol_sma'))}
   </div>
 
@@ -805,7 +789,6 @@ def build_html_report(
     return html.encode("utf-8")
 
 def _plotly_fig_to_png_bytes(fig: go.Figure) -> Optional[bytes]:
-    # works if kaleido is available
     try:
         return fig.to_image(format="png", scale=2)
     except Exception:
@@ -849,7 +832,6 @@ def generate_pdf_report(
     bottom = 1.6 * cm
     y = top
 
-    # Title
     c.setFont("Helvetica-Bold", 16)
     c.drawString(left, y, title[:90]); y -= 18
     c.setFont("Helvetica", 10)
@@ -860,14 +842,13 @@ def generate_pdf_report(
         c,
         [
             f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}",
-            f"Market: {meta.get('market','')} | Ticker: {meta.get('ticker','')} | Interval: {meta.get('interval','')} | Period: {meta.get('period','')}",
+            f"Market: {meta.get('market','')} | Universe: {meta.get('universe_name','')} | Ticker: {meta.get('ticker','')} | Interval: {meta.get('interval','')} | Period: {meta.get('period','')}",
             f"Preset: {meta.get('preset','')} | EMA: {meta.get('ema_fast','')}/{meta.get('ema_slow','')} | RSI: {meta.get('rsi_period','')} | BB: {meta.get('bb_period','')}/{meta.get('bb_std','')} | ATR: {meta.get('atr_period','')} | VolSMA: {meta.get('vol_sma','')}",
         ],
         left, y, 12, bottom
     )
     y -= 6
 
-    # TA Summary
     c.setFont("Helvetica-Bold", 12)
     c.drawString(left, y, "Technical Summary"); y -= 14
     c.setFont("Helvetica", 9)
@@ -882,7 +863,6 @@ def generate_pdf_report(
     )
     y -= 6
 
-    # Checkpoints
     c.setFont("Helvetica-Bold", 12)
     c.drawString(left, y, "Checkpoints (Last Bar)"); y -= 14
     c.setFont("Helvetica", 9)
@@ -890,7 +870,6 @@ def generate_pdf_report(
     y = _pdf_write_lines(c, cp_lines, left, y, 11, bottom)
     y -= 6
 
-    # Target band + RR
     c.setFont("Helvetica-Bold", 12)
     c.drawString(left, y, "Target Price Band (Scenario)"); y -= 14
     c.setFont("Helvetica", 9)
@@ -915,7 +894,6 @@ def generate_pdf_report(
     y = _pdf_write_lines(c, band_lines, left, y, 12, bottom)
     y -= 6
 
-    # Levels
     c.setFont("Helvetica-Bold", 12)
     c.drawString(left, y, "Levels (Approx.)"); y -= 14
     c.setFont("Helvetica", 9)
@@ -926,7 +904,6 @@ def generate_pdf_report(
     y = _pdf_write_lines(c, lv_lines, left, y, 11, bottom)
     y -= 6
 
-    # Backtest
     c.setFont("Helvetica-Bold", 12)
     c.drawString(left, y, "Backtest Summary (Long-only)"); y -= 14
     c.setFont("Helvetica", 9)
@@ -942,7 +919,6 @@ def generate_pdf_report(
     )
     y -= 6
 
-    # Fundamental Screener Snapshot (selected ticker row)
     c.setFont("Helvetica-Bold", 12)
     c.drawString(left, y, "Fundamental Screener Snapshot (Selected Ticker)"); y -= 14
     c.setFont("Helvetica", 9)
@@ -960,7 +936,6 @@ def generate_pdf_report(
     y = _pdf_write_lines(c, lines, left, y, 11, bottom)
     y -= 6
 
-    # Trades (first rows)
     if trades_df is not None and not trades_df.empty:
         c.setFont("Helvetica-Bold", 12)
         c.drawString(left, y, "Trades (first 25 rows)"); y -= 14
@@ -974,7 +949,6 @@ def generate_pdf_report(
             y = _pdf_write_lines(c, [row_txt], left, y, 10, bottom)
         y -= 6
 
-    # Charts pages (optional)
     chart_added = False
     if include_charts and figs:
         for name, fig in figs.items():
@@ -990,7 +964,6 @@ def generate_pdf_report(
             usable_h = (H - 3.2*cm - 2.0*cm)
             c.drawImage(img_reader, left, 2.0*cm, width=usable_w, height=usable_h, preserveAspectRatio=True, anchor='c')
 
-    # If charts were requested but couldn't be added, add a note
     if include_charts and figs and not chart_added:
         c.showPage()
         c.setFont("Helvetica-Bold", 14)
@@ -1058,6 +1031,14 @@ with st.sidebar:
     st.header("Piyasa")
     market = st.selectbox("Market", ["USA", "BIST"], index=0)
 
+    # ✅ USA içini ikiye böldük: S&P500 / Nasdaq100
+    universe_name = "BIST100"
+    if market == "USA":
+        usa_universe = st.selectbox("USA Universe", ["S&P500", "Nasdaq100"], index=0)
+        universe_name = "SP500" if usa_universe == "S&P500" else "NASDAQ100"
+    else:
+        universe_name = "BIST100"
+
     st.header("1) Fundamental Screener (opsiyonel)")
     use_fa_default = True
     use_fa = st.checkbox("Fundamental filtreyi kullan", value=use_fa_default)
@@ -1089,16 +1070,16 @@ with st.sidebar:
         "min_score": min_score, "min_ok": min_ok, "min_coverage": min_coverage,
     }
 
-    # Universe
-    if market == "USA":
-        sp = get_sp500_tickers()
-        ndx = get_nasdaq100_tickers()
-        universe = sorted(list(set(sp + ndx)))
-        st.caption(f"Universe: S&P500 + Nasdaq100 (unique: {len(universe)})")
+    # ✅ Universe: artık sadece sabit listeler
+    if universe_name == "SP500":
+        universe = UNIVERSES["SP500"]
+        st.caption(f"Universe: S&P500 (static) | count: {len(universe)}")
+    elif universe_name == "NASDAQ100":
+        universe = UNIVERSES["NASDAQ100"]
+        st.caption(f"Universe: Nasdaq100 (static) | count: {len(universe)}")
     else:
-        bist = get_bist100_tickers()
-        universe = sorted(list(set(bist)))
-        st.caption(f"Universe: BIST100 (unique: {len(universe)})")
+        universe = UNIVERSES["BIST100"]
+        st.caption(f"Universe: BIST100 (static) | count: {len(universe)}")
 
     run_screener = st.button("🔎 Screener Çalıştır", type="secondary", disabled=(not use_fa))
 
@@ -1153,9 +1134,12 @@ with st.sidebar:
 # Fundamental screener action
 # -----------------------------
 if run_screener and use_fa:
-    with st.spinner(f"Fundamental veriler çekiliyor ({market})..."):
+    with st.spinner(f"Fundamental veriler çekiliyor ({market} / {universe_name})..."):
         rows = []
-        for tk in universe:
+        prog = st.progress(0.0)
+        total = max(1, len(universe))
+
+        for i, tk in enumerate(universe):
             tk_norm = normalize_ticker(tk, market)
             f = fetch_fundamentals_generic(tk_norm, market=market)
             score, breakdown, passed = fundamental_score_row(f, fa_mode, thresholds)
@@ -1164,6 +1148,9 @@ if run_screener and use_fa:
             f["FA_ok_count"] = sum(1 for v in breakdown.values() if v.get("available") and v.get("ok"))
             f["FA_coverage"] = sum(1 for v in breakdown.values() if v.get("available"))
             rows.append(f)
+
+            if (i % 10 == 0) or (i == total - 1):
+                prog.progress((i + 1) / total)
 
         sdf = pd.DataFrame(rows)
         if not sdf.empty:
@@ -1190,7 +1177,7 @@ def load_data_cached(ticker: str, period: str, interval: str) -> pd.DataFrame:
 # If TA not ran yet: show screener (if any) and stop
 if not st.session_state.ta_ran:
     if use_fa and not st.session_state.screener_df.empty:
-        st.subheader(f"🧾 Fundamental Screener Sonuçları ({market})")
+        st.subheader(f"🧾 Fundamental Screener Sonuçları ({market} / {universe_name})")
         sdf = st.session_state.screener_df.copy()
 
         show_cols = [
@@ -1307,9 +1294,8 @@ figs_for_report = {
 tab_dash, tab_export = st.tabs(["📊 Dashboard", "📄 Rapor (PDF/HTML)"])
 
 with tab_dash:
-    # Screener display (if available)
     if use_fa and not st.session_state.screener_df.empty:
-        st.subheader(f"🧾 Fundamental Screener Sonuçları ({market})")
+        st.subheader(f"🧾 Fundamental Screener Sonuçları ({market} / {universe_name})")
         sdf = st.session_state.screener_df.copy()
 
         show_cols = [
@@ -1333,15 +1319,14 @@ with tab_dash:
                 st.session_state.selected_ticker = picked
                 st.rerun()
 
-    # Summary metrics
     c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
     c1.metric("Market", market)
-    c2.metric("Sembol", ticker)
-    c3.metric("Daily Close (bar)", f"{latest['Close']:.2f}")
-    c4.metric("Live/Last", f"{live_price:.2f}" if np.isfinite(live_price) else "N/A")
-    c5.metric("Skor", f"{latest['SCORE']:.0f}/100")
-    c6.metric("Sinyal", rec)
-    c7.metric("SPY Rejim", "BULL ✅" if (market == "USA" and market_filter_ok) else ("BEAR ❌" if market == "USA" else "N/A"))
+    c2.metric("Universe", universe_name)
+    c3.metric("Sembol", ticker)
+    c4.metric("Daily Close (bar)", f"{latest['Close']:.2f}")
+    c5.metric("Live/Last", f"{live_price:.2f}" if np.isfinite(live_price) else "N/A")
+    c6.metric("Skor", f"{latest['SCORE']:.0f}/100")
+    c7.metric("Sinyal", rec)
 
     st.caption("Not: Daily Close (1d bar) ile Live/Last farklı olabilir. Piyasa açıkken 1d bar kapanışı güncellenmez.")
 
@@ -1351,7 +1336,6 @@ with tab_dash:
         with cp_cols[i % 3]:
             st.write(("🟢 " if v else "🔴 ") + k)
 
-    # Target band + RR
     st.subheader("🎯 Hedef Fiyat Bandı (Senaryo)")
     base_px = float(tp["base"])
     rr_str = fmt_rr(rr_info.get("rr"))
@@ -1393,7 +1377,6 @@ with tab_dash:
     with st.expander("Seviye listesi (yaklaşık) — işaretli + fiyata uzaklık %", expanded=False):
         st.markdown(render_levels_marked(tp.get("levels", []), base_px, s1, r1))
 
-    # Charts
     st.subheader("📊 Fiyat + EMA + Bollinger + Sinyaller")
     st.plotly_chart(fig_price, use_container_width=True)
 
@@ -1418,7 +1401,6 @@ with tab_dash:
     with st.expander("Equity curve", expanded=False):
         st.plotly_chart(fig_eq, use_container_width=True)
 
-    # AI Chat
     st.subheader("🤖 AI Analiz (Chat)")
     if not ai_on:
         st.info("AI Chat kapalı (soldan açabilirsin).")
@@ -1462,7 +1444,6 @@ with tab_export:
     include_charts = st.checkbox("Rapor grafikleri dahil et", value=True)
     include_trades = st.checkbox("Trade listesi dahil et (ilk 25)", value=True)
 
-    # Build FA row (from screener + current fundamentals)
     with st.spinner("Fundamental + screener satırı hazırlanıyor..."):
         f_single = fetch_fundamentals_generic(ticker, market=market)
         f_score, f_breakdown, f_pass = fundamental_score_row(f_single, fa_mode, thresholds)
@@ -1478,6 +1459,7 @@ with tab_export:
 
     meta = {
         "market": market,
+        "universe_name": universe_name,
         "ticker": ticker,
         "interval": interval,
         "period": period,
@@ -1502,7 +1484,6 @@ with tab_export:
         "atr_pct": fmt_pct(float(latest.get("ATR_PCT", np.nan))) if pd.notna(latest.get("ATR_PCT", np.nan)) else "N/A",
     }
 
-    # Always provide HTML (most robust + charts)
     html_bytes = build_html_report(
         title=f"FA→TA Trading Report - {ticker}",
         meta=meta,
@@ -1526,7 +1507,6 @@ with tab_export:
     if not REPORTLAB_OK:
         st.warning("Doğrudan PDF için 'reportlab' gerekli. requirements.txt içine `reportlab` ekleyip redeploy edersen PDF butonu da aktif olur.")
     else:
-        # PDF generate (may or may not embed charts depending on kaleido)
         if st.button("🧾 PDF Oluştur (reportlab)", use_container_width=True):
             with st.spinner("PDF oluşturuluyor..."):
                 pdf_bytes = generate_pdf_report(
