@@ -9,3 +9,5 @@ Pillow
 requests
 reportlab
 google-genai
+transformers
+torch
