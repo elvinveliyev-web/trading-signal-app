@@ -179,9 +179,8 @@ def add_overbought_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['PRICE_TO_EMA200'] = (df['Close'] / df['EMA200'] - 1) * 100
     df['PRICE_EXTREME'] = ((df['PRICE_TO_EMA50'] > 20) | (df['PRICE_TO_EMA200'] > 30)).astype(int)
     
-    # 5. Stokastik RSI (opsiyonel, ekleyelim)
+    # 5. Stokastik RSI
     def stoch_rsi(series, period=14, smooth_k=3, smooth_d=3):
-        # RSI'nın stokastik hesaplaması
         rsi_vals = series
         min_rsi = rsi_vals.rolling(period).min()
         max_rsi = rsi_vals.rolling(period).max()
@@ -193,8 +192,7 @@ def add_overbought_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['STOCH_RSI_K'], df['STOCH_RSI_D'] = stoch_rsi(df['RSI'])
     df['STOCH_OVERBOUGHT'] = (df['STOCH_RSI_K'] > 80).astype(int)
     
-    # 6. Hacim / Fiyat uyumsuzluğu (divergence) basit gösterge
-    # Fiyat yükselirken hacim düşüyorsa zayıflama
+    # 6. Hacim / Fiyat uyumsuzluğu
     df['VOLUME_DIR'] = np.sign(df['Volume'].diff()).fillna(0)
     df['PRICE_DIR'] = np.sign(df['Close'].diff()).fillna(0)
     df['WEAK_UPTREND'] = ((df['PRICE_DIR'] > 0) & (df['VOLUME_DIR'] < 0)).astype(int)
@@ -2131,4 +2129,183 @@ JSON:
     "target_band": tp,
     "rr_info": rr_info,
     "pa_pack": pa,
-   
+    "data_snapshot": snap20,
+    "fundamental_score": fa_row_local.get("FA_score") if fa_row_local else None,
+    "fundamental_pass": fa_row_local.get("FA_pass") if fa_row_local else None,
+    "sector_info": sector_comp,
+    "sentiment_analysis": sentiment_info,
+    "overbought_analysis": overbought_result
+}, ensure_ascii=False, default=str)}
+
+Kullanıcının Sorusu: {user_msg}
+"""             
+                image_bytes = _plotly_fig_to_png_bytes(fig_price)
+                
+                text = gemini_generate_text(
+                    prompt=prompt,
+                    model=gemini_model,
+                    temperature=gemini_temp,
+                    max_output_tokens=gemini_max_tokens,
+                    image_bytes=image_bytes,
+                )
+                st.session_state.gemini_text = text
+
+        with col_g2:
+            if st.button("Temizle", use_container_width=True):
+                st.session_state.gemini_text = ""
+
+        if st.session_state.gemini_text:
+            st.markdown(st.session_state.gemini_text)
+
+# =============================
+# HEATMAP TAB (SEKTÖREL)
+# =============================
+with tab_heatmap:
+    st.header("🔥 Sektörel Treemap (Heatmap)")
+    st.write("Belirtilen pazar veya Screener sonuçları üzerinden şirketlerin günlük, haftalık ve aylık performanslarını görselleştirir.")
+    
+    if st.button("Heatmap Verilerini Getir ve Oluştur (1D, 1W, 1M)", type="primary"):
+        with st.spinner("Toplu veri çekiliyor ve hesaplanıyor... (Lütfen bekleyin)"):
+            
+            if not st.session_state.screener_df.empty:
+                hm_tickers = st.session_state.screener_df["ticker"].tolist()
+            else:
+                hm_tickers = universe[:100]
+                
+            use_tickers = [normalize_ticker(t, market) for t in hm_tickers]
+            
+            df_all = yf.download(use_tickers, period="1mo", interval="1d", auto_adjust=True, group_by="ticker", progress=False)
+            
+            hm_data = []
+            for t in use_tickers:
+                try:
+                    df_t = df_all if len(use_tickers) == 1 else df_all[t]
+                    df_t = df_t.dropna()
+                    if len(df_t) >= 2:
+                        c_last = float(df_t["Close"].iloc[-1])
+                        c_prev_1d = float(df_t["Close"].iloc[-2])
+                        c_prev_1wk = float(df_t["Close"].iloc[-6]) if len(df_t) >= 6 else float(df_t["Close"].iloc[0])
+                        c_prev_1mo = float(df_t["Close"].iloc[0])
+
+                        ret_1d = (c_last / c_prev_1d - 1) * 100
+                        ret_1wk = (c_last / c_prev_1wk - 1) * 100
+                        ret_1mo = (c_last / c_prev_1mo - 1) * 100
+                        
+                        sector = "Genel"
+                        if not st.session_state.screener_df.empty:
+                            row_match = st.session_state.screener_df[st.session_state.screener_df["ticker"] == t]
+                            if not row_match.empty and pd.notna(row_match["sector"].iloc[0]):
+                                sector = str(row_match["sector"].iloc[0])
+
+                        hm_data.append({
+                            "Ticker": t,
+                            "Sector": sector,
+                            "1 Günlük %": ret_1d,
+                            "1 Haftalık %": ret_1wk,
+                            "1 Aylık %": ret_1mo
+                        })
+                except Exception:
+                    pass
+            
+            df_hm = pd.DataFrame(hm_data)
+            
+        if not df_hm.empty:
+            df_hm["Abs_1D"] = df_hm["1 Günlük %"].abs()
+            
+            st.subheader("GÜNLÜK Performans")
+            fig_hm_1d = px.treemap(df_hm, path=[px.Constant("Tüm Pazar"), "Sector", "Ticker"], values="Abs_1D", color="1 Günlük %", 
+                                   color_continuous_scale="RdYlGn", color_continuous_midpoint=0, 
+                                   custom_data=["1 Günlük %", "1 Haftalık %", "1 Aylık %"])
+            fig_hm_1d.update_traces(hovertemplate="<b>%{label}</b><br>1 Günlük: %{customdata[0]:.2f}%<br>1 Haftalık: %{customdata[1]:.2f}%<br>1 Aylık: %{customdata[2]:.2f}%")
+            st.plotly_chart(fig_hm_1d, use_container_width=True)
+            
+            st.subheader("HAFTALIK Performans")
+            df_hm["Abs_1W"] = df_hm["1 Haftalık %"].abs()
+            fig_hm_1w = px.treemap(df_hm, path=[px.Constant("Tüm Pazar"), "Sector", "Ticker"], values="Abs_1W", color="1 Haftalık %", 
+                                   color_continuous_scale="RdYlGn", color_continuous_midpoint=0)
+            st.plotly_chart(fig_hm_1w, use_container_width=True)
+            
+            st.subheader("AYLIK Performans")
+            df_hm["Abs_1M"] = df_hm["1 Aylık %"].abs()
+            fig_hm_1m = px.treemap(df_hm, path=[px.Constant("Tüm Pazar"), "Sector", "Ticker"], values="Abs_1M", color="1 Aylık %", 
+                                   color_continuous_scale="RdYlGn", color_continuous_midpoint=0)
+            st.plotly_chart(fig_hm_1m, use_container_width=True)
+        else:
+            st.error("Heatmap için yeterli veri çekilemedi.")
+
+
+# =============================
+# EXPORT TAB
+# =============================
+with tab_export:
+    st.subheader("📄 Rapor İndir (En sorunsuz: HTML → tarayıcıdan PDF)")
+    st.caption("HTML rapor: grafikler %100 gelir. PDF: reportlab + (grafikler için) kaleido varsa grafikleri gömer. Yoksa PDF metin ağırlıklı olur.")
+
+    include_charts = st.checkbox("Rapor grafikleri dahil et", value=True)
+    include_trades = st.checkbox("Trade listesi dahil et (ilk 25)", value=True)
+    include_gemini = st.checkbox("Gemini çıktısını rapora ekle", value=True)
+    include_pa = st.checkbox("Price Action Pack'i rapora ekle", value=True)
+    include_sentiment = st.checkbox("Haber duygu analizini rapora ekle", value=True)
+    include_overbought = st.checkbox("Aşırı alım/spekülasyon analizini rapora ekle", value=True)
+
+    with st.spinner("Fundamental + screener satırı hazırlanıyor..."):
+        f_single = fetch_fundamentals_generic(ticker, market=market)
+        f_score, f_breakdown, f_pass = fundamental_score_row(f_single, fa_mode, thresholds)
+        fa_eval = {
+            "mode": fa_mode, "score": f_score, "passed": f_pass,
+            "ok_cnt": sum(1 for v in f_breakdown.values() if v.get("available") and v.get("ok")),
+            "coverage": sum(1 for v in f_breakdown.values() if v.get("available")),
+        }
+        screener_row = find_screener_row(st.session_state.get("screener_df", pd.DataFrame()), ticker)
+        fa_row = merge_fa_row(screener_row, f_single, fa_eval)
+
+    meta = {
+        "market": market, "ticker": ticker, "interval": interval, "period": period,
+        "preset": preset_name, "ema_fast": ema_fast, "ema_slow": ema_slow,
+        "rsi_period": rsi_period, "bb_period": bb_period, "bb_std": bb_std,
+        "atr_period": atr_period, "vol_sma": vol_sma,
+    }
+
+    ta_summary = {
+        "rec": rec, "close": fmt_num(float(latest["Close"]), 2),
+        "live": fmt_num(float(live_price), 2) if np.isfinite(live_price) else "N/A",
+        "score": fmt_num(float(latest.get("SCORE", np.nan)), 0),
+        "rsi": fmt_num(float(latest.get("RSI", np.nan)), 2),
+        "ema50": fmt_num(float(latest.get("EMA50", np.nan)), 2),
+        "ema200": fmt_num(float(latest.get("EMA200", np.nan)), 2),
+        "atr_pct": fmt_pct(float(latest.get("ATR_PCT", np.nan))) if pd.notna(latest.get("ATR_PCT", np.nan)) else "N/A",
+    }
+
+    gemini_text = st.session_state.gemini_text if include_gemini else None
+    pa_pack_export = st.session_state.pa_pack if include_pa else None
+    sentiment_export = st.session_state.sentiment_summary if include_sentiment else None
+    overbought_export = overbought_result if include_overbought else None
+
+    html_bytes = build_html_report(
+        title=f"FA→TA Trading Report - {ticker}", meta=meta, checkpoints=checkpoints,
+        metrics=metrics, tp=tp, rr_info=rr_info, figs=(figs_for_report if include_charts else {}),
+        fa_row=fa_row, gemini_insight=gemini_text, pa_pack=pa_pack_export, sentiment_summary=sentiment_export,
+        overbought_result=overbought_export,
+    )
+    st.download_button("⬇️ HTML İndir (Önerilen)", data=html_bytes, file_name=f"{ticker}_FA_TA_report.html", mime="text/html", use_container_width=True)
+    st.divider()
+
+    if not REPORTLAB_OK:
+        st.warning("Doğrudan PDF için 'reportlab' gerekli. requirements.txt içine `reportlab` ekleyip redeploy edersen PDF butonu da aktif olur.")
+    else:
+        if st.button("🧾 PDF Oluştur (reportlab)", use_container_width=True):
+            with st.spinner("PDF oluşturuluyor..."):
+                pdf_bytes = generate_pdf_report(
+                    title=f"FA→TA Trading Report - {ticker}", subtitle="Educational analysis.", meta=meta,
+                    checkpoints=checkpoints, ta_summary=ta_summary, target_band=tp, rr_info=rr_info,
+                    backtest_metrics=metrics, fa_row=fa_row, levels=tp.get("levels", []),
+                    trades_df=(tdf if include_trades else None), figs=(figs_for_report if include_charts else None),
+                    include_charts=include_charts, gemini_insight=gemini_text, pa_pack=pa_pack_export,
+                    sentiment_summary=sentiment_export, overbought_result=overbought_export,
+                )
+            if pdf_bytes:
+                st.success("PDF hazır ✅")
+                st.download_button("⬇️ PDF İndir", data=pdf_bytes, file_name=f"{ticker}_FA_TA_report.pdf", mime="application/pdf", use_container_width=True)
+                st.info("Grafikler gelmiyorsa `kaleido` kütüphanesini requirements'a eklemelisin.")
+            else:
+                st.error("PDF üretilemedi.")
