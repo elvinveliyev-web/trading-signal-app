@@ -35,6 +35,7 @@ try:
 except ImportError:
     FEEDPARSER_OK = False
 
+
 st.set_page_config(page_title="FA→TA Trading + AI", layout="wide")
 
 # =============================
@@ -42,8 +43,10 @@ st.set_page_config(page_title="FA→TA Trading + AI", layout="wide")
 # =============================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
 
+
 def pjoin(*parts) -> str:
     return os.path.join(BASE_DIR, *parts)
+
 
 # =============================
 # Universe Loader
@@ -60,6 +63,7 @@ def load_universe_file(path: str) -> List[str]:
     except Exception:
         return []
 
+
 # =============================
 # Helpers
 # =============================
@@ -67,10 +71,14 @@ def normalize_ticker(raw: str, market: str) -> str:
     t = (raw or "").strip().upper()
     if not t:
         return t
-    if market == "BIST":
-        if not t.endswith(".IS"):
-            t = f"{t}.IS"
+    if market == "BIST" and not t.endswith(".IS"):
+        t = f"{t}.IS"
     return t
+
+
+def naked_ticker(raw: str) -> str:
+    return (raw or "").strip().upper().replace(".IS", "")
+
 
 def safe_float(x):
     try:
@@ -82,12 +90,22 @@ def safe_float(x):
     except Exception:
         return np.nan
 
+
 def _flatten_yf(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [c[0] for c in df.columns]
-    return df.dropna()
+
+    out = df.copy()
+
+    if isinstance(out.columns, pd.MultiIndex):
+        out.columns = [c[0] for c in out.columns]
+
+    required = [c for c in ["Open", "High", "Low", "Close"] if c in out.columns]
+    if required:
+        out = out.dropna(subset=required)
+
+    return out
+
 
 def fmt_pct(x: float) -> str:
     try:
@@ -97,6 +115,7 @@ def fmt_pct(x: float) -> str:
     except Exception:
         return "N/A"
 
+
 def fmt_num(x: float, nd=2) -> str:
     try:
         if x is None or (isinstance(x, float) and not np.isfinite(x)):
@@ -105,11 +124,13 @@ def fmt_num(x: float, nd=2) -> str:
     except Exception:
         return "N/A"
 
+
 # =============================
 # Indicators
 # =============================
 def ema(s: pd.Series, span: int) -> pd.Series:
     return s.ewm(span=span, adjust=False).mean()
+
 
 def rsi(close: pd.Series, period: int = 14) -> pd.Series:
     delta = close.diff()
@@ -117,15 +138,17 @@ def rsi(close: pd.Series, period: int = 14) -> pd.Series:
     down = np.where(delta < 0, -delta, 0.0)
     roll_up = pd.Series(up, index=close.index).ewm(alpha=1 / period, adjust=False).mean()
     roll_down = pd.Series(down, index=close.index).ewm(alpha=1 / period, adjust=False).mean()
-    rs = roll_up / (roll_down.replace(0, np.nan))
+    rs = roll_up / roll_down.replace(0, np.nan)
     out = 100 - (100 / (1 + rs))
-    return out.fillna(50)
+    return out.replace([np.inf, -np.inf], np.nan).fillna(50)
+
 
 def macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
     macd_line = ema(close, fast) - ema(close, slow)
     signal_line = ema(macd_line, signal)
     hist = macd_line - signal_line
     return macd_line, signal_line, hist
+
 
 def bollinger(close: pd.Series, period: int = 20, std_mult: float = 2.0):
     mid = close.rolling(period).mean()
@@ -134,18 +157,25 @@ def bollinger(close: pd.Series, period: int = 20, std_mult: float = 2.0):
     lower = mid - std_mult * sd
     return mid, upper, lower
 
+
 def true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
     prev_close = close.shift(1)
-    tr = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+    tr = pd.concat(
+        [(high - low), (high - prev_close).abs(), (low - prev_close).abs()],
+        axis=1,
+    ).max(axis=1)
     return tr
+
 
 def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
     tr = true_range(high, low, close)
     return tr.ewm(alpha=1 / period, adjust=False).mean()
 
+
 def obv(close: pd.Series, volume: pd.Series) -> pd.Series:
     direction = np.sign(close.diff()).fillna(0)
     return (direction * volume).cumsum()
+
 
 def max_drawdown(eq: pd.Series) -> float:
     if eq is None or len(eq) == 0:
@@ -154,119 +184,110 @@ def max_drawdown(eq: pd.Series) -> float:
     dd = (eq / peak) - 1.0
     return float(dd.min())
 
+
 # =============================
-# NEW: Aşırı Alım / Spekülasyon Göstergeleri
+# Overbought / Speculation Indicators
 # =============================
 def add_overbought_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """DataFrame'e aşırı alım, spekülasyon ve değerleme göstergeleri ekler."""
     df = df.copy()
-    
-    # 1. RSI aşırı alım/satım bölgeleri (zaten var, flag ekleyelim)
-    df['RSI_OVERBOUGHT'] = (df['RSI'] > 70).astype(int)
-    df['RSI_OVERSOLD'] = (df['RSI'] < 30).astype(int)
-    
-    # 2. Bollinger Bandı %B (fiyatın banda göre konumu)
-    df['BB_PERCENT_B'] = (df['Close'] - df['BB_lower']) / (df['BB_upper'] - df['BB_lower'])
-    df['BB_OVERBOUGHT'] = (df['Close'] > df['BB_upper']).astype(int)  # aşırı alım
-    df['BB_OVERSOLD'] = (df['Close'] < df['BB_lower']).astype(int)     # aşırı satım
-    
-    # 3. Volume Spike (ani hacim artışı, spekülasyon belirtisi)
-    df['VOLUME_SMA20'] = df['Volume'].rolling(20).mean()
-    df['VOLUME_SPIKE'] = (df['Volume'] > df['VOLUME_SMA20'] * 1.5).astype(int)
-    
-    # 4. Fiyat - Hareketli Ortalama Uzaklığı (aşırı değerlenme)
-    df['PRICE_TO_EMA50'] = (df['Close'] / df['EMA50'] - 1) * 100
-    df['PRICE_TO_EMA200'] = (df['Close'] / df['EMA200'] - 1) * 100
-    df['PRICE_EXTREME'] = ((df['PRICE_TO_EMA50'] > 20) | (df['PRICE_TO_EMA200'] > 30)).astype(int)
-    
-    # 5. Stokastik RSI
+
+    df["RSI_OVERBOUGHT"] = (df["RSI"] > 70).astype(int)
+    df["RSI_OVERSOLD"] = (df["RSI"] < 30).astype(int)
+
+    bb_den = (df["BB_upper"] - df["BB_lower"]).replace(0, np.nan)
+    df["BB_PERCENT_B"] = ((df["Close"] - df["BB_lower"]) / bb_den).replace([np.inf, -np.inf], np.nan)
+    df["BB_OVERBOUGHT"] = (df["Close"] > df["BB_upper"]).astype(int)
+    df["BB_OVERSOLD"] = (df["Close"] < df["BB_lower"]).astype(int)
+
+    df["VOLUME_SMA20"] = df["Volume"].rolling(20).mean()
+    df["VOLUME_SPIKE"] = (df["Volume"] > df["VOLUME_SMA20"] * 1.5).astype(int)
+
+    df["PRICE_TO_EMA50"] = (df["Close"] / df["EMA50"] - 1) * 100
+    df["PRICE_TO_EMA200"] = (df["Close"] / df["EMA200"] - 1) * 100
+    df["PRICE_EXTREME"] = ((df["PRICE_TO_EMA50"] > 20) | (df["PRICE_TO_EMA200"] > 30)).astype(int)
+
     def stoch_rsi(series, period=14, smooth_k=3, smooth_d=3):
         rsi_vals = series
         min_rsi = rsi_vals.rolling(period).min()
         max_rsi = rsi_vals.rolling(period).max()
-        stoch = 100 * (rsi_vals - min_rsi) / (max_rsi - min_rsi)
-        stoch = stoch.replace([np.inf, -np.inf], 50).fillna(50)
+        den = (max_rsi - min_rsi).replace(0, np.nan)
+        stoch = 100 * (rsi_vals - min_rsi) / den
+        stoch = stoch.replace([np.inf, -np.inf], np.nan).fillna(50)
         k = stoch.rolling(smooth_k).mean()
         d = k.rolling(smooth_d).mean()
         return k, d
-    df['STOCH_RSI_K'], df['STOCH_RSI_D'] = stoch_rsi(df['RSI'])
-    df['STOCH_OVERBOUGHT'] = (df['STOCH_RSI_K'] > 80).astype(int)
-    
-    # 6. Hacim / Fiyat uyumsuzluğu
-    df['VOLUME_DIR'] = np.sign(df['Volume'].diff()).fillna(0)
-    df['PRICE_DIR'] = np.sign(df['Close'].diff()).fillna(0)
-    df['WEAK_UPTREND'] = ((df['PRICE_DIR'] > 0) & (df['VOLUME_DIR'] < 0)).astype(int)
-    
+
+    df["STOCH_RSI_K"], df["STOCH_RSI_D"] = stoch_rsi(df["RSI"])
+    df["STOCH_OVERBOUGHT"] = (df["STOCH_RSI_K"] > 80).astype(int)
+
+    df["VOLUME_DIR"] = np.sign(df["Volume"].diff()).fillna(0)
+    df["PRICE_DIR"] = np.sign(df["Close"].diff()).fillna(0)
+    df["WEAK_UPTREND"] = ((df["PRICE_DIR"] > 0) & (df["VOLUME_DIR"] < 0)).astype(int)
+
     return df
 
+
 def detect_speculation(df: pd.DataFrame) -> Dict[str, Any]:
-    """Son duruma göre spekülasyon/aşırı değer skorları üretir."""
     last = df.iloc[-1]
     result = {
-        'overbought_score': 0,
-        'oversold_score': 0,
-        'speculation_score': 0,
-        'details': {}
+        "overbought_score": 0,
+        "oversold_score": 0,
+        "speculation_score": 0,
+        "details": {},
     }
-    
-    # RSI
-    if last['RSI'] > 70:
-        result['overbought_score'] += 25
-        result['details']['rsi'] = f"Aşırı alım (RSI: {last['RSI']:.1f})"
-    elif last['RSI'] < 30:
-        result['oversold_score'] += 25
-        result['details']['rsi'] = f"Aşırı satım (RSI: {last['RSI']:.1f})"
-    
-    # Bollinger
-    if last['BB_OVERBOUGHT']:
-        result['overbought_score'] += 20
-        result['details']['bb'] = "Fiyat Bollinger üst bandında"
-    elif last['BB_OVERSOLD']:
-        result['oversold_score'] += 20
-        result['details']['bb'] = "Fiyat Bollinger alt bandında"
-    
-    # Stokastik RSI
-    if last['STOCH_OVERBOUGHT']:
-        result['overbought_score'] += 15
-        result['details']['stoch'] = "Stokastik RSI aşırı alımda"
-    
-    # Hacim sıçraması (spekülasyon)
-    if last['VOLUME_SPIKE']:
-        result['speculation_score'] += 30
-        result['details']['volume'] = "Ani hacim artışı (spekülasyon)"
-    
-    # Fiyat - EMA uzaklığı (aşırı değer)
-    if last['PRICE_EXTREME']:
-        result['overbought_score'] += 15
-        result['details']['price_extreme'] = f"Fiyat EMA'dan çok uzak (EMA50: %{last['PRICE_TO_EMA50']:.1f})"
-    
-    # Zayıf yükseliş (spekülasyon)
-    if last['WEAK_UPTREND']:
-        result['speculation_score'] += 20
-        result['details']['weak_trend'] = "Fiyat yükselirken hacim düşüyor (zayıflama)"
-    
-    # Toplam skorlar
-    result['overbought_score'] = min(100, result['overbought_score'])
-    result['oversold_score'] = min(100, result['oversold_score'])
-    result['speculation_score'] = min(100, result['speculation_score'])
-    
-    # Genel yorum
-    if result['overbought_score'] >= 50:
-        result['verdict'] = "AŞIRI DEĞERLİ (SAT bölgesi)"
-    elif result['oversold_score'] >= 50:
-        result['verdict'] = "AŞIRI DEĞERSİZ (AL bölgesi)"
-    elif result['speculation_score'] >= 50:
-        result['verdict'] = "SPEKÜLATİF HAREKET (dikkatli olunmalı)"
+
+    if last["RSI"] > 70:
+        result["overbought_score"] += 25
+        result["details"]["rsi"] = f"Aşırı alım (RSI: {last['RSI']:.1f})"
+    elif last["RSI"] < 30:
+        result["oversold_score"] += 25
+        result["details"]["rsi"] = f"Aşırı satım (RSI: {last['RSI']:.1f})"
+
+    if bool(last["BB_OVERBOUGHT"]):
+        result["overbought_score"] += 20
+        result["details"]["bb"] = "Fiyat Bollinger üst bandında"
+    elif bool(last["BB_OVERSOLD"]):
+        result["oversold_score"] += 20
+        result["details"]["bb"] = "Fiyat Bollinger alt bandında"
+
+    if bool(last["STOCH_OVERBOUGHT"]):
+        result["overbought_score"] += 15
+        result["details"]["stoch"] = "Stokastik RSI aşırı alımda"
+
+    if bool(last["VOLUME_SPIKE"]):
+        result["speculation_score"] += 30
+        result["details"]["volume"] = "Ani hacim artışı (spekülasyon)"
+
+    if bool(last["PRICE_EXTREME"]):
+        result["overbought_score"] += 15
+        result["details"]["price_extreme"] = f"Fiyat EMA'dan çok uzak (EMA50: %{last['PRICE_TO_EMA50']:.1f})"
+
+    if bool(last["WEAK_UPTREND"]):
+        result["speculation_score"] += 20
+        result["details"]["weak_trend"] = "Fiyat yükselirken hacim düşüyor (zayıflama)"
+
+    result["overbought_score"] = min(100, result["overbought_score"])
+    result["oversold_score"] = min(100, result["oversold_score"])
+    result["speculation_score"] = min(100, result["speculation_score"])
+
+    if result["overbought_score"] >= 50:
+        result["verdict"] = "AŞIRI DEĞERLİ (SAT bölgesi)"
+    elif result["oversold_score"] >= 50:
+        result["verdict"] = "AŞIRI DEĞERSİZ (AL bölgesi)"
+    elif result["speculation_score"] >= 50:
+        result["verdict"] = "SPEKÜLATİF HAREKET (dikkatli olunmalı)"
     else:
-        result['verdict'] = "NÖTR (normal değer aralığı)"
-    
+        result["verdict"] = "NÖTR (normal değer aralığı)"
+
     return result
 
+
 # =============================
-# Feature builder (güncellenmiş)
+# Feature builder
 # =============================
 def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     df = df.copy()
+
     df["EMA50"] = ema(df["Close"], int(cfg["ema_fast"]))
     df["EMA200"] = ema(df["Close"], int(cfg["ema_slow"]))
     df["RSI"] = rsi(df["Close"], int(cfg["rsi_period"]))
@@ -276,12 +297,18 @@ def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     df["OBV"] = obv(df["Close"], df["Volume"])
     df["OBV_EMA"] = ema(df["OBV"], 21)
     df["VOL_SMA"] = df["Volume"].rolling(int(cfg["vol_sma"])).mean()
+
     df["ATR_PCT"] = (df["ATR"] / df["Close"]).replace([np.inf, -np.inf], np.nan)
-    
-    # Yeni aşırı alım/spekülasyon göstergeleri
+
+    bb_mid_safe = df["BB_mid"].replace(0, np.nan)
+    df["BB_WIDTH"] = ((df["BB_upper"] - df["BB_lower"]) / bb_mid_safe).replace([np.inf, -np.inf], np.nan)
+
+    vol_sma_safe = df["VOL_SMA"].replace(0, np.nan)
+    df["VOL_RATIO"] = (df["Volume"] / vol_sma_safe).replace([np.inf, -np.inf], np.nan)
+
     df = add_overbought_indicators(df)
-    
     return df
+
 
 # =============================
 # Market regime filters
@@ -296,9 +323,10 @@ def get_spy_regime_ok() -> bool:
     last = spy.iloc[-1]
     return bool(last["Close"] > last["EMA200"])
 
+
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
 def get_bist_regime_ok() -> bool:
-    xu100 = yf.download("XU100.IS", period="5y", interval="1d", auto_adjust=True, progress=False)
+    xu100 = yf.download("XU100.IS", period="10y", interval="1d", auto_adjust=True, progress=False)
     xu100 = _flatten_yf(xu100)
     if xu100.empty or len(xu100) < 200:
         return True
@@ -306,15 +334,16 @@ def get_bist_regime_ok() -> bool:
     last = xu100.iloc[-1]
     return bool(last["Close"] > last["EMA200"])
 
+
 # =============================
 # Higher timeframe trend filter
 # =============================
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
 def get_higher_tf_trend(ticker: str, higher_tf_interval: str = "1wk", ema_period: int = 200) -> bool:
     try:
-        df = yf.download(ticker, period="1y", interval=higher_tf_interval, auto_adjust=True, progress=False)
+        df = yf.download(ticker, period="5y", interval=higher_tf_interval, auto_adjust=True, progress=False)
         df = _flatten_yf(df)
-        if df.empty or len(df) < ema_period / 5:
+        if df.empty or len(df) < min(ema_period, 100):
             return True
         df["EMA"] = ema(df["Close"], ema_period)
         last = df.iloc[-1]
@@ -322,10 +351,16 @@ def get_higher_tf_trend(ticker: str, higher_tf_interval: str = "1wk", ema_period
     except Exception:
         return True
 
+
 # =============================
 # Strategy: scoring + checkpoints
 # =============================
-def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool = True, higher_tf_filter_ok: bool = True):
+def signal_with_checkpoints(
+    df: pd.DataFrame,
+    cfg: dict,
+    market_filter_ok: bool = True,
+    higher_tf_filter_ok: bool = True,
+):
     df = df.copy()
 
     liq_ok = (df["Volume"] > df["VOL_SMA"]).fillna(False)
@@ -387,10 +422,16 @@ def signal_with_checkpoints(df: pd.DataFrame, cfg: dict, market_filter_ok: bool 
     }
     return df, cp
 
+
 # =============================
-# Backtest (long-only) + ADVANCED EXITS
+# Backtest (long-only) + advanced exits
 # =============================
-def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float, benchmark_returns: Optional[pd.Series] = None):
+def backtest_long_only(
+    df: pd.DataFrame,
+    cfg: dict,
+    risk_free_annual: float,
+    benchmark_returns: Optional[pd.Series] = None,
+):
     df = df.copy()
     entry_sig = df["ENTRY"].shift(1).fillna(0).astype(int)
     exit_sig = df["EXIT"].shift(1).fillna(0).astype(int)
@@ -416,7 +457,6 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float, ben
         date = df.index[i]
         price = float(row["Close"])
 
-        # Update dynamic ATR stop
         if shares > 0 and pd.notna(row["ATR"]) and row["ATR"] > 0:
             new_stop = price - cfg["atr_stop_mult"] * float(row["ATR"])
             stop = max(stop, new_stop) if pd.notna(stop) else new_stop
@@ -427,8 +467,7 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float, ben
         if shares > 0:
             bars_held += 1
             stop_hit = pd.notna(stop) and (price <= stop)
-            
-            target_hit = not half_sold and pd.notna(target_price) and (price >= target_price)
+            target_hit = (not half_sold) and pd.notna(target_price) and (price >= target_price)
             time_stop_hit = (bars_held >= time_stop_bars) and (price < entry_price)
 
             if target_hit:
@@ -440,9 +479,9 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float, ben
                 shares -= sell_shares
                 half_sold = True
                 stop = max(stop, entry_price)
-                
+
                 if len(trades) > 0:
-                    trades[-1]["pnl"] = cash + (shares * price * (1-slippage)) - trades[-1]["equity_before"]
+                    trades[-1]["pnl"] = cash + (shares * price * (1 - slippage)) - trades[-1]["equity_before"]
 
             if exit_sig.iloc[i] == 1 or stop_hit or time_stop_hit:
                 sell_price = price * (1 - slippage)
@@ -452,14 +491,14 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float, ben
 
                 trades[-1]["exit_date"] = date
                 trades[-1]["exit_price"] = sell_price
-                
+
                 if stop_hit:
                     reason = "STOP"
                 elif time_stop_hit:
                     reason = "TIME_STOP"
                 else:
                     reason = "RULE_EXIT"
-                    
+
                 trades[-1]["exit_reason"] = reason
                 trades[-1]["pnl"] = cash - trades[-1]["equity_before"]
 
@@ -476,6 +515,7 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float, ben
         if shares == 0 and entry_sig.iloc[i] == 1 and pd.notna(row["ATR"]) and row["ATR"] > 0:
             risk_cash = equity * cfg["risk_per_trade"]
             stop_dist = cfg["atr_stop_mult"] * float(row["ATR"])
+
             if stop_dist > 0:
                 qty = risk_cash / stop_dist
                 buy_price = price * (1 + slippage)
@@ -529,8 +569,7 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float, ben
     mdd = max_drawdown(eq)
     calmar = float(ann_return / abs(mdd)) if mdd < 0 else 0.0
 
-    # NEW METRICS
-    if benchmark_returns is not None and len(benchmark_returns) == len(ret):
+    if benchmark_returns is not None:
         common_dates = ret.index.intersection(benchmark_returns.index)
         if len(common_dates) > 5:
             r_aligned = ret.loc[common_dates]
@@ -544,9 +583,13 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float, ben
             diff = r_aligned - b_aligned
             info_ratio = (diff.mean() * 252) / (diff.std() * np.sqrt(252)) if diff.std() > 0 else 0.0
         else:
-            beta = 1.0; alpha = 0.0; info_ratio = 0.0
+            beta = 1.0
+            alpha = 0.0
+            info_ratio = 0.0
     else:
-        beta = 1.0; alpha = 0.0; info_ratio = 0.0
+        beta = 1.0
+        alpha = 0.0
+        info_ratio = 0.0
 
     peak = eq.cummax()
     drawdown_pct = (eq - peak) / peak
@@ -569,7 +612,6 @@ def backtest_long_only(df: pd.DataFrame, cfg: dict, risk_free_annual: float, ben
         else:
             profit_factor = 0.0
 
-    # Kelly Criterion
     if not tdf.empty and len(tdf) > 5:
         win_rate = (tdf["pnl"] > 0).mean()
         avg_win = tdf.loc[tdf["pnl"] > 0, "pnl"].mean() if win_rate > 0 else 0
@@ -613,6 +655,7 @@ def _fix_debt_to_equity(x: float) -> float:
         return x / 100.0
     return x
 
+
 @st.cache_data(ttl=12 * 3600, show_spinner=False)
 def fetch_fundamentals_generic(ticker: str, market: str) -> dict:
     t = yf.Ticker(ticker)
@@ -645,63 +688,117 @@ def fetch_fundamentals_generic(ticker: str, market: str) -> dict:
     out["debtToEquity"] = _fix_debt_to_equity(out["debtToEquity"])
     return out
 
+
 def fundamental_score_row(row: dict, mode: str, thresholds: dict) -> Tuple[float, dict, bool]:
     b = {}
+
     def ok(name, cond, weight, available: bool):
-        b[name] = {"ok": bool(cond) if available else False, "weight": weight, "available": bool(available)}
+        b[name] = {
+            "ok": bool(cond) if available else False,
+            "weight": weight,
+            "available": bool(available),
+        }
         return (weight if (available and cond) else 0.0), (weight if available else 0.0), (1 if available else 0)
 
     score = 0.0
     total_w = 0.0
     avail_cnt = 0
     ok_cnt = 0
+
     def A(x):
         return pd.notna(x)
 
     if mode == "Quality":
         s, tw, ac = ok("ROE", A(row["returnOnEquity"]) and row["returnOnEquity"] >= thresholds["roe"], 20, A(row["returnOnEquity"]))
-        score += s; total_w += tw; avail_cnt += ac; ok_cnt += (1 if (A(row["returnOnEquity"]) and row["returnOnEquity"] >= thresholds["roe"]) else 0)
+        score += s
+        total_w += tw
+        avail_cnt += ac
+        ok_cnt += (1 if (A(row["returnOnEquity"]) and row["returnOnEquity"] >= thresholds["roe"]) else 0)
 
         s, tw, ac = ok("Op Margin", A(row["operatingMargins"]) and row["operatingMargins"] >= thresholds["op_margin"], 15, A(row["operatingMargins"]))
-        score += s; total_w += tw; avail_cnt += ac; ok_cnt += (1 if (A(row["operatingMargins"]) and row["operatingMargins"] >= thresholds["op_margin"]) else 0)
+        score += s
+        total_w += tw
+        avail_cnt += ac
+        ok_cnt += (1 if (A(row["operatingMargins"]) and row["operatingMargins"] >= thresholds["op_margin"]) else 0)
 
         s, tw, ac = ok("Debt/Equity", A(row["debtToEquity"]) and row["debtToEquity"] <= thresholds["dte"], 20, A(row["debtToEquity"]))
-        score += s; total_w += tw; avail_cnt += ac; ok_cnt += (1 if (A(row["debtToEquity"]) and row["debtToEquity"] <= thresholds["dte"]) else 0)
+        score += s
+        total_w += tw
+        avail_cnt += ac
+        ok_cnt += (1 if (A(row["debtToEquity"]) and row["debtToEquity"] <= thresholds["dte"]) else 0)
 
         s, tw, ac = ok("Profit Margin", A(row["profitMargins"]) and row["profitMargins"] >= thresholds["profit_margin"], 15, A(row["profitMargins"]))
-        score += s; total_w += tw; avail_cnt += ac; ok_cnt += (1 if (A(row["profitMargins"]) and row["profitMargins"] >= thresholds["profit_margin"]) else 0)
+        score += s
+        total_w += tw
+        avail_cnt += ac
+        ok_cnt += (1 if (A(row["profitMargins"]) and row["profitMargins"] >= thresholds["profit_margin"]) else 0)
 
         s, tw, ac = ok("FCF", A(row["freeCashflow"]) and row["freeCashflow"] > 0, 30, A(row["freeCashflow"]))
-        score += s; total_w += tw; avail_cnt += ac; ok_cnt += (1 if (A(row["freeCashflow"]) and row["freeCashflow"] > 0) else 0)
+        score += s
+        total_w += tw
+        avail_cnt += ac
+        ok_cnt += (1 if (A(row["freeCashflow"]) and row["freeCashflow"] > 0) else 0)
 
     elif mode == "Value":
         s, tw, ac = ok("Forward P/E", A(row["forwardPE"]) and row["forwardPE"] <= thresholds["fpe"], 30, A(row["forwardPE"]))
-        score += s; total_w += tw; avail_cnt += ac; ok_cnt += (1 if (A(row["forwardPE"]) and row["forwardPE"] <= thresholds["fpe"]) else 0)
+        score += s
+        total_w += tw
+        avail_cnt += ac
+        ok_cnt += (1 if (A(row["forwardPE"]) and row["forwardPE"] <= thresholds["fpe"]) else 0)
 
         s, tw, ac = ok("PEG", A(row["pegRatio"]) and row["pegRatio"] <= thresholds["peg"], 20, A(row["pegRatio"]))
-        score += s; total_w += tw; avail_cnt += ac; ok_cnt += (1 if (A(row["pegRatio"]) and row["pegRatio"] <= thresholds["peg"]) else 0)
+        score += s
+        total_w += tw
+        avail_cnt += ac
+        ok_cnt += (1 if (A(row["pegRatio"]) and row["pegRatio"] <= thresholds["peg"]) else 0)
 
-        s, tw, ac = ok("P/S", A(row["priceToSalesTrailing12Months"]) and row["priceToSalesTrailing12Months"] <= thresholds["ps"], 20, A(row["priceToSalesTrailing12Months"]))
-        score += s; total_w += tw; avail_cnt += ac; ok_cnt += (1 if (A(row["priceToSalesTrailing12Months"]) and row["priceToSalesTrailing12Months"] <= thresholds["ps"]) else 0)
+        s, tw, ac = ok(
+            "P/S",
+            A(row["priceToSalesTrailing12Months"]) and row["priceToSalesTrailing12Months"] <= thresholds["ps"],
+            20,
+            A(row["priceToSalesTrailing12Months"]),
+        )
+        score += s
+        total_w += tw
+        avail_cnt += ac
+        ok_cnt += (1 if (A(row["priceToSalesTrailing12Months"]) and row["priceToSalesTrailing12Months"] <= thresholds["ps"]) else 0)
 
         s, tw, ac = ok("P/B", A(row["priceToBook"]) and row["priceToBook"] <= thresholds["pb"], 15, A(row["priceToBook"]))
-        score += s; total_w += tw; avail_cnt += ac; ok_cnt += (1 if (A(row["priceToBook"]) and row["priceToBook"] <= thresholds["pb"]) else 0)
+        score += s
+        total_w += tw
+        avail_cnt += ac
+        ok_cnt += (1 if (A(row["priceToBook"]) and row["priceToBook"] <= thresholds["pb"]) else 0)
 
         s, tw, ac = ok("ROE", A(row["returnOnEquity"]) and row["returnOnEquity"] >= thresholds["roe"], 15, A(row["returnOnEquity"]))
-        score += s; total_w += tw; avail_cnt += ac; ok_cnt += (1 if (A(row["returnOnEquity"]) and row["returnOnEquity"] >= thresholds["roe"]) else 0)
+        score += s
+        total_w += tw
+        avail_cnt += ac
+        ok_cnt += (1 if (A(row["returnOnEquity"]) and row["returnOnEquity"] >= thresholds["roe"]) else 0)
 
     else:  # Growth
         s, tw, ac = ok("Revenue Growth", A(row["revenueGrowth"]) and row["revenueGrowth"] >= thresholds["rev_g"], 35, A(row["revenueGrowth"]))
-        score += s; total_w += tw; avail_cnt += ac; ok_cnt += (1 if (A(row["revenueGrowth"]) and row["revenueGrowth"] >= thresholds["rev_g"]) else 0)
+        score += s
+        total_w += tw
+        avail_cnt += ac
+        ok_cnt += (1 if (A(row["revenueGrowth"]) and row["revenueGrowth"] >= thresholds["rev_g"]) else 0)
 
         s, tw, ac = ok("Earnings Growth", A(row["earningsGrowth"]) and row["earningsGrowth"] >= thresholds["earn_g"], 35, A(row["earningsGrowth"]))
-        score += s; total_w += tw; avail_cnt += ac; ok_cnt += (1 if (A(row["earningsGrowth"]) and row["earningsGrowth"] >= thresholds["earn_g"]) else 0)
+        score += s
+        total_w += tw
+        avail_cnt += ac
+        ok_cnt += (1 if (A(row["earningsGrowth"]) and row["earningsGrowth"] >= thresholds["earn_g"]) else 0)
 
         s, tw, ac = ok("Op Margin", A(row["operatingMargins"]) and row["operatingMargins"] >= thresholds["op_margin"], 15, A(row["operatingMargins"]))
-        score += s; total_w += tw; avail_cnt += ac; ok_cnt += (1 if (A(row["operatingMargins"]) and row["operatingMargins"] >= thresholds["op_margin"]) else 0)
+        score += s
+        total_w += tw
+        avail_cnt += ac
+        ok_cnt += (1 if (A(row["operatingMargins"]) and row["operatingMargins"] >= thresholds["op_margin"]) else 0)
 
         s, tw, ac = ok("Debt/Equity", A(row["debtToEquity"]) and row["debtToEquity"] <= thresholds["dte"], 15, A(row["debtToEquity"]))
-        score += s; total_w += tw; avail_cnt += ac; ok_cnt += (1 if (A(row["debtToEquity"]) and row["debtToEquity"] <= thresholds["dte"]) else 0)
+        score += s
+        total_w += tw
+        avail_cnt += ac
+        ok_cnt += (1 if (A(row["debtToEquity"]) and row["debtToEquity"] <= thresholds["dte"]) else 0)
 
     score_pct = (score / total_w) * 100 if total_w > 0 else 0.0
     min_coverage = int(thresholds.get("min_coverage", 3))
@@ -721,6 +818,7 @@ def local_levels(close: pd.Series, lookback: int = 120):
     levels += [float(s.tail(20).max()), float(s.tail(20).min())]
     levels = sorted(list(set([round(float(x), 2) for x in levels if np.isfinite(x)])))
     return levels
+
 
 def target_price_band(df: pd.DataFrame):
     last = df.iloc[-1]
@@ -742,6 +840,7 @@ def target_price_band(df: pd.DataFrame):
 
     return {"base": px_close, "bull": (bull1, bull2, r1), "bear": (bear1, bear2, s1), "levels": lv}
 
+
 # =============================
 # Live price helper
 # =============================
@@ -760,68 +859,6 @@ def get_live_price(ticker: str) -> dict:
         pass
     return out
 
-# =============================
-# Sentiment Analysis via Google News RSS + Gemini
-# =============================
-def get_news_sentiment(ticker: str, company_name: str = "", gemini_model: str = "gemini-1.5-flash", gemini_temp: float = 0.2) -> Dict[str, Any]:
-    if not FEEDPARSER_OK:
-        return {"error": "feedparser kütüphanesi yok. Lütfen 'pip install feedparser' yapın.", "sentiment": None, "summary": ""}
-    try:
-        if company_name and company_name != "":
-            query = f"{company_name} stock"
-        else:
-            query = f"{ticker} stock"
-        
-        url = f"https://news.google.com/rss/search?q={requests.utils.quote(query)}&hl=en-US&gl=US&ceid=US:en"
-        feed = feedparser.parse(url)
-        
-        if not feed.entries:
-            return {"error": "No news found", "sentiment": None, "summary": ""}
-        
-        titles = [entry.title for entry in feed.entries[:10]]
-        
-        prompt = f"""Aşağıdaki haber başlıklarının duygu analizini yap (pozitif, negatif, nötr). 
-        Sonuçları şu formatta ver:
-        - Pozitif: X haber
-        - Negatif: Y haber
-        - Nötr: Z haber
-        - Bileşik skor: (pozitif - negatif) / toplam (örneğin 0.35)
-        - Kısa bir özet (2 cümle)
-
-        Haber Başlıkları:
-        {chr(10).join([f"- {title}" for title in titles])}
-        """
-        
-        response = gemini_generate_text(
-            prompt=prompt,
-            model=gemini_model,
-            temperature=gemini_temp,
-            max_output_tokens=512,
-            image_bytes=None
-        )
-        
-        import re
-        pos_match = re.search(r'Pozitif:?\s*(\d+)', response, re.IGNORECASE)
-        neg_match = re.search(r'Negatif:?\s*(\d+)', response, re.IGNORECASE)
-        neu_match = re.search(r'Nötr:?\s*(\d+)', response, re.IGNORECASE)
-        
-        pos = int(pos_match.group(1)) if pos_match else 0
-        neg = int(neg_match.group(1)) if neg_match else 0
-        neu = int(neu_match.group(1)) if neu_match else 0
-        total = pos + neg + neu
-        compound = (pos - neg) / total if total > 0 else 0
-        
-        return {
-            "error": None,
-            "sentiment": compound,
-            "summary": response,
-            "pos": pos/total if total>0 else 0,
-            "neg": neg/total if total>0 else 0,
-            "neu": neu/total if total>0 else 0,
-            "titles": titles[:3]
-        }
-    except Exception as e:
-        return {"error": str(e), "sentiment": None, "summary": ""}
 
 # =============================
 # Gemini helpers
@@ -835,6 +872,7 @@ def _get_secret(name: str, default: str = "") -> str:
     except Exception:
         return default
 
+
 def _http_post_json(url: str, payload: dict, timeout: int = 60) -> dict:
     r = requests.post(url, json=payload, timeout=timeout)
     try:
@@ -845,6 +883,7 @@ def _http_post_json(url: str, payload: dict, timeout: int = 60) -> dict:
         if "error" not in data:
             data["error"] = {"message": f"HTTP {r.status_code}", "text": str(data)[:500]}
     return data
+
 
 def _extract_gemini_text(resp: dict) -> str:
     if not isinstance(resp, dict):
@@ -863,6 +902,7 @@ def _extract_gemini_text(resp: dict) -> str:
             texts.append(p["text"])
     return "\n".join(texts).strip() if texts else "Gemini: metin üretmedi."
 
+
 def gemini_generate_text(
     *,
     prompt: str,
@@ -876,23 +916,98 @@ def gemini_generate_text(
         return "GEMINI_API_KEY bulunamadı. Streamlit Cloud > Settings > Secrets içine GEMINI_API_KEY=... ekleyin."
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-    
+
     parts = [{"text": prompt}]
     if image_bytes:
-        b64_img = base64.b64encode(image_bytes).decode('utf-8')
-        parts.append({
-            "inlineData": {
-                "mimeType": "image/png",
-                "data": b64_img
+        b64_img = base64.b64encode(image_bytes).decode("utf-8")
+        parts.append(
+            {
+                "inlineData": {
+                    "mimeType": "image/png",
+                    "data": b64_img,
+                }
             }
-        })
+        )
 
     payload = {
         "contents": [{"role": "user", "parts": parts}],
-        "generationConfig": {"temperature": float(temperature), "maxOutputTokens": int(max_output_tokens)},
+        "generationConfig": {
+            "temperature": float(temperature),
+            "maxOutputTokens": int(max_output_tokens),
+        },
     }
     resp = _http_post_json(url, payload, timeout=90)
     return _extract_gemini_text(resp)
+
+
+# =============================
+# Sentiment Analysis via Google News RSS + Gemini
+# =============================
+@st.cache_data(ttl=30 * 60, show_spinner=False)
+def get_news_sentiment(
+    ticker: str,
+    company_name: str = "",
+    gemini_model: str = "gemini-1.5-flash",
+    gemini_temp: float = 0.2,
+) -> Dict[str, Any]:
+    if not FEEDPARSER_OK:
+        return {"error": "feedparser kütüphanesi yok. Lütfen 'pip install feedparser' yapın.", "sentiment": None, "summary": ""}
+
+    try:
+        if company_name and company_name != "":
+            query = f"{company_name} stock"
+        else:
+            query = f"{ticker} stock"
+
+        url = f"https://news.google.com/rss/search?q={requests.utils.quote(query)}&hl=en-US&gl=US&ceid=US:en"
+        feed = feedparser.parse(url)
+
+        if not feed.entries:
+            return {"error": "No news found", "sentiment": None, "summary": ""}
+
+        titles = [entry.title for entry in feed.entries[:10]]
+
+        prompt = f"""Aşağıdaki haber başlıklarının duygu analizini yap (pozitif, negatif, nötr).
+Sonuçları şu formatta ver:
+- Pozitif: X haber
+- Negatif: Y haber
+- Nötr: Z haber
+- Bileşik skor: (pozitif - negatif) / toplam (örneğin 0.35)
+- Kısa bir özet (2 cümle)
+
+Haber Başlıkları:
+{chr(10).join([f"- {title}" for title in titles])}
+"""
+
+        response = gemini_generate_text(
+            prompt=prompt,
+            model=gemini_model,
+            temperature=gemini_temp,
+            max_output_tokens=512,
+            image_bytes=None,
+        )
+
+        pos_match = re.search(r"Pozitif:?\s*(\d+)", response, re.IGNORECASE)
+        neg_match = re.search(r"Negatif:?\s*(\d+)", response, re.IGNORECASE)
+        neu_match = re.search(r"Nötr:?\s*(\d+)", response, re.IGNORECASE)
+
+        pos = int(pos_match.group(1)) if pos_match else 0
+        neg = int(neg_match.group(1)) if neg_match else 0
+        neu = int(neu_match.group(1)) if neu_match else 0
+        total = pos + neg + neu
+        compound = (pos - neg) / total if total > 0 else 0
+
+        return {
+            "error": None,
+            "sentiment": compound,
+            "summary": response,
+            "pos": pos / total if total > 0 else 0,
+            "neg": neg / total if total > 0 else 0,
+            "neu": neu / total if total > 0 else 0,
+            "titles": titles[:3],
+        }
+    except Exception as e:
+        return {"error": str(e), "sentiment": None, "summary": ""}
 
 
 # =============================
@@ -910,6 +1025,7 @@ def _swing_points(high: pd.Series, low: pd.Series, left: int = 2, right: int = 2
         if low.iloc[i] == lwin.min():
             ls.append((low.index[i], float(low.iloc[i])))
     return hs, ls
+
 
 def price_action_pack(df: pd.DataFrame, last_n: int = 20) -> dict:
     use = df.tail(last_n).copy()
@@ -940,7 +1056,6 @@ def price_action_pack(df: pd.DataFrame, last_n: int = 20) -> dict:
     bull_break = (last_close > res) and (prev_close <= res)
     bear_break = (last_close < sup) and (prev_close >= sup)
 
-    vol = None
     vol_ok = None
     if "Volume" in use.columns:
         vol = use["Volume"].astype(float)
@@ -999,14 +1114,37 @@ def price_action_pack(df: pd.DataFrame, last_n: int = 20) -> dict:
     }
     return pack
 
+
 def df_snapshot_for_llm(df: pd.DataFrame, n: int = 140) -> dict:
     use_cols = [
-        "Open", "High", "Low", "Close", "Volume",
-        "EMA50", "EMA200", "RSI", "MACD", "MACD_signal",
-        "MACD_hist", "BB_mid", "BB_upper", "BB_lower",
-        "ATR", "ATR_PCT", "VOL_SMA", "SCORE", "ENTRY", "EXIT",
-        # Yeni eklenenler:
-        "RSI_OVERBOUGHT", "BB_OVERBOUGHT", "VOLUME_SPIKE", "PRICE_EXTREME", "STOCH_OVERBOUGHT", "WEAK_UPTREND"
+        "Open",
+        "High",
+        "Low",
+        "Close",
+        "Volume",
+        "EMA50",
+        "EMA200",
+        "RSI",
+        "MACD",
+        "MACD_signal",
+        "MACD_hist",
+        "BB_mid",
+        "BB_upper",
+        "BB_lower",
+        "ATR",
+        "ATR_PCT",
+        "VOL_SMA",
+        "VOL_RATIO",
+        "BB_WIDTH",
+        "SCORE",
+        "ENTRY",
+        "EXIT",
+        "RSI_OVERBOUGHT",
+        "BB_OVERBOUGHT",
+        "VOLUME_SPIKE",
+        "PRICE_EXTREME",
+        "STOCH_OVERBOUGHT",
+        "WEAK_UPTREND",
     ]
     cols = [c for c in use_cols if c in df.columns]
     tail = df[cols].tail(n).copy()
@@ -1018,14 +1156,37 @@ def df_snapshot_for_llm(df: pd.DataFrame, n: int = 140) -> dict:
         "rows": tail.to_dict(orient="records"),
     }
 
+
 # =============================
 # Presets
 # =============================
 PRESETS = {
-    "Defansif": {"rsi_entry_level": 52, "rsi_exit_level": 46, "atr_pct_max": 0.06, "atr_stop_mult": 3.5, "time_stop_bars": 15, "take_profit_mult": 2.5},
-    "Dengeli": {"rsi_entry_level": 50, "rsi_exit_level": 45, "atr_pct_max": 0.08, "atr_stop_mult": 3.0, "time_stop_bars": 10, "take_profit_mult": 2.0},
-    "Agresif": {"rsi_entry_level": 48, "rsi_exit_level": 43, "atr_pct_max": 0.10, "atr_stop_mult": 2.5, "time_stop_bars": 7, "take_profit_mult": 1.5},
+    "Defansif": {
+        "rsi_entry_level": 52,
+        "rsi_exit_level": 46,
+        "atr_pct_max": 0.06,
+        "atr_stop_mult": 3.5,
+        "time_stop_bars": 15,
+        "take_profit_mult": 2.5,
+    },
+    "Dengeli": {
+        "rsi_entry_level": 50,
+        "rsi_exit_level": 45,
+        "atr_pct_max": 0.08,
+        "atr_stop_mult": 3.0,
+        "time_stop_bars": 10,
+        "take_profit_mult": 2.0,
+    },
+    "Agresif": {
+        "rsi_entry_level": 48,
+        "rsi_exit_level": 43,
+        "atr_pct_max": 0.10,
+        "atr_stop_mult": 2.5,
+        "time_stop_bars": 7,
+        "take_profit_mult": 1.5,
+    },
 }
+
 
 # =============================
 # Screener row finder
@@ -1033,16 +1194,21 @@ PRESETS = {
 def find_screener_row(sdf: pd.DataFrame, ticker: str) -> Optional[Dict[str, Any]]:
     if sdf is None or sdf.empty or "ticker" not in sdf.columns:
         return None
+
     t = (ticker or "").upper().strip()
-    t_naked = t.replace(".IS", "")
+    t_naked = naked_ticker(t)
+
     tmp = sdf.copy()
     tmp["_tk"] = tmp["ticker"].astype(str).str.upper().str.strip()
     tmp["_tk_naked"] = tmp["_tk"].str.replace(".IS", "", regex=False)
+
     m = tmp[(tmp["_tk"] == t) | (tmp["_tk"] == f"{t_naked}.IS") | (tmp["_tk_naked"] == t_naked)]
     if m.empty:
         return None
+
     row = m.iloc[0].drop(labels=["_tk", "_tk_naked"], errors="ignore").to_dict()
     return row
+
 
 def merge_fa_row(
     screener_row: Optional[Dict[str, Any]],
@@ -1062,12 +1228,26 @@ def merge_fa_row(
         out["FA_coverage"] = fa_eval.get("coverage")
     return out
 
+
 # =============================
-# REPORT EXPORT (güncellendi)
+# REPORT EXPORT
 # =============================
-def build_html_report(title: str, meta: dict, checkpoints: dict, metrics: dict, tp: dict, rr_info: dict, figs: Dict[str, go.Figure], fa_row: Optional[Dict[str, Any]] = None, gemini_insight: Optional[str] = None, pa_pack: Optional[Dict[str, Any]] = None, sentiment_summary: Optional[str] = None, overbought_result: Optional[Dict[str, Any]] = None) -> bytes:
+def build_html_report(
+    title: str,
+    meta: dict,
+    checkpoints: dict,
+    metrics: dict,
+    tp: dict,
+    rr_info: dict,
+    figs: Dict[str, go.Figure],
+    fa_row: Optional[Dict[str, Any]] = None,
+    gemini_insight: Optional[str] = None,
+    pa_pack: Optional[Dict[str, Any]] = None,
+    sentiment_summary: Optional[str] = None,
+    overbought_result: Optional[Dict[str, Any]] = None,
+) -> bytes:
     def esc(x):
-        return (str(x).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+        return str(x).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
     fig_blocks = []
     first = True
@@ -1084,12 +1264,25 @@ def build_html_report(title: str, meta: dict, checkpoints: dict, metrics: dict, 
     levels_txt = ", ".join([f"{x:.2f}" for x in levels[:120]])
 
     show_cols = [
-        ("ticker", "Ticker"), ("longName", "Name"), ("FA_pass", "FA_pass"), ("FA_score", "FA_score"),
-        ("FA_ok_count", "FA_ok_count"), ("FA_coverage", "FA_coverage"), ("sector", "Sector"),
-        ("industry", "Industry"), ("trailingPE", "Trailing PE"), ("forwardPE", "Forward PE"),
-        ("pegRatio", "PEG"), ("priceToSalesTrailing12Months", "P/S"), ("priceToBook", "P/B"),
-        ("returnOnEquity", "ROE"), ("operatingMargins", "Op Margin"), ("profitMargins", "Profit Margin"),
-        ("debtToEquity", "Debt/Equity"), ("revenueGrowth", "Revenue Growth"), ("earningsGrowth", "Earnings Growth"),
+        ("ticker", "Ticker"),
+        ("longName", "Name"),
+        ("FA_pass", "FA_pass"),
+        ("FA_score", "FA_score"),
+        ("FA_ok_count", "FA_ok_count"),
+        ("FA_coverage", "FA_coverage"),
+        ("sector", "Sector"),
+        ("industry", "Industry"),
+        ("trailingPE", "Trailing PE"),
+        ("forwardPE", "Forward PE"),
+        ("pegRatio", "PEG"),
+        ("priceToSalesTrailing12Months", "P/S"),
+        ("priceToBook", "P/B"),
+        ("returnOnEquity", "ROE"),
+        ("operatingMargins", "Op Margin"),
+        ("profitMargins", "Profit Margin"),
+        ("debtToEquity", "Debt/Equity"),
+        ("revenueGrowth", "Revenue Growth"),
+        ("earningsGrowth", "Earnings Growth"),
         ("marketCap", "Market Cap"),
     ]
 
@@ -1101,11 +1294,10 @@ def build_html_report(title: str, meta: dict, checkpoints: dict, metrics: dict, 
     else:
         fa_rows_html = "<tr><td colspan='2'>Screener satırı bulunamadı (screener çalıştırılmamış olabilir).</td></tr>"
 
-    # Aşırı alım/spekülasyon bölümü
     overbought_html = ""
     if overbought_result:
         ob_details = "<ul>"
-        for k, v in overbought_result.get('details', {}).items():
+        for _, v in overbought_result.get("details", {}).items():
             ob_details += f"<li>{esc(v)}</li>"
         ob_details += "</ul>"
         overbought_html = f"""
@@ -1121,15 +1313,30 @@ def build_html_report(title: str, meta: dict, checkpoints: dict, metrics: dict, 
 
     gemini_block = ""
     if gemini_insight:
-        gemini_block = f"""<div class="card" style="margin-top:16px;"><h2>Gemini — Chart & Price Action Insight</h2><pre style="white-space:pre-wrap; font-family:inherit;">{esc(gemini_insight)}</pre></div>"""
+        gemini_block = f"""
+        <div class="card" style="margin-top:16px;">
+            <h2>Gemini — Chart & Price Action Insight</h2>
+            <pre style="white-space:pre-wrap; font-family:inherit;">{esc(gemini_insight)}</pre>
+        </div>
+        """
 
     pa_block = ""
     if pa_pack:
-        pa_block = f"""<div class="card" style="margin-top:16px;"><h2>Price Action Pack (Last {esc(pa_pack.get('last_n',''))} Bars)</h2><pre style="white-space:pre-wrap; font-family:monospace; font-size:12px;">{esc(json.dumps(pa_pack, ensure_ascii=False, indent=2))}</pre></div>"""
+        pa_block = f"""
+        <div class="card" style="margin-top:16px;">
+            <h2>Price Action Pack (Last {esc(pa_pack.get('last_n',''))} Bars)</h2>
+            <pre style="white-space:pre-wrap; font-family:monospace; font-size:12px;">{esc(json.dumps(pa_pack, ensure_ascii=False, indent=2))}</pre>
+        </div>
+        """
 
     sentiment_block = ""
     if sentiment_summary:
-        sentiment_block = f"""<div class="card" style="margin-top:16px;"><h2>Haber Duygu Analizi (Google News + Gemini)</h2><pre>{esc(sentiment_summary)}</pre></div>"""
+        sentiment_block = f"""
+        <div class="card" style="margin-top:16px;">
+            <h2>Haber Duygu Analizi (Google News + Gemini)</h2>
+            <pre>{esc(sentiment_summary)}</pre>
+        </div>
+        """
 
     html = f"""
 <!doctype html>
@@ -1206,11 +1413,13 @@ def build_html_report(title: str, meta: dict, checkpoints: dict, metrics: dict, 
 """
     return html.encode("utf-8")
 
+
 def _plotly_fig_to_png_bytes(fig: go.Figure) -> Optional[bytes]:
     try:
         return fig.to_image(format="png", scale=2)
     except Exception:
         return None
+
 
 def _pdf_write_lines(c, lines: List[str], x: float, y: float, lh: float, bottom: float):
     for line in lines:
@@ -1221,97 +1430,268 @@ def _pdf_write_lines(c, lines: List[str], x: float, y: float, lh: float, bottom:
         y -= lh
     return y
 
+
 def generate_pdf_report(
-    *, title: str, subtitle: str, meta: dict, checkpoints: dict, ta_summary: dict, target_band: dict, rr_info: dict, backtest_metrics: dict, fa_row: Optional[Dict[str, Any]], levels: Optional[List[float]], trades_df: Optional[pd.DataFrame], figs: Optional[Dict[str, go.Figure]], include_charts: bool = True, gemini_insight: Optional[str] = None, pa_pack: Optional[Dict[str, Any]] = None, sentiment_summary: Optional[str] = None, overbought_result: Optional[Dict[str, Any]] = None,
+    *,
+    title: str,
+    subtitle: str,
+    meta: dict,
+    checkpoints: dict,
+    ta_summary: dict,
+    target_band: dict,
+    rr_info: dict,
+    backtest_metrics: dict,
+    fa_row: Optional[Dict[str, Any]],
+    levels: Optional[List[float]],
+    trades_df: Optional[pd.DataFrame],
+    figs: Optional[Dict[str, go.Figure]],
+    include_charts: bool = True,
+    gemini_insight: Optional[str] = None,
+    pa_pack: Optional[Dict[str, Any]] = None,
+    sentiment_summary: Optional[str] = None,
+    overbought_result: Optional[Dict[str, Any]] = None,
 ) -> Optional[bytes]:
-    if not REPORTLAB_OK: return None
-    buf = BytesIO(); c = canvas.Canvas(buf, pagesize=A4); W, H = A4
-    left = 1.6 * cm; right = W - 1.6 * cm; top = H - 1.6 * cm; bottom = 1.6 * cm; y = top
-    c.setFont("Helvetica-Bold", 16); c.drawString(left, y, title[:90]); y -= 18
-    c.setFont("Helvetica", 10); c.drawString(left, y, subtitle[:140]); y -= 14
+    if not REPORTLAB_OK:
+        return None
+
+    buf = BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    W, H = A4
+    left = 1.6 * cm
+    right = W - 1.6 * cm
+    top = H - 1.6 * cm
+    bottom = 1.6 * cm
+    y = top
+
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(left, y, title[:90])
+    y -= 18
+
+    c.setFont("Helvetica", 10)
+    c.drawString(left, y, subtitle[:140])
+    y -= 14
+
     c.setFont("Helvetica", 9)
-    y = _pdf_write_lines(c, [f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}", f"Market: {meta.get('market','')} | Ticker: {meta.get('ticker','')} | Interval: {meta.get('interval','')} | Period: {meta.get('period','')}", f"Preset: {meta.get('preset','')} | EMA: {meta.get('ema_fast','')}/{meta.get('ema_slow','')} | RSI: {meta.get('rsi_period','')} | BB: {meta.get('bb_period','')}/{meta.get('bb_std','')} | ATR: {meta.get('atr_period','')} | VolSMA: {meta.get('vol_sma','')}"], left, y, 12, bottom)
+    y = _pdf_write_lines(
+        c,
+        [
+            f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Market: {meta.get('market','')} | Ticker: {meta.get('ticker','')} | Interval: {meta.get('interval','')} | Period: {meta.get('period','')}",
+            f"Preset: {meta.get('preset','')} | EMA: {meta.get('ema_fast','')}/{meta.get('ema_slow','')} | RSI: {meta.get('rsi_period','')} | BB: {meta.get('bb_period','')}/{meta.get('bb_std','')} | ATR: {meta.get('atr_period','')} | VolSMA: {meta.get('vol_sma','')}",
+        ],
+        left,
+        y,
+        12,
+        bottom,
+    )
     y -= 6
-    c.setFont("Helvetica-Bold", 12); c.drawString(left, y, "Technical Summary"); y -= 14
+
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(left, y, "Technical Summary")
+    y -= 14
+
     c.setFont("Helvetica", 9)
-    y = _pdf_write_lines(c, [f"Recommendation: {ta_summary.get('rec','')}", f"Last Close (bar): {ta_summary.get('close','N/A')} | Live/Last: {ta_summary.get('live','N/A')}", f"Score: {ta_summary.get('score','N/A')} | RSI: {ta_summary.get('rsi','N/A')} | EMA50: {ta_summary.get('ema50','N/A')} | EMA200: {ta_summary.get('ema200','N/A')} | ATR%: {ta_summary.get('atr_pct','N/A')}"], left, y, 12, bottom)
+    y = _pdf_write_lines(
+        c,
+        [
+            f"Recommendation: {ta_summary.get('rec','')}",
+            f"Last Close (bar): {ta_summary.get('close','N/A')} | Live/Last: {ta_summary.get('live','N/A')}",
+            f"Score: {ta_summary.get('score','N/A')} | RSI: {ta_summary.get('rsi','N/A')} | EMA50: {ta_summary.get('ema50','N/A')} | EMA200: {ta_summary.get('ema200','N/A')} | ATR%: {ta_summary.get('atr_pct','N/A')}",
+        ],
+        left,
+        y,
+        12,
+        bottom,
+    )
     y -= 6
-    c.setFont("Helvetica-Bold", 12); c.drawString(left, y, "Checkpoints (Last Bar)"); y -= 14
-    c.setFont("Helvetica", 9); cp_lines = [f"[{'OK' if v else 'NO'}] {k}" for k, v in checkpoints.items()]
-    y = _pdf_write_lines(c, cp_lines, left, y, 11, bottom); y -= 6
-    
+
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(left, y, "Checkpoints (Last Bar)")
+    y -= 14
+
+    c.setFont("Helvetica", 9)
+    cp_lines = [f"[{'OK' if v else 'NO'}] {k}" for k, v in checkpoints.items()]
+    y = _pdf_write_lines(c, cp_lines, left, y, 11, bottom)
+    y -= 6
+
     if overbought_result:
-        c.setFont("Helvetica-Bold", 12); c.drawString(left, y, "Aşırı Alım / Spekülasyon"); y -= 14
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(left, y, "Aşırı Alım / Spekülasyon")
+        y -= 14
         c.setFont("Helvetica", 9)
         ob_lines = [
             f"Karar: {overbought_result['verdict']}",
             f"Aşırı Alım Skoru: {overbought_result['overbought_score']}/100",
             f"Aşırı Satım Skoru: {overbought_result['oversold_score']}/100",
             f"Spekülasyon Skoru: {overbought_result['speculation_score']}/100",
-            "Detaylar:"
+            "Detaylar:",
         ]
-        for k, v in overbought_result.get('details', {}).items():
+        for _, v in overbought_result.get("details", {}).items():
             ob_lines.append(f"  - {v}")
-        y = _pdf_write_lines(c, ob_lines, left, y, 11, bottom); y -= 6
-    
-    c.setFont("Helvetica-Bold", 12); c.drawString(left, y, "Target Price Band (Scenario)"); y -= 14
+        y = _pdf_write_lines(c, ob_lines, left, y, 11, bottom)
+        y -= 6
+
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(left, y, "Target Price Band (Scenario)")
+    y -= 14
     c.setFont("Helvetica", 9)
-    base = target_band.get("base"); bull = target_band.get("bull"); bear = target_band.get("bear"); rr = rr_info.get("rr"); stop = rr_info.get("stop")
+
+    base = target_band.get("base")
+    bull = target_band.get("bull")
+    bear = target_band.get("bear")
+    rr = rr_info.get("rr")
+    stop = rr_info.get("stop")
+
     band_lines = [f"Base: {fmt_num(base)}"]
-    if bull: band_lines.append(f"Bull: {fmt_num(bull[0])} -> {fmt_num(bull[1])} | Near Resistance: {fmt_num(bull[2])}")
-    else: band_lines.append("Bull: N/A")
-    if bear: band_lines.append(f"Bear: {fmt_num(bear[0])} -> {fmt_num(bear[1])} | Near Support: {fmt_num(bear[2])}")
-    else: band_lines.append("Bear: N/A")
+    if bull:
+        band_lines.append(f"Bull: {fmt_num(bull[0])} -> {fmt_num(bull[1])} | Near Resistance: {fmt_num(bull[2])}")
+    else:
+        band_lines.append("Bull: N/A")
+
+    if bear:
+        band_lines.append(f"Bear: {fmt_num(bear[0])} -> {fmt_num(bear[1])} | Near Support: {fmt_num(bear[2])}")
+    else:
+        band_lines.append("Bear: N/A")
+
     band_lines.append(f"RR (bull1 vs ATR stop): {'N/A' if rr is None else f'1:{rr:.2f}'} | Stop(ATR): {fmt_num(stop)}")
-    y = _pdf_write_lines(c, band_lines, left, y, 12, bottom); y -= 6
-    c.setFont("Helvetica-Bold", 12); c.drawString(left, y, "Levels (Approx.)"); y -= 14
+    y = _pdf_write_lines(c, band_lines, left, y, 12, bottom)
+    y -= 6
+
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(left, y, "Levels (Approx.)")
+    y -= 14
+
     c.setFont("Helvetica", 9)
     lv_lines = [", ".join([fmt_num(x) for x in levels[i : i + 10]]) for i in range(0, len(levels), 10)] if levels else ["N/A"]
-    y = _pdf_write_lines(c, lv_lines, left, y, 11, bottom); y -= 6
-    c.setFont("Helvetica-Bold", 12); c.drawString(left, y, "Backtest Summary (Long-only)"); y -= 14
-    c.setFont("Helvetica", 9); bm = backtest_metrics or {}
-    y = _pdf_write_lines(c, [f"Total Return: {fmt_pct(bm.get('Total Return'))} | Ann Return: {fmt_pct(bm.get('Annualized Return'))} | Ann Vol: {fmt_pct(bm.get('Annualized Volatility'))}", f"Sharpe: {fmt_num(bm.get('Sharpe'), 2)} | Sortino: {fmt_num(bm.get('Sortino'), 2)} | Calmar: {fmt_num(bm.get('Calmar'), 2)}", f"Max DD: {fmt_pct(bm.get('Max Drawdown'))} | Trades: {bm.get('Trades','')} | Win Rate: {fmt_pct(bm.get('Win Rate'))} | Profit Factor: {fmt_num(bm.get('Profit Factor'), 2)}", f"Beta: {fmt_num(bm.get('Beta'),2)} | Alpha: {fmt_num(bm.get('Alpha'),2)} | Info Ratio: {fmt_num(bm.get('Information Ratio'),2)} | Ulcer Index: {fmt_num(bm.get('Ulcer Index'),4)} | Kelly: {fmt_num(bm.get('Kelly % (öneri)'),1)}%"], left, y, 12, bottom)
+    y = _pdf_write_lines(c, lv_lines, left, y, 11, bottom)
     y -= 6
+
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(left, y, "Backtest Summary (Long-only)")
+    y -= 14
+
+    c.setFont("Helvetica", 9)
+    bm = backtest_metrics or {}
+    y = _pdf_write_lines(
+        c,
+        [
+            f"Total Return: {fmt_pct(bm.get('Total Return'))} | Ann Return: {fmt_pct(bm.get('Annualized Return'))} | Ann Vol: {fmt_pct(bm.get('Annualized Volatility'))}",
+            f"Sharpe: {fmt_num(bm.get('Sharpe'), 2)} | Sortino: {fmt_num(bm.get('Sortino'), 2)} | Calmar: {fmt_num(bm.get('Calmar'), 2)}",
+            f"Max DD: {fmt_pct(bm.get('Max Drawdown'))} | Trades: {bm.get('Trades','')} | Win Rate: {fmt_pct(bm.get('Win Rate'))} | Profit Factor: {fmt_num(bm.get('Profit Factor'), 2)}",
+            f"Beta: {fmt_num(bm.get('Beta'),2)} | Alpha: {fmt_num(bm.get('Alpha'),2)} | Info Ratio: {fmt_num(bm.get('Information Ratio'),2)} | Ulcer Index: {fmt_num(bm.get('Ulcer Index'),4)} | Kelly: {fmt_num(bm.get('Kelly % (öneri)'),1)}%",
+        ],
+        left,
+        y,
+        12,
+        bottom,
+    )
+    y -= 6
+
     if sentiment_summary:
-        c.setFont("Helvetica-Bold", 12); c.drawString(left, y, "Haber Duygu Analizi (Google News)"); y -= 14
-        c.setFont("Helvetica", 9); y = _pdf_write_lines(c, sentiment_summary.splitlines(), left, y, 11, bottom); y -= 6
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(left, y, "Haber Duygu Analizi (Google News)")
+        y -= 14
+        c.setFont("Helvetica", 9)
+        y = _pdf_write_lines(c, sentiment_summary.splitlines(), left, y, 11, bottom)
+        y -= 6
+
     if pa_pack:
-        c.setFont("Helvetica-Bold", 12); c.drawString(left, y, "Price Action Pack (Last Bars)"); y -= 14
-        c.setFont("Helvetica", 8); pa_txt = json.dumps(pa_pack, ensure_ascii=False, indent=2).splitlines()
-        y = _pdf_write_lines(c, pa_txt, left, y, 9, bottom); y -= 6
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(left, y, "Price Action Pack (Last Bars)")
+        y -= 14
+        c.setFont("Helvetica", 8)
+        pa_txt = json.dumps(pa_pack, ensure_ascii=False, indent=2).splitlines()
+        y = _pdf_write_lines(c, pa_txt, left, y, 9, bottom)
+        y -= 6
+
     if gemini_insight:
-        c.setFont("Helvetica-Bold", 12); c.drawString(left, y, "Gemini Insight"); y -= 14
-        c.setFont("Helvetica", 9); gi_lines = (gemini_insight or "").splitlines()
-        y = _pdf_write_lines(c, gi_lines, left, y, 11, bottom); y -= 6
-    c.setFont("Helvetica-Bold", 12); c.drawString(left, y, "Fundamental Screener Snapshot (Selected Ticker)"); y -= 14
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(left, y, "Gemini Insight")
+        y -= 14
+        c.setFont("Helvetica", 9)
+        gi_lines = (gemini_insight or "").splitlines()
+        y = _pdf_write_lines(c, gi_lines, left, y, 11, bottom)
+        y -= 6
+
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(left, y, "Fundamental Screener Snapshot (Selected Ticker)")
+    y -= 14
+
     c.setFont("Helvetica", 9)
     if fa_row:
-        keys = ["ticker", "longName", "FA_pass", "FA_score", "FA_ok_count", "FA_coverage", "sector", "industry", "trailingPE", "forwardPE", "pegRatio", "priceToSalesTrailing12Months", "priceToBook", "returnOnEquity", "operatingMargins", "profitMargins", "debtToEquity", "revenueGrowth", "earningsGrowth", "marketCap"]
+        keys = [
+            "ticker",
+            "longName",
+            "FA_pass",
+            "FA_score",
+            "FA_ok_count",
+            "FA_coverage",
+            "sector",
+            "industry",
+            "trailingPE",
+            "forwardPE",
+            "pegRatio",
+            "priceToSalesTrailing12Months",
+            "priceToBook",
+            "returnOnEquity",
+            "operatingMargins",
+            "profitMargins",
+            "debtToEquity",
+            "revenueGrowth",
+            "earningsGrowth",
+            "marketCap",
+        ]
         lines = [f"{k}: {fa_row.get(k)}" for k in keys if k in fa_row]
-        if not lines: lines = ["(No fields)"]
-    else: lines = ["Screener satırı bulunamadı (screener çalıştırılmamış olabilir)."]
-    y = _pdf_write_lines(c, lines, left, y, 11, bottom); y -= 6
+        if not lines:
+            lines = ["(No fields)"]
+    else:
+        lines = ["Screener satırı bulunamadı (screener çalıştırılmamış olabilir)."]
+
+    y = _pdf_write_lines(c, lines, left, y, 11, bottom)
+    y -= 6
+
     if trades_df is not None and not trades_df.empty:
-        c.setFont("Helvetica-Bold", 12); c.drawString(left, y, "Trades (first 25 rows)"); y -= 14
-        c.setFont("Helvetica", 8); td = trades_df.copy().head(25)
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(left, y, "Trades (first 25 rows)")
+        y -= 14
+        c.setFont("Helvetica", 8)
+
+        td = trades_df.copy().head(25)
         cols = [cc for cc in ["entry_date", "entry_price", "exit_date", "exit_price", "exit_reason", "pnl", "return_%", "holding_days"] if cc in td.columns]
-        header = " | ".join(cols); y = _pdf_write_lines(c, [header], left, y, 10, bottom)
+        header = " | ".join(cols)
+        y = _pdf_write_lines(c, [header], left, y, 10, bottom)
+
         for _, r in td.iterrows():
             row_txt = " | ".join([str(r.get(k, ""))[:18] for k in cols])
             y = _pdf_write_lines(c, [row_txt], left, y, 10, bottom)
+
         y -= 6
+
     chart_added = False
     if include_charts and figs:
         for name, fig in figs.items():
             img = _plotly_fig_to_png_bytes(fig)
-            if not img: continue
-            chart_added = True; c.showPage(); c.setFont("Helvetica-Bold", 14); c.drawString(left, top, f"Chart: {name}")
-            img_reader = ImageReader(BytesIO(img)); usable_w = (right - left); usable_h = (H - 3.2 * cm - 2.0 * cm)
+            if not img:
+                continue
+            chart_added = True
+            c.showPage()
+            c.setFont("Helvetica-Bold", 14)
+            c.drawString(left, top, f"Chart: {name}")
+            img_reader = ImageReader(BytesIO(img))
+            usable_w = (right - left)
+            usable_h = (H - 3.2 * cm - 2.0 * cm)
             c.drawImage(img_reader, left, 2.0 * cm, width=usable_w, height=usable_h, preserveAspectRatio=True, anchor="c")
+
     if include_charts and figs and not chart_added:
-        c.showPage(); c.setFont("Helvetica-Bold", 14); c.drawString(left, top, "Charts could not be embedded.")
-        c.setFont("Helvetica", 10); c.drawString(left, top - 18, "Reason: Plotly image export needs 'kaleido' in requirements.txt."); c.drawString(left, top - 34, "Fallback: Download HTML report and print to PDF (keeps charts).")
-    c.save(); buf.seek(0)
+        c.showPage()
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(left, top, "Charts could not be embedded.")
+        c.setFont("Helvetica", 10)
+        c.drawString(left, top - 18, "Reason: Plotly image export needs 'kaleido' in requirements.txt.")
+        c.drawString(left, top - 34, "Fallback: Download HTML report and print to PDF (keeps charts).")
+
+    c.save()
+    buf.seek(0)
     return buf.read()
 
 
@@ -1338,10 +1718,12 @@ def rr_from_atr_stop(latest_row: pd.Series, tp_dict: dict, cfg: dict):
 
     return {"rr": float(reward / risk), "stop": float(stop), "risk": float(risk), "reward": float(reward)}
 
+
 def fmt_rr(rr):
     if rr is None or (isinstance(rr, float) and (not np.isfinite(rr))):
         return "N/A"
     return f"1:{rr:.2f}"
+
 
 def pct_dist(level: float, base: float):
     if level is None or not np.isfinite(level) or base == 0:
@@ -1350,7 +1732,16 @@ def pct_dist(level: float, base: float):
 
 
 # =============================
-# UI State
+# Cached data loader
+# =============================
+@st.cache_data(show_spinner=False)
+def load_data_cached(ticker: str, period: str, interval: str) -> pd.DataFrame:
+    df = yf.download(ticker, period=period, interval=interval, auto_adjust=True, progress=False)
+    return _flatten_yf(df)
+
+
+# =============================
+# UI STATE
 # =============================
 st.title("📈 FA→TA Trading Uygulaması + 🤖 AI Analiz")
 st.caption("Önce fundamental ile evreni daralt, sonra teknik analizle giriş/çıkış zamanla. Otomatik emir göndermez.")
@@ -1370,6 +1761,7 @@ if "pa_pack" not in st.session_state:
 if "sentiment_summary" not in st.session_state:
     st.session_state.sentiment_summary = ""
 
+
 # =============================
 # Sidebar
 # =============================
@@ -1379,7 +1771,7 @@ with st.sidebar:
         "Market",
         ["USA", "BIST"],
         index=0,
-        help="Analiz edilecek borsayı seçin. USA için ABD hisseleri, BIST için Borsa İstanbul hisseleri."
+        help="Analiz edilecek borsayı seçin. USA için ABD hisseleri, BIST için Borsa İstanbul hisseleri.",
     )
 
     usa_bucket = None
@@ -1388,96 +1780,157 @@ with st.sidebar:
             "USA Universe",
             ["S&P 500", "Nasdaq 100"],
             index=0,
-            help="Hangi endeksteki hisseleri tarayacağınızı seçin. S&P 500 daha geniş, Nasdaq 100 teknoloji ağırlıklı."
+            help="Hangi endeksteki hisseleri tarayacağınızı seçin. S&P 500 daha geniş, Nasdaq 100 teknoloji ağırlıklı.",
         )
 
     st.header("1) Fundamental Screener")
-    use_fa_default = True
     use_fa = st.checkbox(
         "Fundamental filtreyi kullan",
-        value=use_fa_default,
-        help="Temel analiz (FA) kurallarını aktifleştirir. Şirketlerin mali tablolarını değerlendirerek puanlar."
+        value=True,
+        help="Temel analiz (FA) kurallarını aktifleştirir. Şirketlerin mali tablolarını değerlendirerek puanlar.",
     )
     fa_mode = st.selectbox(
         "Fundamental Mod",
         ["Quality", "Value", "Growth"],
         index=0,
         disabled=(not use_fa),
-        help="Quality: Karlılık ve düşük borç arar. Value: Ucuz kalmış hisseleri bulur. Growth: Yüksek büyüme oranlarına odaklanır."
+        help="Quality: Karlılık ve düşük borç arar. Value: Ucuz kalmış hisseleri bulur. Growth: Yüksek büyüme oranlarına odaklanır.",
     )
 
     st.caption("Eşikler (Genel) — BIST'te coverage düşük olabilir")
     roe = st.slider(
-        "ROE min", 0.0, 0.40, 0.15, 0.01,
+        "ROE min",
+        0.0,
+        0.40,
+        0.15,
+        0.01,
         disabled=(not use_fa),
-        help="Özkaynak Karlılığı (Return on Equity). Şirketin öz sermayesini ne kadar verimli kullandığını gösterir. Yüksek ROE genellikle iyidir."
+        help="Özkaynak Karlılığı (Return on Equity). Şirketin öz sermayesini ne kadar verimli kullandığını gösterir. Yüksek ROE genellikle iyidir.",
     )
     op_margin = st.slider(
-        "Operating Margin min", 0.0, 0.40, 0.10, 0.01,
+        "Operating Margin min",
+        0.0,
+        0.40,
+        0.10,
+        0.01,
         disabled=(not use_fa),
-        help="Faaliyet Kar Marjı. Şirketin ana faaliyetlerinden elde ettiği kârlılık. Sektör ortalamasıyla karşılaştırın."
+        help="Faaliyet Kar Marjı. Şirketin ana faaliyetlerinden elde ettiği kârlılık. Sektör ortalamasıyla karşılaştırın.",
     )
     profit_margin = st.slider(
-        "Profit Margin min", 0.0, 0.40, 0.08, 0.01,
+        "Profit Margin min",
+        0.0,
+        0.40,
+        0.08,
+        0.01,
         disabled=(not use_fa),
-        help="Net Kar Marjı. Tüm giderler ve vergiler düşüldükten sonra kalan net kârın satışlara oranı."
+        help="Net Kar Marjı. Tüm giderler ve vergiler düşüldükten sonra kalan net kârın satışlara oranı.",
     )
     dte = st.slider(
-        "Debt/Equity max", 0.0, 3.0, 1.0, 0.05,
+        "Debt/Equity max",
+        0.0,
+        3.0,
+        1.0,
+        0.05,
         disabled=(not use_fa),
-        help="Borç/Özkaynak oranı. Şirketin ne kadar borçlu olduğunu gösterir. 1.0 altı genellikle güvenli kabul edilir."
+        help="Borç/Özkaynak oranı. Şirketin ne kadar borçlu olduğunu gösterir. 1.0 altı genellikle güvenli kabul edilir.",
     )
     fpe = st.slider(
-        "Forward P/E max", 0.0, 60.0, 20.0, 1.0,
+        "Forward P/E max",
+        0.0,
+        60.0,
+        20.0,
+        1.0,
         disabled=(not use_fa),
-        help="İleri F/K (Fiyat/Kazanç) oranı. Gelecek yıl beklenen kazançlara göre hissenin ucuz/pahalı olduğunu gösterir."
+        help="İleri F/K (Fiyat/Kazanç) oranı. Gelecek yıl beklenen kazançlara göre hissenin ucuz/pahalı olduğunu gösterir.",
     )
     peg = st.slider(
-        "PEG max", 0.0, 5.0, 1.5, 0.1,
+        "PEG max",
+        0.0,
+        5.0,
+        1.5,
+        0.1,
         disabled=(not use_fa),
-        help="F/K / Büyüme oranı. 1.0 civarı hissenin büyüme potansiyeline göre adil fiyatlandığını gösterir."
+        help="F/K / Büyüme oranı. 1.0 civarı hissenin büyüme potansiyeline göre adil fiyatlandığını gösterir.",
     )
     ps = st.slider(
-        "P/S max", 0.0, 30.0, 6.0, 0.5,
+        "P/S max",
+        0.0,
+        30.0,
+        6.0,
+        0.5,
         disabled=(not use_fa),
-        help="Fiyat/Satış oranı. Henüz kâr etmeyen ancak satışları büyük şirketler için kullanılır."
+        help="Fiyat/Satış oranı. Henüz kâr etmeyen ancak satışları büyük şirketler için kullanılır.",
     )
     pb = st.slider(
-        "P/B max", 0.0, 30.0, 6.0, 0.5,
+        "P/B max",
+        0.0,
+        30.0,
+        6.0,
+        0.5,
         disabled=(not use_fa),
-        help="Piyasa Değeri / Defter Değeri. Şirketin net varlıklarına göre kaç katından işlem gördüğü."
+        help="Piyasa Değeri / Defter Değeri. Şirketin net varlıklarına göre kaç katından işlem gördüğü.",
     )
     rev_g = st.slider(
-        "Revenue Growth min", 0.0, 0.50, 0.10, 0.01,
+        "Revenue Growth min",
+        0.0,
+        0.50,
+        0.10,
+        0.01,
         disabled=(not use_fa),
-        help="Yıllık ciro büyümesi. Şirketin satışlarının ne kadar arttığını gösterir."
+        help="Yıllık ciro büyümesi. Şirketin satışlarının ne kadar arttığını gösterir.",
     )
     earn_g = st.slider(
-        "Earnings Growth min", 0.0, 0.50, 0.10, 0.01,
+        "Earnings Growth min",
+        0.0,
+        0.50,
+        0.10,
+        0.01,
         disabled=(not use_fa),
-        help="Yıllık kâr büyümesi. Net kârdaki artış oranı."
+        help="Yıllık kâr büyümesi. Net kârdaki artış oranı.",
     )
 
     min_score = st.slider(
-        "Min Fundamental Score", 0, 100, 60, 1,
+        "Min Fundamental Score",
+        0,
+        100,
+        60,
+        1,
         disabled=(not use_fa),
-        help="Ağırlıklı puanın alt limiti. Bu puanın üzerindeki hisseler 'PASS' olarak işaretlenir."
+        help="Ağırlıklı puanın alt limiti. Bu puanın üzerindeki hisseler 'PASS' olarak işaretlenir.",
     )
     min_ok = st.slider(
-        "Min OK sayısı", 1, 5, 3, 1,
+        "Min OK sayısı",
+        1,
+        5,
+        3,
+        1,
         disabled=(not use_fa),
-        help="Başarılı kriter sayısı. En az bu kadar kriteri sağlamalı."
+        help="Başarılı kriter sayısı. En az bu kadar kriteri sağlamalı.",
     )
     min_coverage = st.slider(
-        "Min Coverage (NaN olmayan)", 1, 5, 3, 1,
+        "Min Coverage (NaN olmayan)",
+        1,
+        5,
+        3,
+        1,
         disabled=(not use_fa),
-        help="Verisi olan kriter sayısı. BIST'te veri eksikliği olabileceği için bu sayı düşük tutulabilir."
+        help="Verisi olan kriter sayısı. BIST'te veri eksikliği olabileceği için bu sayı düşük tutulabilir.",
     )
 
     thresholds = {
-        "roe": roe, "op_margin": op_margin, "profit_margin": profit_margin, "dte": dte, "fpe": fpe,
-        "peg": peg, "ps": ps, "pb": pb, "rev_g": rev_g, "earn_g": earn_g, "min_score": min_score,
-        "min_ok": min_ok, "min_coverage": min_coverage,
+        "roe": roe,
+        "op_margin": op_margin,
+        "profit_margin": profit_margin,
+        "dte": dte,
+        "fpe": fpe,
+        "peg": peg,
+        "ps": ps,
+        "pb": pb,
+        "rev_g": rev_g,
+        "earn_g": earn_g,
+        "min_score": min_score,
+        "min_ok": min_ok,
+        "min_coverage": min_coverage,
     }
 
     if market == "USA":
@@ -1502,7 +1955,7 @@ with st.sidebar:
         "Teknik Mod",
         list(PRESETS.keys()),
         index=1,
-        help="Önceden tanımlı risk profilleri. Defansif: düşük risk, Agresif: yüksek risk."
+        help="Önceden tanımlı risk profilleri. Defansif: düşük risk, Agresif: yüksek risk.",
     )
 
     st.subheader("Sembol (TA)")
@@ -1513,7 +1966,7 @@ with st.sidebar:
         raw_ticker = st.text_input(
             "Sembol (USA: AAPL, SPY) / BIST: THYAO",
             value="AAPL" if market == "USA" else "THYAO",
-            help="Analiz etmek istediğiniz hisse senedinin sembolü. BIST için otomatik .IS eklenir."
+            help="Analiz etmek istediğiniz hisse senedinin sembolü. BIST için otomatik .IS eklenir.",
         )
 
     ticker = normalize_ticker(raw_ticker, market)
@@ -1523,44 +1976,72 @@ with st.sidebar:
         "Interval",
         ["1d", "1h", "30m"],
         index=0,
-        help="Mum zaman dilimi. 1d günlük, 1h saatlik analiz için. Backtest için 1d önerilir."
+        help="Mum zaman dilimi. 1d günlük, 1h saatlik analiz için. Backtest için 1d önerilir.",
     )
     period = st.selectbox(
         "Periyot",
         ["6mo", "1y", "2y", "5y", "10y"],
         index=3,
-        help="Verinin ne kadar geriye gidileceği. Daha uzun periyot daha sağlıklı backtest sağlar."
+        help="Verinin ne kadar geriye gidileceği. Daha uzun periyot daha sağlıklı backtest sağlar.",
     )
 
     st.divider()
     st.subheader("Teknik Parametreler")
     ema_fast = st.number_input(
-        "EMA Fast", min_value=5, max_value=100, value=50, step=1,
-        help="Kısa vadeli üstel hareketli ortalama. Fiyatın bu ortalamanın üstünde olması kısa vadeli yükseliş trendini gösterir."
+        "EMA Fast",
+        min_value=5,
+        max_value=100,
+        value=50,
+        step=1,
+        help="Kısa vadeli üstel hareketli ortalama. Fiyatın bu ortalamanın üstünde olması kısa vadeli yükseliş trendini gösterir.",
     )
     ema_slow = st.number_input(
-        "EMA Slow", min_value=50, max_value=400, value=200, step=1,
-        help="Uzun vadeli üstel hareketli ortalama. Fiyat bu ortalamanın üstündeyse ana trend yükseliş, altındaysa düşüş trendi."
+        "EMA Slow",
+        min_value=50,
+        max_value=400,
+        value=200,
+        step=1,
+        help="Uzun vadeli üstel hareketli ortalama. Fiyat bu ortalamanın üstündeyse ana trend yükseliş, altındaysa düşüş trendi.",
     )
     rsi_period = st.number_input(
-        "RSI Period", min_value=5, max_value=30, value=14, step=1,
-        help="RSI hesaplama periyodu. 14 gün standarttır. 70 üstü aşırı alım, 30 altı aşırı satım."
+        "RSI Period",
+        min_value=5,
+        max_value=30,
+        value=14,
+        step=1,
+        help="RSI hesaplama periyodu. 14 gün standarttır. 70 üstü aşırı alım, 30 altı aşırı satım.",
     )
     bb_period = st.number_input(
-        "Bollinger Period", min_value=10, max_value=50, value=20, step=1,
-        help="Bollinger bandı ortalama periyodu. Fiyatın üst banda yaklaşması aşırı alım, alt banda yaklaşması aşırı satım."
+        "Bollinger Period",
+        min_value=10,
+        max_value=50,
+        value=20,
+        step=1,
+        help="Bollinger bandı ortalama periyodu. Fiyatın üst banda yaklaşması aşırı alım, alt banda yaklaşması aşırı satım.",
     )
     bb_std = st.number_input(
-        "Bollinger Std", min_value=1.0, max_value=3.5, value=2.0, step=0.1,
-        help="Bollinger bandı standart sapma katsayısı. 2 standart sapma %95 güven aralığı verir."
+        "Bollinger Std",
+        min_value=1.0,
+        max_value=3.5,
+        value=2.0,
+        step=0.1,
+        help="Bollinger bandı standart sapma katsayısı. 2 standart sapma %95 güven aralığı verir.",
     )
     atr_period = st.number_input(
-        "ATR Period", min_value=5, max_value=30, value=14, step=1,
-        help="Ortalama Gerçek Aralık (Average True Range) periyodu. Volatilitenin ölçüsü, stop seviyesi belirlemede kullanılır."
+        "ATR Period",
+        min_value=5,
+        max_value=30,
+        value=14,
+        step=1,
+        help="Ortalama Gerçek Aralık (Average True Range) periyodu. Volatilitenin ölçüsü, stop seviyesi belirlemede kullanılır.",
     )
     vol_sma = st.number_input(
-        "Volume SMA", min_value=5, max_value=60, value=20, step=1,
-        help="Hacim basit hareketli ortalaması. Hacim bu ortalamanın üzerindeyse likidite yüksek, işlem anlamlıdır."
+        "Volume SMA",
+        min_value=5,
+        max_value=60,
+        value=20,
+        step=1,
+        help="Hacim basit hareketli ortalaması. Hacim bu ortalamanın üzerindeyse likidite yüksek, işlem anlamlıdır.",
     )
 
     st.subheader("Market Filtreleri")
@@ -1568,40 +2049,56 @@ with st.sidebar:
         "SPY > EMA200 filtresi (Sadece USA)",
         value=True,
         disabled=(market != "USA"),
-        help="S&P 500 endeksi 200 günlük ortalamanın altındaysa (ayı piyasası) alım sinyallerini engeller."
+        help="S&P 500 endeksi 200 günlük ortalamanın altındaysa (ayı piyasası) alım sinyallerini engeller.",
     )
     use_bist_filter = st.checkbox(
         "XU100 > EMA200 filtresi (Sadece BIST)",
         value=True,
         disabled=(market != "BIST"),
-        help="BIST 100 endeksi 200 günlük ortalamanın altındaysa alım sinyallerini engeller."
+        help="BIST 100 endeksi 200 günlük ortalamanın altındaysa alım sinyallerini engeller.",
     )
     use_higher_tf_filter = st.checkbox(
         "Haftalık trend filtresi (Fiyat > EMA200)",
         value=True,
-        help="Haftalık grafikte fiyatın 200 haftalık ortalamanın üzerinde olması gerekir. Ana trendin yükseliş olduğunu onaylar."
+        help="Haftalık grafikte fiyatın 200 haftalık ortalamanın üzerinde olması gerekir. Ana trendin yükseliş olduğunu onaylar.",
     )
 
     st.subheader("Risk / Backtest Ayarları")
     initial_capital = st.number_input(
-        "Başlangıç Sermayesi", min_value=100.0, value=10000.0, step=500.0,
-        help="Backtest için simüle edilecek başlangıç parası."
+        "Başlangıç Sermayesi",
+        min_value=100.0,
+        value=10000.0,
+        step=500.0,
+        help="Backtest için simüle edilecek başlangıç parası.",
     )
     risk_per_trade = st.slider(
-        "Trade başı risk (equity %)", min_value=0.002, max_value=0.05, value=0.01, step=0.001,
-        help="Her işlemde kasanın yüzde kaçını riske edeceğiniz. Stop loss ile kaybedilecek maksimum miktar."
+        "Trade başı risk (equity %)",
+        min_value=0.002,
+        max_value=0.05,
+        value=0.01,
+        step=0.001,
+        help="Her işlemde kasanın yüzde kaçını riske edeceğiniz. Stop loss ile kaybedilecek maksimum miktar.",
     )
     commission_bps = st.number_input(
-        "Komisyon (bps)", min_value=0.0, value=5.0, step=1.0,
-        help="İşlem başına komisyon (baz puan). 1 bps = %0.01."
+        "Komisyon (bps)",
+        min_value=0.0,
+        value=5.0,
+        step=1.0,
+        help="İşlem başına komisyon (baz puan). 1 bps = %0.01.",
     )
     slippage_bps = st.number_input(
-        "Slippage (bps)", min_value=0.0, value=2.0, step=1.0,
-        help="Kayma maliyeti. Sinyal fiyatından daha kötü fiyattan işlem gerçekleşme riski."
+        "Slippage (bps)",
+        min_value=0.0,
+        value=2.0,
+        step=1.0,
+        help="Kayma maliyeti. Sinyal fiyatından daha kötü fiyattan işlem gerçekleşme riski.",
     )
     risk_free_annual = st.number_input(
-        "Risk-Free (yıllık)", min_value=0.0, value=0.0, step=0.01,
-        help="Risksiz faiz oranı (örnek: 0.05 = %5). Sharpe ve Sortino hesaplamalarında kullanılır."
+        "Risk-Free (yıllık)",
+        min_value=0.0,
+        value=0.0,
+        step=0.01,
+        help="Risksiz faiz oranı (örnek: 0.05 = %5). Sharpe ve Sortino hesaplamalarında kullanılır.",
     )
 
     st.divider()
@@ -1609,20 +2106,28 @@ with st.sidebar:
     ai_on = st.checkbox(
         "Gemini AI aktif",
         value=True,
-        help="Google Gemini AI ile grafik ve veri analizi yapılır."
+        help="Google Gemini AI ile grafik ve veri analizi yapılır.",
     )
     gemini_model = st.text_input(
         "Gemini Model",
         value="gemini-1.5-flash",
-        help="Kullanılacak Gemini modeli. 1.5-flash hızlı ve yeterlidir."
+        help="Kullanılacak Gemini modeli. 1.5-flash hızlı ve yeterlidir.",
     )
     gemini_temp = st.slider(
-        "Temperature", 0.0, 1.0, 0.2, 0.05,
-        help="Modelin yaratıcılığı. Düşük değerler daha tutarlı, yüksek değerler daha yaratıcı cevaplar üretir."
+        "Temperature",
+        0.0,
+        1.0,
+        0.2,
+        0.05,
+        help="Modelin yaratıcılığı. Düşük değerler daha tutarlı, yüksek değerler daha yaratıcı cevaplar üretir.",
     )
     gemini_max_tokens = st.slider(
-        "Max Output Tokens", 256, 8192, 2048, 128,
-        help="Modelin üreteceği maksimum token sayısı. Daha uzun cevaplar için artırın."
+        "Max Output Tokens",
+        256,
+        8192,
+        2048,
+        128,
+        help="Modelin üreteceği maksimum token sayısı. Daha uzun cevaplar için artırın.",
     )
 
     st.divider()
@@ -1630,12 +2135,13 @@ with st.sidebar:
     use_sentiment = st.checkbox(
         "Haber duygu analizini aktifleştir",
         value=True,
-        help="Google News'ten haber başlıklarını çeker, Gemini ile duygu analizi yapar. 'feedparser' kütüphanesi gerekir."
+        help="Google News'ten haber başlıklarını çeker, Gemini ile duygu analizi yapar. 'feedparser' kütüphanesi gerekir.",
     )
 
     run_btn = st.button("🚀 Teknik Analizi Çalıştır", type="primary")
     if run_btn:
         st.session_state.ta_ran = True
+
 
 # -----------------------------
 # Fundamental screener action
@@ -1661,7 +2167,7 @@ if run_screener and use_fa:
 
 
 # -----------------------------
-# Data loader
+# Config
 # -----------------------------
 cfg = {
     "ema_fast": ema_fast,
@@ -1678,23 +2184,36 @@ cfg = {
 }
 cfg.update(PRESETS[preset_name])
 
-@st.cache_data(show_spinner=False)
-def load_data_cached(ticker: str, period: str, interval: str) -> pd.DataFrame:
-    df = yf.download(ticker, period=period, interval=interval, auto_adjust=True, progress=False)
-    return _flatten_yf(df)
 
-# If TA not ran yet: show screener (if any) and stop
+# -----------------------------
+# If TA not ran yet: show screener and stop
+# -----------------------------
 if not st.session_state.ta_ran:
     if use_fa and not st.session_state.screener_df.empty:
         st.subheader(f"🧾 Fundamental Screener Sonuçları ({market})")
         sdf = st.session_state.screener_df.copy()
 
         show_cols = [
-            "ticker", "longName", "FA_pass", "FA_score", "FA_ok_count", "FA_coverage",
-            "sector", "industry", "trailingPE", "forwardPE", "pegRatio",
-            "priceToSalesTrailing12Months", "priceToBook", "returnOnEquity",
-            "operatingMargins", "profitMargins", "debtToEquity", "revenueGrowth",
-            "earningsGrowth", "marketCap",
+            "ticker",
+            "longName",
+            "FA_pass",
+            "FA_score",
+            "FA_ok_count",
+            "FA_coverage",
+            "sector",
+            "industry",
+            "trailingPE",
+            "forwardPE",
+            "pegRatio",
+            "priceToSalesTrailing12Months",
+            "priceToBook",
+            "returnOnEquity",
+            "operatingMargins",
+            "profitMargins",
+            "debtToEquity",
+            "revenueGrowth",
+            "earningsGrowth",
+            "marketCap",
         ]
         sdf_show = sdf[[c for c in show_cols if c in sdf.columns]].copy()
         st.dataframe(sdf_show, use_container_width=True, height=360)
@@ -1729,7 +2248,6 @@ if use_higher_tf_filter:
     with st.spinner("Haftalık trend kontrol ediliyor..."):
         higher_tf_filter_ok = get_higher_tf_trend(ticker, higher_tf_interval="1wk", ema_period=200)
 
-# Sentiment analysis with Google News + Gemini
 sentiment_summary = ""
 if use_sentiment and ai_on:
     company_name = ""
@@ -1737,7 +2255,7 @@ if use_sentiment and ai_on:
         row = find_screener_row(st.session_state.screener_df, ticker)
         if row and row.get("longName"):
             company_name = row["longName"]
-    
+
     with st.spinner("Google News'ten haberler çekiliyor ve Gemini ile analiz ediliyor..."):
         sent = get_news_sentiment(ticker, company_name, gemini_model, gemini_temp)
         if sent.get("error") is None:
@@ -1758,6 +2276,11 @@ if df_raw.empty:
     st.error(f"Veri gelmedi: {ticker}")
     st.stop()
 
+required_cols = {"Open", "High", "Low", "Close", "Volume"}
+if not required_cols.issubset(set(df_raw.columns)):
+    st.error("Veri setinde gerekli OHLCV kolonları eksik.")
+    st.stop()
+
 if len(df_raw) < 260 and interval == "1d":
     st.warning("Günlükte 260 bar altı: metrikler daha oynak olabilir.")
 
@@ -1767,25 +2290,32 @@ benchmark_ticker = "SPY" if market == "USA" else "XU100.IS"
 benchmark_df = load_data_cached(benchmark_ticker, period, interval)
 benchmark_returns = benchmark_df["Close"].pct_change().dropna() if not benchmark_df.empty else None
 
-df, checkpoints = signal_with_checkpoints(df, cfg, market_filter_ok=market_filter_ok, higher_tf_filter_ok=higher_tf_filter_ok)
+df, checkpoints = signal_with_checkpoints(
+    df,
+    cfg,
+    market_filter_ok=market_filter_ok,
+    higher_tf_filter_ok=higher_tf_filter_ok,
+)
 latest = df.iloc[-1]
 
 live = get_live_price(ticker)
 live_price = live.get("last_price", np.nan)
 
-if int(latest["ENTRY"]) == 1: rec = "AL"
-elif int(latest["EXIT"]) == 1: rec = "SAT"
-else: rec = "AL (Güçlü Trend)" if latest["SCORE"] >= 80 else ("İZLE (Orta)" if latest["SCORE"] >= 60 else "UZAK DUR")
+if int(latest["ENTRY"]) == 1:
+    rec = "AL"
+elif int(latest["EXIT"]) == 1:
+    rec = "SAT"
+else:
+    rec = "AL (Güçlü Trend)" if latest["SCORE"] >= 80 else ("İZLE (Orta)" if latest["SCORE"] >= 60 else "UZAK DUR")
 
 eq, tdf, metrics = backtest_long_only(df, cfg, risk_free_annual=risk_free_annual, benchmark_returns=benchmark_returns)
 tp = target_price_band(df)
 rr_info = rr_from_atr_stop(latest, tp, cfg)
-
-# NEW: Aşırı alım / spekülasyon analizi
 overbought_result = detect_speculation(df)
 
+
 # =============================
-# Build figures once
+# Build figures
 # =============================
 fig_price = go.Figure()
 fig_price.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"))
@@ -1803,7 +2333,7 @@ fig_price.update_layout(
     xaxis_rangeslider_visible=False,
     title="Fiyat Grafiği + EMA + Bollinger + Sinyaller",
     yaxis_title="Fiyat",
-    xaxis_title="Tarih"
+    xaxis_title="Tarih",
 )
 
 fig_rsi = go.Figure()
@@ -1814,7 +2344,7 @@ fig_rsi.update_layout(
     height=260,
     title="RSI (Göreceli Güç Endeksi)",
     yaxis_title="RSI",
-    xaxis_title="Tarih"
+    xaxis_title="Tarih",
 )
 
 fig_macd = go.Figure()
@@ -1825,7 +2355,7 @@ fig_macd.update_layout(
     height=260,
     title="MACD (Moving Average Convergence Divergence)",
     yaxis_title="MACD",
-    xaxis_title="Tarih"
+    xaxis_title="Tarih",
 )
 
 fig_atr = go.Figure()
@@ -1834,52 +2364,42 @@ fig_atr.update_layout(
     height=260,
     title="ATR % (Ortalama Gerçek Aralık / Fiyat)",
     yaxis_title="%",
-    xaxis_title="Tarih"
+    xaxis_title="Tarih",
 )
 
-# =============================
-# NEW: Stochastic RSI Chart
-# =============================
 fig_stoch = go.Figure()
-if 'STOCH_RSI_K' in df.columns and 'STOCH_RSI_D' in df.columns:
-    fig_stoch.add_trace(go.Scatter(x=df.index, y=df['STOCH_RSI_K'], name="Stochastic RSI K"))
-    fig_stoch.add_trace(go.Scatter(x=df.index, y=df['STOCH_RSI_D'], name="Stochastic RSI D"))
+if "STOCH_RSI_K" in df.columns and "STOCH_RSI_D" in df.columns:
+    fig_stoch.add_trace(go.Scatter(x=df.index, y=df["STOCH_RSI_K"], name="Stochastic RSI K"))
+    fig_stoch.add_trace(go.Scatter(x=df.index, y=df["STOCH_RSI_D"], name="Stochastic RSI D"))
     fig_stoch.add_hline(y=80, line_dash="dash", line_color="red", annotation_text="Aşırı Alım")
     fig_stoch.add_hline(y=20, line_dash="dash", line_color="green", annotation_text="Aşırı Satım")
 fig_stoch.update_layout(
     height=260,
     title="Stochastic RSI (K & D)",
     yaxis_title="Değer",
-    xaxis_title="Tarih"
+    xaxis_title="Tarih",
 )
 
-# =============================
-# NEW: Bollinger Band Width Chart
-# =============================
 fig_bbwidth = go.Figure()
-if 'BB_WIDTH' in df.columns:
-    fig_bbwidth.add_trace(go.Scatter(x=df.index, y=df['BB_WIDTH'] * 100, name="BB % Genişlik"))
-    # Sıkışma seviyesi örnek: %2'nin altı sıkışma
+if "BB_WIDTH" in df.columns:
+    fig_bbwidth.add_trace(go.Scatter(x=df.index, y=df["BB_WIDTH"] * 100, name="BB % Genişlik"))
     fig_bbwidth.add_hline(y=2, line_dash="dash", line_color="orange", annotation_text="Sıkışma Bölgesi")
 fig_bbwidth.update_layout(
     height=260,
     title="Bollinger Bandı Genişliği %",
     yaxis_title="Genişlik %",
-    xaxis_title="Tarih"
+    xaxis_title="Tarih",
 )
 
-# =============================
-# NEW: Volume Ratio Chart
-# =============================
 fig_volratio = go.Figure()
-if 'VOL_RATIO' in df.columns:
-    fig_volratio.add_trace(go.Bar(x=df.index, y=df['VOL_RATIO'], name="Hacim Oranı"))
+if "VOL_RATIO" in df.columns:
+    fig_volratio.add_trace(go.Bar(x=df.index, y=df["VOL_RATIO"], name="Hacim Oranı"))
     fig_volratio.add_hline(y=1.5, line_dash="dash", line_color="red", annotation_text="Anormal Hacim")
 fig_volratio.update_layout(
     height=260,
     title="Hacim Oranı (Son Hacim / SMA)",
     yaxis_title="Oran",
-    xaxis_title="Tarih"
+    xaxis_title="Tarih",
 )
 
 fig_eq = go.Figure()
@@ -1888,7 +2408,7 @@ fig_eq.update_layout(
     height=320,
     title="Backtest Sermaye Eğrisi",
     yaxis_title="Sermaye",
-    xaxis_title="Tarih"
+    xaxis_title="Tarih",
 )
 
 figs_for_report = {
@@ -1899,32 +2419,54 @@ figs_for_report = {
     "Stochastic RSI": fig_stoch,
     "Bollinger Band Width": fig_bbwidth,
     "Volume Ratio": fig_volratio,
-    "Equity Curve": fig_eq
+    "Equity Curve": fig_eq,
 }
+
 
 # =============================
 # Tabs
 # =============================
 tab_dash, tab_export, tab_heatmap = st.tabs(["📊 Dashboard", "📄 Rapor (PDF/HTML)", "🔥 Sektörel Heatmap"])
 
+
 with tab_dash:
     if use_fa and not st.session_state.screener_df.empty:
         st.subheader(f"🧾 Fundamental Screener Sonuçları ({market})")
         sdf = st.session_state.screener_df.copy()
-        show_cols = ["ticker", "longName", "FA_pass", "FA_score", "FA_ok_count", "FA_coverage", "sector", "industry", "trailingPE", "forwardPE", "pegRatio", "priceToSalesTrailing12Months", "priceToBook", "returnOnEquity", "operatingMargins", "profitMargins", "debtToEquity", "revenueGrowth", "earningsGrowth", "marketCap"]
+        show_cols = [
+            "ticker",
+            "longName",
+            "FA_pass",
+            "FA_score",
+            "FA_ok_count",
+            "FA_coverage",
+            "sector",
+            "industry",
+            "trailingPE",
+            "forwardPE",
+            "pegRatio",
+            "priceToSalesTrailing12Months",
+            "priceToBook",
+            "returnOnEquity",
+            "operatingMargins",
+            "profitMargins",
+            "debtToEquity",
+            "revenueGrowth",
+            "earningsGrowth",
+            "marketCap",
+        ]
         sdf_show = sdf[[c for c in show_cols if c in sdf.columns]].copy()
         st.dataframe(sdf_show, use_container_width=True, height=360)
 
-    # Yeni aşırı alım metrikleri
     st.subheader("📊 Aşırı Alım / Spekülasyon Göstergeleri")
     col_ob1, col_ob2, col_ob3, col_ob4 = st.columns(4)
     col_ob1.metric("Aşırı Alım Skoru", f"{overbought_result['overbought_score']}/100", help="Yüksek skor aşırı değerli olduğunu gösterir (RSI, Bollinger, Stokastik RSI, EMA uzaklığı).")
     col_ob2.metric("Aşırı Satım Skoru", f"{overbought_result['oversold_score']}/100", help="Yüksek skor aşırı değersiz olduğunu gösterir.")
     col_ob3.metric("Spekülasyon Skoru", f"{overbought_result['speculation_score']}/100", help="Ani hacim artışı ve zayıf trend (fiyat yükselirken hacim düşüyor).")
-    col_ob4.metric("Genel Karar", overbought_result['verdict'])
-    
+    col_ob4.metric("Genel Karar", overbought_result["verdict"])
+
     with st.expander("Detaylı Aşırı Alım/Spekülasyon Analizi"):
-        for k, v in overbought_result['details'].items():
+        for _, v in overbought_result["details"].items():
             st.write(f"• {v}")
 
     c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
@@ -1951,7 +2493,7 @@ with tab_dash:
             elif k == "Trend (Close>EMA200 & EMA50>EMA200)":
                 st.metric(k, "✅" if v else "❌", help="Fiyat EMA200 üstünde ve EMA50 EMA200 üstünde mi? (Trend yönü)")
             elif k.startswith("RSI >"):
-                st.metric(k, "✅" if v else "❌", help=f"RSI değeri giriş eşiğinin üstünde mi? (Momentum)")
+                st.metric(k, "✅" if v else "❌", help="RSI değeri giriş eşiğinin üstünde mi? (Momentum)")
             elif k == "MACD Hist > 0":
                 st.metric(k, "✅" if v else "❌", help="MACD histogramı pozitif mi? (Momentum yönü)")
             elif k.startswith("ATR% <"):
@@ -2008,7 +2550,6 @@ with tab_dash:
     st.plotly_chart(fig_price, use_container_width=True)
     st.caption("**Yorum:** Mum grafiği, EMA50 (kısa vade), EMA200 (uzun vade) ve Bollinger bantları. Üçgenler alım (yeşil) ve satım (kırmızı) sinyallerini gösterir. Fiyat EMA200 üzerinde trend yükseliş, altında düşüş.")
 
-    # İlk sıra: RSI, MACD, ATR
     st.subheader("📉 RSI / MACD / ATR%")
     colA, colB, colC = st.columns(3)
     with colA:
@@ -2021,7 +2562,6 @@ with tab_dash:
         st.plotly_chart(fig_atr, use_container_width=True)
         st.caption("**ATR%:** Volatilitenin fiyata oranı. Yüksek değerler yüksek oynaklık, düşük değerler sakin piyasa.")
 
-    # İkinci sıra: Stochastic RSI, BB Width, Volume Ratio
     st.subheader("📊 Stochastic RSI / Bollinger Genişliği / Hacim Oranı")
     colD, colE, colF = st.columns(3)
     with colD:
@@ -2056,9 +2596,6 @@ with tab_dash:
         st.subheader("📰 Haber Duygu Analizi (Google News + Gemini)")
         st.info(sentiment_summary)
 
-    # =============================
-    # GEMINI AI — MULTIMODAL (ENRICHED with speculation question)
-    # =============================
     st.subheader("🤖 Gemini Multimodal AI — Grafik + Price Action + Spekülasyon Analizi")
     if not ai_on:
         st.info("Gemini kapalı (sol menüden açabilirsiniz).")
@@ -2073,18 +2610,20 @@ with tab_dash:
         )
 
         col_g1, col_g2 = st.columns([1, 1])
+
         with col_g1:
             if st.button("🖼️ Gemini'ye Sor (Görsel + Tüm Veriler)", use_container_width=True):
                 snap20 = df_snapshot_for_llm(df, n=25)
 
-                # Enriched data
                 fa_row_local = None
                 if use_fa and not st.session_state.screener_df.empty:
                     screener_row = find_screener_row(st.session_state.screener_df, ticker)
                     f_single = fetch_fundamentals_generic(ticker, market=market)
                     f_score, f_breakdown, f_pass = fundamental_score_row(f_single, fa_mode, thresholds)
                     fa_eval = {
-                        "mode": fa_mode, "score": f_score, "passed": f_pass,
+                        "mode": fa_mode,
+                        "score": f_score,
+                        "passed": f_pass,
                         "ok_cnt": sum(1 for v in f_breakdown.values() if v.get("available") and v.get("ok")),
                         "coverage": sum(1 for v in f_breakdown.values() if v.get("available")),
                     }
@@ -2099,6 +2638,7 @@ with tab_dash:
                 prompt = f"""
 Sen bir price-action, formasyon okuma, aşırı alım/spekülasyon tespiti ve risk yönetimi odaklı kıdemli finansal analiz asistanısın.
 Kesin yatırım tavsiyesi verme, sadece objektif ve eğitim amaçlı analiz yap.
+
 Lütfen aşağıdaki adımları takip ederek analiz yap:
 1. Genel trendi değerlendir (EMA50, EMA200, fiyatın bu ortalamalara göre konumu).
 2. Temel destek/direnç seviyelerini belirle (price action paketindeki swing high/low, order block).
@@ -2138,9 +2678,10 @@ JSON:
 }, ensure_ascii=False, default=str)}
 
 Kullanıcının Sorusu: {user_msg}
-"""             
+"""
+
                 image_bytes = _plotly_fig_to_png_bytes(fig_price)
-                
+
                 text = gemini_generate_text(
                     prompt=prompt,
                     model=gemini_model,
@@ -2157,29 +2698,36 @@ Kullanıcının Sorusu: {user_msg}
         if st.session_state.gemini_text:
             st.markdown(st.session_state.gemini_text)
 
+
 # =============================
-# HEATMAP TAB (SEKTÖREL)
+# HEATMAP TAB
 # =============================
 with tab_heatmap:
     st.header("🔥 Sektörel Treemap (Heatmap)")
     st.write("Belirtilen pazar veya Screener sonuçları üzerinden şirketlerin günlük, haftalık ve aylık performanslarını görselleştirir.")
-    
+
     if st.button("Heatmap Verilerini Getir ve Oluştur (1D, 1W, 1M)", type="primary"):
-        with st.spinner("Toplu veri çekiliyor ve hesaplanıyor... (Lütfen bekleyin)"):
-            
+        with st.spinner("Toplu veri çekiliyor ve hesaplanıyor..."):
             if not st.session_state.screener_df.empty:
                 hm_tickers = st.session_state.screener_df["ticker"].tolist()
             else:
                 hm_tickers = universe[:100]
-                
+
             use_tickers = [normalize_ticker(t, market) for t in hm_tickers]
-            
-            df_all = yf.download(use_tickers, period="1mo", interval="1d", auto_adjust=True, group_by="ticker", progress=False)
-            
+
+            try:
+                df_all = yf.download(use_tickers, period="1mo", interval="1d", auto_adjust=True, group_by="ticker", progress=False)
+            except Exception:
+                df_all = pd.DataFrame()
+
             hm_data = []
             for t in use_tickers:
                 try:
-                    df_t = df_all if len(use_tickers) == 1 else df_all[t]
+                    if len(use_tickers) == 1:
+                        df_t = df_all.copy()
+                    else:
+                        df_t = df_all[t].copy()
+
                     df_t = df_t.dropna()
                     if len(df_t) >= 2:
                         c_last = float(df_t["Close"].iloc[-1])
@@ -2190,45 +2738,67 @@ with tab_heatmap:
                         ret_1d = (c_last / c_prev_1d - 1) * 100
                         ret_1wk = (c_last / c_prev_1wk - 1) * 100
                         ret_1mo = (c_last / c_prev_1mo - 1) * 100
-                        
+
                         sector = "Genel"
                         if not st.session_state.screener_df.empty:
-                            row_match = st.session_state.screener_df[st.session_state.screener_df["ticker"] == t]
-                            if not row_match.empty and pd.notna(row_match["sector"].iloc[0]):
-                                sector = str(row_match["sector"].iloc[0])
+                            row_match = find_screener_row(st.session_state.screener_df, t)
+                            if row_match and pd.notna(row_match.get("sector")) and str(row_match.get("sector")).strip():
+                                sector = str(row_match.get("sector"))
 
-                        hm_data.append({
-                            "Ticker": t,
-                            "Sector": sector,
-                            "1 Günlük %": ret_1d,
-                            "1 Haftalık %": ret_1wk,
-                            "1 Aylık %": ret_1mo
-                        })
+                        hm_data.append(
+                            {
+                                "Ticker": t,
+                                "Sector": sector,
+                                "1 Günlük %": ret_1d,
+                                "1 Haftalık %": ret_1wk,
+                                "1 Aylık %": ret_1mo,
+                            }
+                        )
                 except Exception:
                     pass
-            
+
             df_hm = pd.DataFrame(hm_data)
-            
+
         if not df_hm.empty:
             df_hm["Abs_1D"] = df_hm["1 Günlük %"].abs()
-            
+
             st.subheader("GÜNLÜK Performans")
-            fig_hm_1d = px.treemap(df_hm, path=[px.Constant("Tüm Pazar"), "Sector", "Ticker"], values="Abs_1D", color="1 Günlük %", 
-                                   color_continuous_scale="RdYlGn", color_continuous_midpoint=0, 
-                                   custom_data=["1 Günlük %", "1 Haftalık %", "1 Aylık %"])
-            fig_hm_1d.update_traces(hovertemplate="<b>%{label}</b><br>1 Günlük: %{customdata[0]:.2f}%<br>1 Haftalık: %{customdata[1]:.2f}%<br>1 Aylık: %{customdata[2]:.2f}%")
+            fig_hm_1d = px.treemap(
+                df_hm,
+                path=[px.Constant("Tüm Pazar"), "Sector", "Ticker"],
+                values="Abs_1D",
+                color="1 Günlük %",
+                color_continuous_scale="RdYlGn",
+                color_continuous_midpoint=0,
+                custom_data=["1 Günlük %", "1 Haftalık %", "1 Aylık %"],
+            )
+            fig_hm_1d.update_traces(
+                hovertemplate="<b>%{label}</b><br>1 Günlük: %{customdata[0]:.2f}%<br>1 Haftalık: %{customdata[1]:.2f}%<br>1 Aylık: %{customdata[2]:.2f}%"
+            )
             st.plotly_chart(fig_hm_1d, use_container_width=True)
-            
+
             st.subheader("HAFTALIK Performans")
             df_hm["Abs_1W"] = df_hm["1 Haftalık %"].abs()
-            fig_hm_1w = px.treemap(df_hm, path=[px.Constant("Tüm Pazar"), "Sector", "Ticker"], values="Abs_1W", color="1 Haftalık %", 
-                                   color_continuous_scale="RdYlGn", color_continuous_midpoint=0)
+            fig_hm_1w = px.treemap(
+                df_hm,
+                path=[px.Constant("Tüm Pazar"), "Sector", "Ticker"],
+                values="Abs_1W",
+                color="1 Haftalık %",
+                color_continuous_scale="RdYlGn",
+                color_continuous_midpoint=0,
+            )
             st.plotly_chart(fig_hm_1w, use_container_width=True)
-            
+
             st.subheader("AYLIK Performans")
             df_hm["Abs_1M"] = df_hm["1 Aylık %"].abs()
-            fig_hm_1m = px.treemap(df_hm, path=[px.Constant("Tüm Pazar"), "Sector", "Ticker"], values="Abs_1M", color="1 Aylık %", 
-                                   color_continuous_scale="RdYlGn", color_continuous_midpoint=0)
+            fig_hm_1m = px.treemap(
+                df_hm,
+                path=[px.Constant("Tüm Pazar"), "Sector", "Ticker"],
+                values="Abs_1M",
+                color="1 Aylık %",
+                color_continuous_scale="RdYlGn",
+                color_continuous_midpoint=0,
+            )
             st.plotly_chart(fig_hm_1m, use_container_width=True)
         else:
             st.error("Heatmap için yeterli veri çekilemedi.")
@@ -2252,7 +2822,9 @@ with tab_export:
         f_single = fetch_fundamentals_generic(ticker, market=market)
         f_score, f_breakdown, f_pass = fundamental_score_row(f_single, fa_mode, thresholds)
         fa_eval = {
-            "mode": fa_mode, "score": f_score, "passed": f_pass,
+            "mode": fa_mode,
+            "score": f_score,
+            "passed": f_pass,
             "ok_cnt": sum(1 for v in f_breakdown.values() if v.get("available") and v.get("ok")),
             "coverage": sum(1 for v in f_breakdown.values() if v.get("available")),
         }
@@ -2260,14 +2832,23 @@ with tab_export:
         fa_row = merge_fa_row(screener_row, f_single, fa_eval)
 
     meta = {
-        "market": market, "ticker": ticker, "interval": interval, "period": period,
-        "preset": preset_name, "ema_fast": ema_fast, "ema_slow": ema_slow,
-        "rsi_period": rsi_period, "bb_period": bb_period, "bb_std": bb_std,
-        "atr_period": atr_period, "vol_sma": vol_sma,
+        "market": market,
+        "ticker": ticker,
+        "interval": interval,
+        "period": period,
+        "preset": preset_name,
+        "ema_fast": ema_fast,
+        "ema_slow": ema_slow,
+        "rsi_period": rsi_period,
+        "bb_period": bb_period,
+        "bb_std": bb_std,
+        "atr_period": atr_period,
+        "vol_sma": vol_sma,
     }
 
     ta_summary = {
-        "rec": rec, "close": fmt_num(float(latest["Close"]), 2),
+        "rec": rec,
+        "close": fmt_num(float(latest["Close"]), 2),
         "live": fmt_num(float(live_price), 2) if np.isfinite(live_price) else "N/A",
         "score": fmt_num(float(latest.get("SCORE", np.nan)), 0),
         "rsi": fmt_num(float(latest.get("RSI", np.nan)), 2),
@@ -2282,12 +2863,27 @@ with tab_export:
     overbought_export = overbought_result if include_overbought else None
 
     html_bytes = build_html_report(
-        title=f"FA→TA Trading Report - {ticker}", meta=meta, checkpoints=checkpoints,
-        metrics=metrics, tp=tp, rr_info=rr_info, figs=(figs_for_report if include_charts else {}),
-        fa_row=fa_row, gemini_insight=gemini_text, pa_pack=pa_pack_export, sentiment_summary=sentiment_export,
+        title=f"FA→TA Trading Report - {ticker}",
+        meta=meta,
+        checkpoints=checkpoints,
+        metrics=metrics,
+        tp=tp,
+        rr_info=rr_info,
+        figs=(figs_for_report if include_charts else {}),
+        fa_row=fa_row,
+        gemini_insight=gemini_text,
+        pa_pack=pa_pack_export,
+        sentiment_summary=sentiment_export,
         overbought_result=overbought_export,
     )
-    st.download_button("⬇️ HTML İndir (Önerilen)", data=html_bytes, file_name=f"{ticker}_FA_TA_report.html", mime="text/html", use_container_width=True)
+    st.download_button(
+        "⬇️ HTML İndir (Önerilen)",
+        data=html_bytes,
+        file_name=f"{ticker}_FA_TA_report.html",
+        mime="text/html",
+        use_container_width=True,
+    )
+
     st.divider()
 
     if not REPORTLAB_OK:
@@ -2296,16 +2892,34 @@ with tab_export:
         if st.button("🧾 PDF Oluştur (reportlab)", use_container_width=True):
             with st.spinner("PDF oluşturuluyor..."):
                 pdf_bytes = generate_pdf_report(
-                    title=f"FA→TA Trading Report - {ticker}", subtitle="Educational analysis.", meta=meta,
-                    checkpoints=checkpoints, ta_summary=ta_summary, target_band=tp, rr_info=rr_info,
-                    backtest_metrics=metrics, fa_row=fa_row, levels=tp.get("levels", []),
-                    trades_df=(tdf if include_trades else None), figs=(figs_for_report if include_charts else None),
-                    include_charts=include_charts, gemini_insight=gemini_text, pa_pack=pa_pack_export,
-                    sentiment_summary=sentiment_export, overbought_result=overbought_export,
+                    title=f"FA→TA Trading Report - {ticker}",
+                    subtitle="Educational analysis.",
+                    meta=meta,
+                    checkpoints=checkpoints,
+                    ta_summary=ta_summary,
+                    target_band=tp,
+                    rr_info=rr_info,
+                    backtest_metrics=metrics,
+                    fa_row=fa_row,
+                    levels=tp.get("levels", []),
+                    trades_df=(tdf if include_trades else None),
+                    figs=(figs_for_report if include_charts else None),
+                    include_charts=include_charts,
+                    gemini_insight=gemini_text,
+                    pa_pack=pa_pack_export,
+                    sentiment_summary=sentiment_export,
+                    overbought_result=overbought_export,
                 )
+
             if pdf_bytes:
                 st.success("PDF hazır ✅")
-                st.download_button("⬇️ PDF İndir", data=pdf_bytes, file_name=f"{ticker}_FA_TA_report.pdf", mime="application/pdf", use_container_width=True)
+                st.download_button(
+                    "⬇️ PDF İndir",
+                    data=pdf_bytes,
+                    file_name=f"{ticker}_FA_TA_report.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
                 st.info("Grafikler gelmiyorsa `kaleido` kütüphanesini requirements'a eklemelisin.")
             else:
                 st.error("PDF üretilemedi.")
