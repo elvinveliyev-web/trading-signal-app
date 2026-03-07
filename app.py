@@ -155,31 +155,36 @@ def max_drawdown(eq: pd.Series) -> float:
     return float(dd.min())
 
 # =============================
-# NEW: Aşırı Alım / Spekülasyon Göstergeleri
+# NEW: Aşırı Alım / Spekülasyon Göstergeleri (EKLENDİ)
 # =============================
 def add_overbought_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """DataFrame'e aşırı alım, spekülasyon ve değerleme göstergeleri ekler."""
     df = df.copy()
     
-    # 1. RSI aşırı alım/satım bölgeleri (zaten var, flag ekleyelim)
+    # 1. RSI aşırı alım/satım bölgeleri
     df['RSI_OVERBOUGHT'] = (df['RSI'] > 70).astype(int)
     df['RSI_OVERSOLD'] = (df['RSI'] < 30).astype(int)
     
     # 2. Bollinger Bandı %B (fiyatın banda göre konumu)
     df['BB_PERCENT_B'] = (df['Close'] - df['BB_lower']) / (df['BB_upper'] - df['BB_lower'])
-    df['BB_OVERBOUGHT'] = (df['Close'] > df['BB_upper']).astype(int)  # aşırı alım
-    df['BB_OVERSOLD'] = (df['Close'] < df['BB_lower']).astype(int)     # aşırı satım
+    df['BB_OVERBOUGHT'] = (df['Close'] > df['BB_upper']).astype(int)
+    df['BB_OVERSOLD'] = (df['Close'] < df['BB_lower']).astype(int)
     
-    # 3. Volume Spike (ani hacim artışı, spekülasyon belirtisi)
+    # 3. Bollinger Bandı genişliği / sıkışması (YENİ)
+    df['BB_WIDTH'] = (df['BB_upper'] - df['BB_lower']) / df['BB_mid']
+    # Sıkışma: genişlik son 20 günün en düşük %10'luk diliminde
+    df['BB_SQUEEZE'] = (df['BB_WIDTH'] < df['BB_WIDTH'].rolling(20).quantile(0.1)).astype(int)
+    
+    # 4. Volume Spike (ani hacim artışı)
     df['VOLUME_SMA20'] = df['Volume'].rolling(20).mean()
     df['VOLUME_SPIKE'] = (df['Volume'] > df['VOLUME_SMA20'] * 1.5).astype(int)
     
-    # 4. Fiyat - Hareketli Ortalama Uzaklığı (aşırı değerlenme)
+    # 5. Fiyat - Hareketli Ortalama Uzaklığı (aşırı değerlenme)
     df['PRICE_TO_EMA50'] = (df['Close'] / df['EMA50'] - 1) * 100
     df['PRICE_TO_EMA200'] = (df['Close'] / df['EMA200'] - 1) * 100
     df['PRICE_EXTREME'] = ((df['PRICE_TO_EMA50'] > 20) | (df['PRICE_TO_EMA200'] > 30)).astype(int)
     
-    # 5. Stokastik RSI (opsiyonel, ekleyelim)
+    # 6. Stokastik RSI (YENİ)
     def stoch_rsi(series, period=14, smooth_k=3, smooth_d=3):
         # RSI'nın stokastik hesaplaması
         rsi_vals = series
@@ -193,8 +198,7 @@ def add_overbought_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['STOCH_RSI_K'], df['STOCH_RSI_D'] = stoch_rsi(df['RSI'])
     df['STOCH_OVERBOUGHT'] = (df['STOCH_RSI_K'] > 80).astype(int)
     
-    # 6. Hacim / Fiyat uyumsuzluğu (divergence) basit gösterge
-    # Fiyat yükselirken hacim düşüyorsa zayıflama
+    # 7. Hacim / Fiyat uyumsuzluğu
     df['VOLUME_DIR'] = np.sign(df['Volume'].diff()).fillna(0)
     df['PRICE_DIR'] = np.sign(df['Close'].diff()).fillna(0)
     df['WEAK_UPTREND'] = ((df['PRICE_DIR'] > 0) & (df['VOLUME_DIR'] < 0)).astype(int)
@@ -227,7 +231,7 @@ def detect_speculation(df: pd.DataFrame) -> Dict[str, Any]:
         result['oversold_score'] += 20
         result['details']['bb'] = "Fiyat Bollinger alt bandında"
     
-    # Stokastik RSI
+    # Stokastik RSI (YENİ)
     if last['STOCH_OVERBOUGHT']:
         result['overbought_score'] += 15
         result['details']['stoch'] = "Stokastik RSI aşırı alımda"
@@ -247,6 +251,11 @@ def detect_speculation(df: pd.DataFrame) -> Dict[str, Any]:
         result['speculation_score'] += 20
         result['details']['weak_trend'] = "Fiyat yükselirken hacim düşüyor (zayıflama)"
     
+    # Bollinger sıkışması (potansiyel patlama) (YENİ)
+    if last['BB_SQUEEZE']:
+        result['speculation_score'] += 10
+        result['details']['squeeze'] = "Bollinger sıkışması (yakında büyük hareket)"
+    
     # Toplam skorlar
     result['overbought_score'] = min(100, result['overbought_score'])
     result['oversold_score'] = min(100, result['oversold_score'])
@@ -265,7 +274,7 @@ def detect_speculation(df: pd.DataFrame) -> Dict[str, Any]:
     return result
 
 # =============================
-# Feature builder (güncellenmiş)
+# Feature builder (güncellenmiş: yeni göstergeler eklendi)
 # =============================
 def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     df = df.copy()
@@ -280,7 +289,7 @@ def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     df["VOL_SMA"] = df["Volume"].rolling(int(cfg["vol_sma"])).mean()
     df["ATR_PCT"] = (df["ATR"] / df["Close"]).replace([np.inf, -np.inf], np.nan)
     
-    # Yeni aşırı alım/spekülasyon göstergeleri
+    # Yeni aşırı alım/spekülasyon göstergeleri (EKLEME)
     df = add_overbought_indicators(df)
     
     return df
@@ -1008,7 +1017,8 @@ def df_snapshot_for_llm(df: pd.DataFrame, n: int = 140) -> dict:
         "MACD_hist", "BB_mid", "BB_upper", "BB_lower",
         "ATR", "ATR_PCT", "VOL_SMA", "SCORE", "ENTRY", "EXIT",
         # Yeni eklenenler:
-        "RSI_OVERBOUGHT", "BB_OVERBOUGHT", "VOLUME_SPIKE", "PRICE_EXTREME", "STOCH_OVERBOUGHT", "WEAK_UPTREND"
+        "RSI_OVERBOUGHT", "BB_OVERBOUGHT", "VOLUME_SPIKE", "PRICE_EXTREME", "STOCH_OVERBOUGHT", "WEAK_UPTREND",
+        "BB_WIDTH", "BB_SQUEEZE", "STOCH_RSI_K", "STOCH_RSI_D", "PRICE_TO_EMA50", "PRICE_TO_EMA200"
     ]
     cols = [c for c in use_cols if c in df.columns]
     tail = df[cols].tail(n).copy()
@@ -1373,36 +1383,108 @@ if "sentiment_summary" not in st.session_state:
     st.session_state.sentiment_summary = ""
 
 # =============================
-# Sidebar
+# Sidebar (EĞİTİCİ AÇIKLAMALAR EKLENDİ)
 # =============================
 with st.sidebar:
     st.header("Piyasa")
-    market = st.selectbox("Market", ["USA", "BIST"], index=0)
+    market = st.selectbox(
+        "Market",
+        ["USA", "BIST"],
+        index=0,
+        help="Analiz edilecek borsayı seçin. USA için ABD hisseleri, BIST için Borsa İstanbul hisseleri."
+    )
 
     usa_bucket = None
     if market == "USA":
-        usa_bucket = st.selectbox("USA Universe", ["S&P 500", "Nasdaq 100"], index=0)
+        usa_bucket = st.selectbox(
+            "USA Universe",
+            ["S&P 500", "Nasdaq 100"],
+            index=0,
+            help="Hangi endeksteki hisseleri tarayacağınızı seçin. S&P 500 daha geniş, Nasdaq 100 teknoloji ağırlıklı."
+        )
 
     st.header("1) Fundamental Screener")
     use_fa_default = True
-    use_fa = st.checkbox("Fundamental filtreyi kullan", value=use_fa_default)
-    fa_mode = st.selectbox("Fundamental Mod", ["Quality", "Value", "Growth"], index=0, disabled=(not use_fa))
+    use_fa = st.checkbox(
+        "Fundamental filtreyi kullan",
+        value=use_fa_default,
+        help="Temel analiz (FA) kurallarını aktifleştirir. Şirketlerin mali tablolarını değerlendirerek puanlar."
+    )
+    fa_mode = st.selectbox(
+        "Fundamental Mod",
+        ["Quality", "Value", "Growth"],
+        index=0,
+        disabled=(not use_fa),
+        help="Quality: Karlılık ve düşük borç arar. Value: Ucuz kalmış hisseleri bulur. Growth: Yüksek büyüme oranlarına odaklanır."
+    )
 
     st.caption("Eşikler (Genel) — BIST'te coverage düşük olabilir")
-    roe = st.slider("ROE min", 0.0, 0.40, 0.15, 0.01, disabled=(not use_fa))
-    op_margin = st.slider("Operating Margin min", 0.0, 0.40, 0.10, 0.01, disabled=(not use_fa))
-    profit_margin = st.slider("Profit Margin min", 0.0, 0.40, 0.08, 0.01, disabled=(not use_fa))
-    dte = st.slider("Debt/Equity max", 0.0, 3.0, 1.0, 0.05, disabled=(not use_fa))
-    fpe = st.slider("Forward P/E max", 0.0, 60.0, 20.0, 1.0, disabled=(not use_fa))
-    peg = st.slider("PEG max", 0.0, 5.0, 1.5, 0.1, disabled=(not use_fa))
-    ps = st.slider("P/S max", 0.0, 30.0, 6.0, 0.5, disabled=(not use_fa))
-    pb = st.slider("P/B max", 0.0, 30.0, 6.0, 0.5, disabled=(not use_fa))
-    rev_g = st.slider("Revenue Growth min", 0.0, 0.50, 0.10, 0.01, disabled=(not use_fa))
-    earn_g = st.slider("Earnings Growth min", 0.0, 0.50, 0.10, 0.01, disabled=(not use_fa))
+    roe = st.slider(
+        "ROE min", 0.0, 0.40, 0.15, 0.01,
+        disabled=(not use_fa),
+        help="Özkaynak Karlılığı (Return on Equity). Şirketin öz sermayesini ne kadar verimli kullandığını gösterir. Yüksek ROE genellikle iyidir."
+    )
+    op_margin = st.slider(
+        "Operating Margin min", 0.0, 0.40, 0.10, 0.01,
+        disabled=(not use_fa),
+        help="Faaliyet Kar Marjı. Şirketin ana faaliyetlerinden elde ettiği kârlılık. Sektör ortalamasıyla karşılaştırın."
+    )
+    profit_margin = st.slider(
+        "Profit Margin min", 0.0, 0.40, 0.08, 0.01,
+        disabled=(not use_fa),
+        help="Net Kar Marjı. Tüm giderler ve vergiler düşüldükten sonra kalan net kârın satışlara oranı."
+    )
+    dte = st.slider(
+        "Debt/Equity max", 0.0, 3.0, 1.0, 0.05,
+        disabled=(not use_fa),
+        help="Borç/Özkaynak oranı. Şirketin ne kadar borçlu olduğunu gösterir. 1.0 altı genellikle güvenli kabul edilir."
+    )
+    fpe = st.slider(
+        "Forward P/E max", 0.0, 60.0, 20.0, 1.0,
+        disabled=(not use_fa),
+        help="İleri F/K (Fiyat/Kazanç) oranı. Gelecek yıl beklenen kazançlara göre hissenin ucuz/pahalı olduğunu gösterir."
+    )
+    peg = st.slider(
+        "PEG max", 0.0, 5.0, 1.5, 0.1,
+        disabled=(not use_fa),
+        help="F/K / Büyüme oranı. 1.0 civarı hissenin büyüme potansiyeline göre adil fiyatlandığını gösterir."
+    )
+    ps = st.slider(
+        "P/S max", 0.0, 30.0, 6.0, 0.5,
+        disabled=(not use_fa),
+        help="Fiyat/Satış oranı. Henüz kâr etmeyen ancak satışları büyük şirketler için kullanılır."
+    )
+    pb = st.slider(
+        "P/B max", 0.0, 30.0, 6.0, 0.5,
+        disabled=(not use_fa),
+        help="Piyasa Değeri / Defter Değeri. Şirketin net varlıklarına göre kaç katından işlem gördüğü."
+    )
+    rev_g = st.slider(
+        "Revenue Growth min", 0.0, 0.50, 0.10, 0.01,
+        disabled=(not use_fa),
+        help="Yıllık ciro büyümesi. Şirketin satışlarının ne kadar arttığını gösterir."
+    )
+    earn_g = st.slider(
+        "Earnings Growth min", 0.0, 0.50, 0.10, 0.01,
+        disabled=(not use_fa),
+        help="Yıllık kâr büyümesi. Net kârdaki artış oranı."
+    )
 
-    min_score = st.slider("Min Fundamental Score", 0, 100, 60, 1, disabled=(not use_fa))
-    min_ok = st.slider("Min OK sayısı", 1, 5, 3, 1, disabled=(not use_fa))
-    min_coverage = st.slider("Min Coverage (NaN olmayan)", 1, 5, 3, 1, disabled=(not use_fa))
+    min_score = st.slider(
+        "Min Fundamental Score", 0, 100, 60, 1,
+        disabled=(not use_fa),
+        help="Ağırlıklı puanın alt limiti. Bu puanın üzerindeki hisseler 'PASS' olarak işaretlenir."
+    )
+    min_ok = st.slider(
+        "Min OK sayısı", 1, 5, 3, 1,
+        disabled=(not use_fa),
+        help="Başarılı kriter sayısı. En az bu kadar kriteri sağlamalı."
+    )
+    min_coverage = st.slider(
+        "Min Coverage (NaN olmayan)", 1, 5, 3, 1,
+        disabled=(not use_fa),
+        help="Verisi olan kriter sayısı. BIST'te veri eksikliği olabileceği için bu sayı düşük tutulabilir."
+    )
 
     thresholds = {
         "roe": roe, "op_margin": op_margin, "profit_margin": profit_margin, "dte": dte, "fpe": fpe,
@@ -1411,8 +1493,10 @@ with st.sidebar:
     }
 
     if market == "USA":
-        if usa_bucket == "S&P 500": universe = load_universe_file(pjoin("universes", "sp500.txt"))
-        else: universe = load_universe_file(pjoin("universes", "nasdaq100.txt"))
+        if usa_bucket == "S&P 500":
+            universe = load_universe_file(pjoin("universes", "sp500.txt"))
+        else:
+            universe = load_universe_file(pjoin("universes", "nasdaq100.txt"))
         st.caption(f"Universe: {usa_bucket} (count: {len(universe)})")
     else:
         universe = load_universe_file(pjoin("universes", "bist100.txt"))
@@ -1426,53 +1510,140 @@ with st.sidebar:
 
     st.divider()
     st.header("2) Teknik Analiz + Backtest")
-    preset_name = st.selectbox("Teknik Mod", list(PRESETS.keys()), index=1)
+    preset_name = st.selectbox(
+        "Teknik Mod",
+        list(PRESETS.keys()),
+        index=1,
+        help="Önceden tanımlı risk profilleri. Defansif: düşük risk, Agresif: yüksek risk."
+    )
 
     st.subheader("Sembol (TA)")
     if st.session_state.selected_ticker:
         st.caption(f"Screener seçimi: **{st.session_state.selected_ticker}**")
         raw_ticker = st.text_input("Sembol", value=st.session_state.selected_ticker)
     else:
-        raw_ticker = st.text_input("Sembol (USA: AAPL, SPY) / BIST: THYAO", value="AAPL" if market == "USA" else "THYAO")
+        raw_ticker = st.text_input(
+            "Sembol (USA: AAPL, SPY) / BIST: THYAO",
+            value="AAPL" if market == "USA" else "THYAO",
+            help="Analiz etmek istediğiniz hisse senedinin sembolü. BIST için otomatik .IS eklenir."
+        )
 
     ticker = normalize_ticker(raw_ticker, market)
 
     st.subheader("Zaman Aralığı")
-    interval = st.selectbox("Interval", ["1d", "1h", "30m"], index=0)
-    period = st.selectbox("Periyot", ["6mo", "1y", "2y", "5y", "10y"], index=3)
+    interval = st.selectbox(
+        "Interval",
+        ["1d", "1h", "30m"],
+        index=0,
+        help="Mum zaman dilimi. 1d günlük, 1h saatlik analiz için. Backtest için 1d önerilir."
+    )
+    period = st.selectbox(
+        "Periyot",
+        ["6mo", "1y", "2y", "5y", "10y"],
+        index=3,
+        help="Verinin ne kadar geriye gidileceği. Daha uzun periyot daha sağlıklı backtest sağlar."
+    )
 
     st.divider()
     st.subheader("Teknik Parametreler")
-    ema_fast = st.number_input("EMA Fast", min_value=5, max_value=100, value=50, step=1)
-    ema_slow = st.number_input("EMA Slow", min_value=50, max_value=400, value=200, step=1)
-    rsi_period = st.number_input("RSI Period", min_value=5, max_value=30, value=14, step=1)
-    bb_period = st.number_input("Bollinger Period", min_value=10, max_value=50, value=20, step=1)
-    bb_std = st.number_input("Bollinger Std", min_value=1.0, max_value=3.5, value=2.0, step=0.1)
-    atr_period = st.number_input("ATR Period", min_value=5, max_value=30, value=14, step=1)
-    vol_sma = st.number_input("Volume SMA", min_value=5, max_value=60, value=20, step=1)
+    ema_fast = st.number_input(
+        "EMA Fast", min_value=5, max_value=100, value=50, step=1,
+        help="Kısa vadeli üstel hareketli ortalama. Fiyatın bu ortalamanın üstünde olması kısa vadeli yükseliş trendini gösterir."
+    )
+    ema_slow = st.number_input(
+        "EMA Slow", min_value=50, max_value=400, value=200, step=1,
+        help="Uzun vadeli üstel hareketli ortalama. Fiyat bu ortalamanın üstündeyse ana trend yükseliş, altındaysa düşüş trendi."
+    )
+    rsi_period = st.number_input(
+        "RSI Period", min_value=5, max_value=30, value=14, step=1,
+        help="RSI hesaplama periyodu. 14 gün standarttır. 70 üstü aşırı alım, 30 altı aşırı satım."
+    )
+    bb_period = st.number_input(
+        "Bollinger Period", min_value=10, max_value=50, value=20, step=1,
+        help="Bollinger bandı ortalama periyodu. Fiyatın üst banda yaklaşması aşırı alım, alt banda yaklaşması aşırı satım."
+    )
+    bb_std = st.number_input(
+        "Bollinger Std", min_value=1.0, max_value=3.5, value=2.0, step=0.1,
+        help="Bollinger bandı standart sapma katsayısı. 2 standart sapma %95 güven aralığı verir."
+    )
+    atr_period = st.number_input(
+        "ATR Period", min_value=5, max_value=30, value=14, step=1,
+        help="Ortalama Gerçek Aralık (Average True Range) periyodu. Volatilitenin ölçüsü, stop seviyesi belirlemede kullanılır."
+    )
+    vol_sma = st.number_input(
+        "Volume SMA", min_value=5, max_value=60, value=20, step=1,
+        help="Hacim basit hareketli ortalaması. Hacim bu ortalamanın üzerindeyse likidite yüksek, işlem anlamlıdır."
+    )
 
     st.subheader("Market Filtreleri")
-    use_spy_filter = st.checkbox("SPY > EMA200 filtresi (Sadece USA)", value=True, disabled=(market != "USA"))
-    use_bist_filter = st.checkbox("XU100 > EMA200 filtresi (Sadece BIST)", value=True, disabled=(market != "BIST"))
-    use_higher_tf_filter = st.checkbox("Haftalık trend filtresi (Fiyat > EMA200)", value=True)
+    use_spy_filter = st.checkbox(
+        "SPY > EMA200 filtresi (Sadece USA)",
+        value=True,
+        disabled=(market != "USA"),
+        help="S&P 500 endeksi 200 günlük ortalamanın altındaysa (ayı piyasası) alım sinyallerini engeller."
+    )
+    use_bist_filter = st.checkbox(
+        "XU100 > EMA200 filtresi (Sadece BIST)",
+        value=True,
+        disabled=(market != "BIST"),
+        help="BIST 100 endeksi 200 günlük ortalamanın altındaysa alım sinyallerini engeller."
+    )
+    use_higher_tf_filter = st.checkbox(
+        "Haftalık trend filtresi (Fiyat > EMA200)",
+        value=True,
+        help="Haftalık grafikte fiyatın 200 haftalık ortalamanın üzerinde olması gerekir. Ana trendin yükseliş olduğunu onaylar."
+    )
 
     st.subheader("Risk / Backtest Ayarları")
-    initial_capital = st.number_input("Başlangıç Sermayesi", min_value=100.0, value=10000.0, step=500.0)
-    risk_per_trade = st.slider("Trade başı risk (equity %)", min_value=0.002, max_value=0.05, value=0.01, step=0.001)
-    commission_bps = st.number_input("Komisyon (bps)", min_value=0.0, value=5.0, step=1.0)
-    slippage_bps = st.number_input("Slippage (bps)", min_value=0.0, value=2.0, step=1.0)
-    risk_free_annual = st.number_input("Risk-Free (yıllık)", min_value=0.0, value=0.0, step=0.01)
+    initial_capital = st.number_input(
+        "Başlangıç Sermayesi", min_value=100.0, value=10000.0, step=500.0,
+        help="Backtest için simüle edilecek başlangıç parası."
+    )
+    risk_per_trade = st.slider(
+        "Trade başı risk (equity %)", min_value=0.002, max_value=0.05, value=0.01, step=0.001,
+        help="Her işlemde kasanın yüzde kaçını riske edeceğiniz. Stop loss ile kaybedilecek maksimum miktar."
+    )
+    commission_bps = st.number_input(
+        "Komisyon (bps)", min_value=0.0, value=5.0, step=1.0,
+        help="İşlem başına komisyon (baz puan). 1 bps = %0.01."
+    )
+    slippage_bps = st.number_input(
+        "Slippage (bps)", min_value=0.0, value=2.0, step=1.0,
+        help="Kayma maliyeti. Sinyal fiyatından daha kötü fiyattan işlem gerçekleşme riski."
+    )
+    risk_free_annual = st.number_input(
+        "Risk-Free (yıllık)", min_value=0.0, value=0.0, step=0.01,
+        help="Risksiz faiz oranı (örnek: 0.05 = %5). Sharpe ve Sortino hesaplamalarında kullanılır."
+    )
 
     st.divider()
     st.header("3) AI Ayarları (Gemini)")
-    ai_on = st.checkbox("Gemini AI aktif", value=True)
-    gemini_model = st.text_input("Gemini Model", value="gemini-1.5-flash")
-    gemini_temp = st.slider("Temperature", 0.0, 1.0, 0.2, 0.05)
-    gemini_max_tokens = st.slider("Max Output Tokens", 256, 8192, 2048, 128)
+    ai_on = st.checkbox(
+        "Gemini AI aktif",
+        value=True,
+        help="Google Gemini AI ile grafik ve veri analizi yapılır."
+    )
+    gemini_model = st.text_input(
+        "Gemini Model",
+        value="gemini-1.5-flash",
+        help="Kullanılacak Gemini modeli. 1.5-flash hızlı ve yeterlidir."
+    )
+    gemini_temp = st.slider(
+        "Temperature", 0.0, 1.0, 0.2, 0.05,
+        help="Modelin yaratıcılığı. Düşük değerler daha tutarlı, yüksek değerler daha yaratıcı cevaplar üretir."
+    )
+    gemini_max_tokens = st.slider(
+        "Max Output Tokens", 256, 8192, 2048, 128,
+        help="Modelin üreteceği maksimum token sayısı. Daha uzun cevaplar için artırın."
+    )
 
     st.divider()
     st.header("4) Haber Duygu Analizi (Google News + Gemini)")
-    use_sentiment = st.checkbox("Haber duygu analizini aktifleştir", value=True, help="Google News'ten haber başlıklarını çeker, Gemini ile duygu analizi yapar. 'feedparser' kütüphanesi gerekir.")
+    use_sentiment = st.checkbox(
+        "Haber duygu analizini aktifleştir",
+        value=True,
+        help="Google News'ten haber başlıklarını çeker, Gemini ile duygu analizi yapar. 'feedparser' kütüphanesi gerekir."
+    )
 
     run_btn = st.button("🚀 Teknik Analizi Çalıştır", type="primary")
     if run_btn:
@@ -1622,11 +1793,11 @@ eq, tdf, metrics = backtest_long_only(df, cfg, risk_free_annual=risk_free_annual
 tp = target_price_band(df)
 rr_info = rr_from_atr_stop(latest, tp, cfg)
 
-# NEW: Aşırı alım / spekülasyon analizi
+# Aşırı alım / spekülasyon analizi
 overbought_result = detect_speculation(df)
 
 # =============================
-# Build figures once
+# Build figures once (GRAFİK ALTLARINA AÇIKLAMALAR EKLENDİ)
 # =============================
 fig_price = go.Figure()
 fig_price.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"))
@@ -1639,28 +1810,61 @@ entries = df[df["ENTRY"] == 1]
 exits = df[df["EXIT"] == 1]
 fig_price.add_trace(go.Scatter(x=entries.index, y=entries["Close"], mode="markers", name="ENTRY", marker=dict(symbol="triangle-up", size=10)))
 fig_price.add_trace(go.Scatter(x=exits.index, y=exits["Close"], mode="markers", name="EXIT", marker=dict(symbol="triangle-down", size=10)))
-fig_price.update_layout(height=600, xaxis_rangeslider_visible=False)
+fig_price.update_layout(
+    height=600,
+    xaxis_rangeslider_visible=False,
+    title="Fiyat Grafiği + EMA + Bollinger + Sinyaller",
+    yaxis_title="Fiyat",
+    xaxis_title="Tarih"
+)
 
 fig_rsi = go.Figure()
 fig_rsi.add_trace(go.Scatter(x=df.index, y=df["RSI"], name="RSI"))
-fig_rsi.add_hline(y=70); fig_rsi.add_hline(y=30)
-fig_rsi.update_layout(height=260)
+fig_rsi.add_hline(y=70, line_dash="dash", line_color="red", annotation_text="Aşırı Alım")
+fig_rsi.add_hline(y=30, line_dash="dash", line_color="green", annotation_text="Aşırı Satım")
+fig_rsi.update_layout(
+    height=260,
+    title="RSI (Göreceli Güç Endeksi)",
+    yaxis_title="RSI",
+    xaxis_title="Tarih"
+)
 
 fig_macd = go.Figure()
 fig_macd.add_trace(go.Scatter(x=df.index, y=df["MACD"], name="MACD"))
 fig_macd.add_trace(go.Scatter(x=df.index, y=df["MACD_signal"], name="Signal"))
 fig_macd.add_trace(go.Bar(x=df.index, y=df["MACD_hist"], name="Hist"))
-fig_macd.update_layout(height=260)
+fig_macd.update_layout(
+    height=260,
+    title="MACD (Moving Average Convergence Divergence)",
+    yaxis_title="MACD",
+    xaxis_title="Tarih"
+)
 
 fig_atr = go.Figure()
 fig_atr.add_trace(go.Scatter(x=df.index, y=df["ATR_PCT"] * 100, name="ATR%"))
-fig_atr.update_layout(height=260, yaxis_title="%")
+fig_atr.update_layout(
+    height=260,
+    title="ATR % (Ortalama Gerçek Aralık / Fiyat)",
+    yaxis_title="%",
+    xaxis_title="Tarih"
+)
 
 fig_eq = go.Figure()
 fig_eq.add_trace(go.Scatter(x=eq.index, y=eq.values, name="Equity"))
-fig_eq.update_layout(height=320)
+fig_eq.update_layout(
+    height=320,
+    title="Backtest Sermaye Eğrisi",
+    yaxis_title="Sermaye",
+    xaxis_title="Tarih"
+)
 
-figs_for_report = {"Price + EMA + Bollinger + Signals": fig_price, "RSI": fig_rsi, "MACD": fig_macd, "ATR%": fig_atr, "Equity Curve": fig_eq}
+figs_for_report = {
+    "Price + EMA + Bollinger + Signals": fig_price,
+    "RSI": fig_rsi,
+    "MACD": fig_macd,
+    "ATR%": fig_atr,
+    "Equity Curve": fig_eq
+}
 
 # =============================
 # Tabs
@@ -1678,41 +1882,108 @@ with tab_dash:
     # Yeni aşırı alım metrikleri
     st.subheader("📊 Aşırı Alım / Spekülasyon Göstergeleri")
     col_ob1, col_ob2, col_ob3, col_ob4 = st.columns(4)
-    col_ob1.metric("Aşırı Alım Skoru", f"{overbought_result['overbought_score']}/100", help="Yüksek skor aşırı değerli olduğunu gösterir")
-    col_ob2.metric("Aşırı Satım Skoru", f"{overbought_result['oversold_score']}/100", help="Yüksek skor aşırı değersiz olduğunu gösterir")
-    col_ob3.metric("Spekülasyon Skoru", f"{overbought_result['speculation_score']}/100", help="Ani hacim artışı ve zayıf trend")
-    col_ob4.metric("Genel Karar", overbought_result['verdict'])
+    col_ob1.metric(
+        "Aşırı Alım Skoru", f"{overbought_result['overbought_score']}/100",
+        help="Yüksek skor (≥50) hissenin aşırı değerli olabileceğini, yakında düşüş yaşanabileceğini gösterir."
+    )
+    col_ob2.metric(
+        "Aşırı Satım Skoru", f"{overbought_result['oversold_score']}/100",
+        help="Yüksek skor (≥50) hissenin aşırı değersiz olabileceğini, yakında yükseliş yaşanabileceğini gösterir."
+    )
+    col_ob3.metric(
+        "Spekülasyon Skoru", f"{overbought_result['speculation_score']}/100",
+        help="Yüksek skor (≥50) hissede spekülatif hareketler (ani hacim, zayıf trend) olduğunu gösterir."
+    )
+    col_ob4.metric(
+        "Genel Karar", overbought_result['verdict'],
+        help="Tüm göstergelerin birleşik yorumu."
+    )
     
     with st.expander("Detaylı Aşırı Alım/Spekülasyon Analizi"):
         for k, v in overbought_result['details'].items():
             st.write(f"• {v}")
 
-    c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
-    c1.metric("Market", market)
-    c2.metric("Sembol", ticker)
-    c3.metric("Daily Close", f"{latest['Close']:.2f}")
-    c4.metric("Live/Last", f"{live_price:.2f}" if np.isfinite(live_price) else "N/A")
-    c5.metric("Skor", f"{latest['SCORE']:.0f}/100")
-    c6.metric("Sinyal", rec)
-    c7.metric("Piyasa Rejim Filtresi", "BULL ✅" if market_filter_ok else "BEAR ❌")
-    c8.metric("Haftalık Trend", "BULL ✅" if higher_tf_filter_ok else "BEAR ❌")
+    c1, c2, c3, c4, c5, c6, c7, c8, c9 = st.columns(9)
+    c1.metric(
+        "Market", market,
+        help="Seçili piyasa: USA veya BIST."
+    )
+    c2.metric(
+        "Sembol", ticker,
+        help="Analiz edilen hisse senedi sembolü."
+    )
+    c3.metric(
+        "Daily Close", f"{latest['Close']:.2f}",
+        help="Son mumun kapanış fiyatı (düzeltilmiş)."
+    )
+    c4.metric(
+        "Live/Last", f"{live_price:.2f}" if np.isfinite(live_price) else "N/A",
+        help="Anlık piyasa fiyatı (çekilebildiyse)."
+    )
+    c5.metric(
+        "Skor", f"{latest['SCORE']:.0f}/100",
+        help="Teknik strateji skoru. 0-100 arası, yüksek skor daha güçlü sinyal."
+    )
+    c6.metric(
+        "Sinyal", rec,
+        help="Algoritmanın son durumu: AL, SAT, İZLE."
+    )
+    c7.metric(
+        "Piyasa Rejim Filtresi", "BULL ✅" if market_filter_ok else "BEAR ❌",
+        help="SPY veya XU100 endeksinin 200 günlük ortalamaya göre durumu. BULL: yükseliş trendi, BEAR: düşüş trendi."
+    )
+    c8.metric(
+        "Haftalık Trend", "BULL ✅" if higher_tf_filter_ok else "BEAR ❌",
+        help="Haftalık grafikte fiyatın 200 haftalık ortalamaya göre durumu. BULL: ana trend yükseliş."
+    )
+    c9.metric(
+        "Aşırı Değer Skoru", f"{overbought_result['overbought_score']:.0f}",
+        help="Aşırı alım/satım skoru. 70+ aşırı alım, 30- aşırı satım."
+    )
 
     st.subheader("✅ Kontrol Noktaları (Son Bar)")
+    # Checkpoints'leri metric olarak gösterelim
     cp_cols = st.columns(3)
-    for i, (k, v) in enumerate(checkpoints.items()):
+    cp_items = list(checkpoints.items())
+    for i, (k, v) in enumerate(cp_items):
         with cp_cols[i % 3]:
-            st.write(("🟢 " if v else "🔴 ") + k)
+            if k == "Market Filter OK":
+                st.metric(k, "✅" if v else "❌", help="Piyasa endeksi 200 günlük ortalamanın üstünde mi?")
+            elif k == "Higher TF Filter OK":
+                st.metric(k, "✅" if v else "❌", help="Haftalık grafikte fiyat 200 haftalık EMA'nın üstünde mi?")
+            elif k == "Liquidity (Volume > VolSMA)":
+                st.metric(k, "✅" if v else "❌", help="Hacim, hareketli ortalamanın üstünde mi? (Likidite kontrolü)")
+            elif k == "Trend (Close>EMA200 & EMA50>EMA200)":
+                st.metric(k, "✅" if v else "❌", help="Fiyat EMA200 üstünde ve EMA50 EMA200 üstünde mi? (Trend yönü)")
+            elif k.startswith("RSI >"):
+                st.metric(k, "✅" if v else "❌", help=f"RSI değeri giriş eşiğinin üstünde mi? (Momentum)")
+            elif k == "MACD Hist > 0":
+                st.metric(k, "✅" if v else "❌", help="MACD histogramı pozitif mi? (Momentum yönü)")
+            elif k.startswith("ATR% <"):
+                st.metric(k, "✅" if v else "❌", help="ATR'nin fiyata oranı belirlenen maksimumun altında mı? (Volatilite kontrolü)")
+            elif k == "Bollinger (Close>BB_mid or Breakout)":
+                st.metric(k, "✅" if v else "❌", help="Fiyat Bollinger orta bandının üstünde veya üst banda kırılmış mı?")
+            elif k == "OBV > OBV_EMA":
+                st.metric(k, "✅" if v else "❌", help="On-Balance Volume kendi EMA'sının üstünde mi? (Hacim trendi)")
+            else:
+                st.metric(k, "✅" if v else "❌")
 
     st.subheader("🎯 Hedef Fiyat Bandı (Senaryo)")
     base_px = float(tp["base"])
     rr_str = fmt_rr(rr_info.get("rr"))
 
     bcol1, bcol2, bcol3 = st.columns(3)
-    bcol1.metric("Base", f"{base_px:.2f}")
+    bcol1.metric(
+        "Base", f"{base_px:.2f}",
+        help="Referans alınan anlık/kapanış fiyat."
+    )
 
     if tp.get("bull"):
         bull1, bull2, r1 = tp["bull"]
-        bcol2.metric("Bull Band", f"{bull1:.2f} → {bull2:.2f}")
+        bcol2.metric(
+            "Bull Band", f"{bull1:.2f} → {bull2:.2f}",
+            help="ATR bazlı yukarı yönlü dinamik hedef bölgesi. İlk hedef, ikinci hedef."
+        )
         if r1 is not None and np.isfinite(r1):
             bcol2.caption(f"Yakın direnç: {r1:.2f} ({pct_dist(r1, base_px):+.2f}%)")
     else:
@@ -1721,7 +1992,10 @@ with tab_dash:
 
     if tp.get("bear"):
         bear1, bear2, s1 = tp["bear"]
-        bcol3.metric("Bear Band", f"{bear1:.2f} → {bear2:.2f}  |  RR {rr_str}")
+        bcol3.metric(
+            "Bear Band", f"{bear1:.2f} → {bear2:.2f}  |  RR {rr_str}",
+            help="ATR bazlı aşağı yönlü dinamik stop bölgesi ve Risk/Ödül oranı."
+        )
         if s1 is not None and np.isfinite(s1):
             bcol3.caption(f"Yakın destek: {s1:.2f} ({pct_dist(s1, base_px):+.2f}%)")
     else:
@@ -1732,8 +2006,10 @@ with tab_dash:
         lines = []
         for lv in (levels or []):
             tag = ""
-            if s1 is not None and np.isfinite(s1) and abs(float(lv) - float(s1)) < 1e-9: tag = " 🟩 Yakın Destek"
-            if r1 is not None and np.isfinite(r1) and abs(float(lv) - float(r1)) < 1e-9: tag = " 🟥 Yakın Direnç"
+            if s1 is not None and np.isfinite(s1) and abs(float(lv) - float(s1)) < 1e-9:
+                tag = " 🟩 Yakın Destek"
+            if r1 is not None and np.isfinite(r1) and abs(float(lv) - float(r1)) < 1e-9:
+                tag = " 🟥 Yakın Direnç"
             dist = pct_dist(float(lv), base)
             dist_txt = f"{dist:+.2f}%" if dist is not None else ""
             lines.append(f"- {float(lv):.2f}  ({dist_txt}){tag}")
@@ -1744,29 +2020,38 @@ with tab_dash:
 
     st.subheader("📊 Fiyat + EMA + Bollinger + Sinyaller")
     st.plotly_chart(fig_price, use_container_width=True)
+    st.caption("**Yorum:** Mum grafiği, EMA50 (kısa vade), EMA200 (uzun vade) ve Bollinger bantları. Üçgenler alım (yeşil) ve satım (kırmızı) sinyallerini gösterir. Fiyat EMA200 üzerinde trend yükseliş, altında düşüş. Bollinger üst bandına yaklaşma aşırı alım, alt banda yaklaşma aşırı satım olabilir.")
 
     st.subheader("📉 RSI / MACD / ATR%")
     colA, colB, colC = st.columns(3)
-    colA.plotly_chart(fig_rsi, use_container_width=True)
-    colB.plotly_chart(fig_macd, use_container_width=True)
-    colC.plotly_chart(fig_atr, use_container_width=True)
+    with colA:
+        st.plotly_chart(fig_rsi, use_container_width=True)
+        st.caption("**RSI:** 70 üstü aşırı alım (düşüş beklenebilir), 30 altı aşırı satım (yükseliş beklenebilir).")
+    with colB:
+        st.plotly_chart(fig_macd, use_container_width=True)
+        st.caption("**MACD:** MACD çizgisi sinyal çizgisini yukarı keserse alım, aşağı keserse satım sinyali. Histogram pozitifse momentum yukarı.")
+    with colC:
+        st.plotly_chart(fig_atr, use_container_width=True)
+        st.caption("**ATR%:** Volatilitenin fiyata oranı. Yüksek değerler yüksek oynaklık, düşük değerler sakin piyasa.")
 
     st.subheader("🧪 Backtest Özeti (Long-only + Scale Out + Time Stop)")
-    m1, m2, m3, m4, m5, m6, m7, m8 = st.columns(8)
-    m1.metric("Total Return", f"{metrics['Total Return']*100:.1f}%")
-    m2.metric("Ann Return", f"{metrics['Annualized Return']*100:.1f}%")
-    m3.metric("Sharpe", f"{metrics['Sharpe']:.2f}")
-    m4.metric("Max DD", f"{metrics['Max Drawdown']*100:.1f}%")
-    m5.metric("Trades", f"{metrics['Trades']}")
-    m6.metric("Win Rate", f"{metrics['Win Rate']*100:.1f}%")
-    m7.metric("Beta", f"{metrics['Beta']:.2f}")
-    m8.metric("Info Ratio", f"{metrics['Information Ratio']:.2f}")
+    m1, m2, m3, m4, m5, m6, m7, m8, m9 = st.columns(9)
+    m1.metric("Total Return", f"{metrics['Total Return']*100:.1f}%", help="Backtest boyunca toplam getiri yüzdesi.")
+    m2.metric("Ann Return", f"{metrics['Annualized Return']*100:.1f}%", help="Yıllıklandırılmış ortalama getiri.")
+    m3.metric("Sharpe", f"{metrics['Sharpe']:.2f}", help="Sharpe oranı: getiri / risk. 1.0 üzeri iyi, 2.0 üzeri mükemmel.")
+    m4.metric("Max DD", f"{metrics['Max Drawdown']*100:.1f}%", help="Maksimum düşüş: kasanın tepe noktasından en büyük kaybı.")
+    m5.metric("Trades", f"{metrics['Trades']}", help="Toplam işlem sayısı.")
+    m6.metric("Win Rate", f"{metrics['Win Rate']*100:.1f}%", help="Kazanan işlemlerin yüzdesi.")
+    m7.metric("Beta", f"{metrics['Beta']:.2f}", help="Piyasaya duyarlılık. 1'den büyükse piyasadan daha oynak, küçükse daha az oynak.")
+    m8.metric("Info Ratio", f"{metrics['Information Ratio']:.2f}", help="Aktif getirinin takip hatasına oranı. Yüksek değerler iyi.")
+    m9.metric("Kelly %", f"{metrics['Kelly % (öneri)']:.1f}%", help="Kelly kriterine göre optimal pozisyon büyüklüğü yüzdesi.")
 
     with st.expander("Trade listesi (Detaylı Kâr/Zarar ve Çıkış Nedenleri)", expanded=False):
         st.dataframe(tdf, use_container_width=True, height=240)
 
     with st.expander("Equity curve (Sermaye Eğrisi)", expanded=False):
         st.plotly_chart(fig_eq, use_container_width=True)
+        st.caption("**Sermaye Eğrisi:** Zaman içinde kasanın değişimi. Düşüşler (drawdown) riski gösterir.")
 
     if sentiment_summary:
         st.subheader("📰 Haber Duygu Analizi (Google News + Gemini)")
@@ -1784,8 +2069,8 @@ with tab_dash:
 
         user_msg = st.text_area(
             "Gemini'ye sor/talimat ver (spekülasyon sorusu eklendi):",
-            value="Ekteki fiyat grafiği resmini ve aşağıdaki JSON'da bulunan son 20 barlık price-action verilerini incele. Ayrıca aşırı alım/spekülasyon göstergelerini de değerlendir (RSI, Bollinger, hacim sıçraması, fiyatın EMA'dan uzaklığı). Bu hisse aşırı değerli mi, spekülatif bir hareket mi var? AL/SAT/İZLE önerisi ve stratejinin bozulacağı şartları yaz.",
-            height=100,
+            value="Ekteki fiyat grafiği resmini ve aşağıdaki JSON'da bulunan son 20 barlık price-action verilerini incele. Ayrıca aşırı alım/spekülasyon göstergelerini de değerlendir (RSI, Bollinger, hacim sıçraması, fiyatın EMA'dan uzaklığı, Stokastik RSI, Bollinger sıkışması). Bu hisse aşırı değerli mi, spekülatif bir hareket mi var? AL/SAT/İZLE önerisi ve stratejinin bozulacağı şartları yaz.",
+            height=120,
         )
 
         col_g1, col_g2 = st.columns([1, 1])
@@ -1820,17 +2105,18 @@ Lütfen aşağıdaki adımları takip ederek analiz yap:
 2. Temel destek/direnç seviyelerini belirle (price action paketindeki swing high/low, order block).
 3. Aşırı alım/spekülasyon göstergelerini incele:
    - RSI (>70 aşırı alım, <30 aşırı satım)
-   - Bollinger Bandı (fiyat üst bandın üstünde mi?)
+   - Bollinger Bandı (fiyat üst bandın üstünde mi? alt bandın altında mı?)
    - Hacim sıçraması (son hacim normalin 1.5 katından fazla mı?)
    - Fiyatın EMA50'den uzaklığı (%20'den fazla mı?)
    - Stokastik RSI (>80 aşırı alım)
+   - Bollinger sıkışması (yakında büyük hareket olabilir)
    - Fiyat yükselirken hacim düşüyor mu? (zayıflama)
 4. Volatiliteyi (ATR) yorumla ve stop seviyesi için fikir ver.
 5. Temel analiz skorunu (FA) değerlendir (eğer varsa).
 6. Haber duyarlılığını dikkate al (eğer varsa).
 7. Tüm bu bilgileri sentezleyerek:
    - Hisse aşırı değerli mi, aşırı değersiz mi, yoksa normal bölgede mi?
-   - Spekülatif bir hareket var mı? (ani hacim, zayıf trend)
+   - Spekülatif bir hareket var mı? (ani hacim, zayıf trend, sıkışma)
    - AL/SAT/İZLE önerisi, hedef bant ve stratejinin bozulacağı şartlar.
 
 Ekte sana analiz edilen hissenin grafiğinin GÖRSELİNİ (image) gönderdim. Görseli detaylıca incele.
@@ -1850,7 +2136,7 @@ JSON:
     "fundamental_pass": fa_row_local.get("FA_pass") if fa_row_local else None,
     "sector_info": sector_comp,
     "sentiment_analysis": sentiment_info,
-    "overbought_analysis": overbought_result
+    "overbought_analysis": overbought_result  # yeni eklenen tüm aşırı alım/spekülasyon verileri
 }, ensure_ascii=False, default=str)}
 
 Kullanıcının Sorusu: {user_msg}
@@ -1939,89 +2225,4 @@ with tab_heatmap:
             df_hm["Abs_1W"] = df_hm["1 Haftalık %"].abs()
             fig_hm_1w = px.treemap(df_hm, path=[px.Constant("Tüm Pazar"), "Sector", "Ticker"], values="Abs_1W", color="1 Haftalık %", 
                                    color_continuous_scale="RdYlGn", color_continuous_midpoint=0)
-            st.plotly_chart(fig_hm_1w, use_container_width=True)
-            
-            st.subheader("AYLIK Performans")
-            df_hm["Abs_1M"] = df_hm["1 Aylık %"].abs()
-            fig_hm_1m = px.treemap(df_hm, path=[px.Constant("Tüm Pazar"), "Sector", "Ticker"], values="Abs_1M", color="1 Aylık %", 
-                                   color_continuous_scale="RdYlGn", color_continuous_midpoint=0)
-            st.plotly_chart(fig_hm_1m, use_container_width=True)
-        else:
-            st.error("Heatmap için yeterli veri çekilemedi.")
-
-
-# =============================
-# EXPORT TAB
-# =============================
-with tab_export:
-    st.subheader("📄 Rapor İndir (En sorunsuz: HTML → tarayıcıdan PDF)")
-    st.caption("HTML rapor: grafikler %100 gelir. PDF: reportlab + (grafikler için) kaleido varsa grafikleri gömer. Yoksa PDF metin ağırlıklı olur.")
-
-    include_charts = st.checkbox("Rapor grafikleri dahil et", value=True)
-    include_trades = st.checkbox("Trade listesi dahil et (ilk 25)", value=True)
-    include_gemini = st.checkbox("Gemini çıktısını rapora ekle", value=True)
-    include_pa = st.checkbox("Price Action Pack'i rapora ekle", value=True)
-    include_sentiment = st.checkbox("Haber duygu analizini rapora ekle", value=True)
-    include_overbought = st.checkbox("Aşırı alım/spekülasyon analizini rapora ekle", value=True)
-
-    with st.spinner("Fundamental + screener satırı hazırlanıyor..."):
-        f_single = fetch_fundamentals_generic(ticker, market=market)
-        f_score, f_breakdown, f_pass = fundamental_score_row(f_single, fa_mode, thresholds)
-        fa_eval = {
-            "mode": fa_mode, "score": f_score, "passed": f_pass,
-            "ok_cnt": sum(1 for v in f_breakdown.values() if v.get("available") and v.get("ok")),
-            "coverage": sum(1 for v in f_breakdown.values() if v.get("available")),
-        }
-        screener_row = find_screener_row(st.session_state.get("screener_df", pd.DataFrame()), ticker)
-        fa_row = merge_fa_row(screener_row, f_single, fa_eval)
-
-    meta = {
-        "market": market, "ticker": ticker, "interval": interval, "period": period,
-        "preset": preset_name, "ema_fast": ema_fast, "ema_slow": ema_slow,
-        "rsi_period": rsi_period, "bb_period": bb_period, "bb_std": bb_std,
-        "atr_period": atr_period, "vol_sma": vol_sma,
-    }
-
-    ta_summary = {
-        "rec": rec, "close": fmt_num(float(latest["Close"]), 2),
-        "live": fmt_num(float(live_price), 2) if np.isfinite(live_price) else "N/A",
-        "score": fmt_num(float(latest.get("SCORE", np.nan)), 0),
-        "rsi": fmt_num(float(latest.get("RSI", np.nan)), 2),
-        "ema50": fmt_num(float(latest.get("EMA50", np.nan)), 2),
-        "ema200": fmt_num(float(latest.get("EMA200", np.nan)), 2),
-        "atr_pct": fmt_pct(float(latest.get("ATR_PCT", np.nan))) if pd.notna(latest.get("ATR_PCT", np.nan)) else "N/A",
-    }
-
-    gemini_text = st.session_state.gemini_text if include_gemini else None
-    pa_pack_export = st.session_state.pa_pack if include_pa else None
-    sentiment_export = st.session_state.sentiment_summary if include_sentiment else None
-    overbought_export = overbought_result if include_overbought else None
-
-    html_bytes = build_html_report(
-        title=f"FA→TA Trading Report - {ticker}", meta=meta, checkpoints=checkpoints,
-        metrics=metrics, tp=tp, rr_info=rr_info, figs=(figs_for_report if include_charts else {}),
-        fa_row=fa_row, gemini_insight=gemini_text, pa_pack=pa_pack_export, sentiment_summary=sentiment_export,
-        overbought_result=overbought_export,
-    )
-    st.download_button("⬇️ HTML İndir (Önerilen)", data=html_bytes, file_name=f"{ticker}_FA_TA_report.html", mime="text/html", use_container_width=True)
-    st.divider()
-
-    if not REPORTLAB_OK:
-        st.warning("Doğrudan PDF için 'reportlab' gerekli. requirements.txt içine `reportlab` ekleyip redeploy edersen PDF butonu da aktif olur.")
-    else:
-        if st.button("🧾 PDF Oluştur (reportlab)", use_container_width=True):
-            with st.spinner("PDF oluşturuluyor..."):
-                pdf_bytes = generate_pdf_report(
-                    title=f"FA→TA Trading Report - {ticker}", subtitle="Educational analysis.", meta=meta,
-                    checkpoints=checkpoints, ta_summary=ta_summary, target_band=tp, rr_info=rr_info,
-                    backtest_metrics=metrics, fa_row=fa_row, levels=tp.get("levels", []),
-                    trades_df=(tdf if include_trades else None), figs=(figs_for_report if include_charts else None),
-                    include_charts=include_charts, gemini_insight=gemini_text, pa_pack=pa_pack_export,
-                    sentiment_summary=sentiment_export, overbought_result=overbought_export,
-                )
-            if pdf_bytes:
-                st.success("PDF hazır ✅")
-                st.download_button("⬇️ PDF İndir", data=pdf_bytes, file_name=f"{ticker}_FA_TA_report.pdf", mime="application/pdf", use_container_width=True)
-                st.info("Grafikler gelmiyorsa `kaleido` kütüphanesini requirements'a eklemelisin.")
-            else:
-                st.error("PDF üretilemedi.")
+            st.plotly_chart
