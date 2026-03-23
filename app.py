@@ -1165,7 +1165,7 @@ PRESETS = {
         "rsi_entry_level": 52,
         "rsi_exit_level": 46,
         "atr_pct_max": 0.06,
-        "atr_stop_mult": 2.0,          # Daraltıldı (eskiden 3.5)
+        "atr_stop_mult": 2.0,
         "time_stop_bars": 15,
         "take_profit_mult": 2.5,
     },
@@ -1173,7 +1173,7 @@ PRESETS = {
         "rsi_entry_level": 50,
         "rsi_exit_level": 45,
         "atr_pct_max": 0.08,
-        "atr_stop_mult": 1.5,          # Daraltıldı (eskiden 3.0)
+        "atr_stop_mult": 1.5,
         "time_stop_bars": 10,
         "take_profit_mult": 2.0,
     },
@@ -1181,7 +1181,7 @@ PRESETS = {
         "rsi_entry_level": 48,
         "rsi_exit_level": 43,
         "atr_pct_max": 0.10,
-        "atr_stop_mult": 1.2,          # Daraltıldı (eskiden 2.5)
+        "atr_stop_mult": 1.2,
         "time_stop_bars": 7,
         "take_profit_mult": 1.5,
     },
@@ -1553,7 +1553,7 @@ def generate_pdf_report(
     else:
         band_lines.append("Bear: N/A")
 
-    band_lines.append(f"RR (bull2 vs ATR stop): {'N/A' if rr is None else f'1:{rr:.2f}'} | Stop(ATR): {fmt_num(stop)}")
+    band_lines.append(f"RR (Backtest first target vs stop): {'N/A' if rr is None else f'1:{rr:.2f}'} | Stop(ATR): {fmt_num(stop)}")
     y = _pdf_write_lines(c, band_lines, left, y, 12, bottom)
     y -= 6
 
@@ -1696,7 +1696,7 @@ def generate_pdf_report(
 
 
 # =============================
-# RR helper (DEĞİŞTİRİLDİ: bull2 kullanılıyor)
+# RR helper (GÜNCELLENDİ: backtest'in ilk hedefi kullanılıyor)
 # =============================
 def rr_from_atr_stop(latest_row: pd.Series, tp_dict: dict, cfg: dict):
     close = float(latest_row["Close"])
@@ -1707,30 +1707,21 @@ def rr_from_atr_stop(latest_row: pd.Series, tp_dict: dict, cfg: dict):
     stop = close - float(cfg["atr_stop_mult"]) * atrv
     risk = close - stop
 
-    # Öncelikle bull2 (3.0 * ATR) kullan
-    bull_tuple = tp_dict.get("bull")
-    bull2 = bull_tuple[1] if bull_tuple and len(bull_tuple) > 1 else None
-    if bull2 is not None and bull2 > close:
-        reward = float(bull2) - close
-        target_type = "ATR-based (Bull2)"
-    else:
-        # bull2 yoksa bull1 veya dirence düş
-        bull1 = bull_tuple[0] if bull_tuple else None
-        r1 = bull_tuple[2] if bull_tuple else None
-        if r1 is not None and r1 > close:
-            reward = float(r1) - close
-            target_type = "Resistance (R1)"
-        elif bull1 is not None and bull1 > close:
-            reward = float(bull1) - close
-            target_type = "ATR-based (Bull1)"
-        else:
-            reward = None
-            target_type = None
+    # Backtest'teki ilk kar hedefi: target_price = entry_price + tp_mult * atr_stop_mult * ATR
+    # Burada entry_price = close olarak kabul ediyoruz (giriş fiyatı son bar kapanışı)
+    tp_mult = cfg.get("take_profit_mult", 2.0)
+    atr_stop_mult = cfg["atr_stop_mult"]
+    target = close + (tp_mult * atr_stop_mult * atrv)
+    reward = target - close
 
-    if risk <= 0 or (reward is not None and reward <= 0):
+    target_type = f"Backtest Take Profit (TP mult: {tp_mult:.1f} x ATR)"
+
+    if risk <= 0 or reward <= 0:
         return {"rr": None, "stop": stop, "risk": risk, "reward": reward, "target_type": target_type}
 
     rr_val = float(reward / risk) if reward is not None else None
+    # RR = reward / risk = (tp_mult * atr_stop_mult * ATR) / (atr_stop_mult * ATR) = tp_mult
+    # Yani RR = take_profit_mult değeri (1.5, 2.0, 2.5)
     return {"rr": rr_val, "stop": float(stop), "risk": float(risk), "reward": reward, "target_type": target_type}
 
 
