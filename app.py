@@ -1158,14 +1158,14 @@ def df_snapshot_for_llm(df: pd.DataFrame, n: int = 140) -> dict:
 
 
 # =============================
-# Presets
+# Presets (DARALTILMIŞ STOP MULTIPLERLERİ)
 # =============================
 PRESETS = {
     "Defansif": {
         "rsi_entry_level": 52,
         "rsi_exit_level": 46,
         "atr_pct_max": 0.06,
-        "atr_stop_mult": 3.5,
+        "atr_stop_mult": 2.0,          # Daraltıldı (eskiden 3.5)
         "time_stop_bars": 15,
         "take_profit_mult": 2.5,
     },
@@ -1173,7 +1173,7 @@ PRESETS = {
         "rsi_entry_level": 50,
         "rsi_exit_level": 45,
         "atr_pct_max": 0.08,
-        "atr_stop_mult": 3.0,
+        "atr_stop_mult": 1.5,          # Daraltıldı (eskiden 3.0)
         "time_stop_bars": 10,
         "take_profit_mult": 2.0,
     },
@@ -1181,7 +1181,7 @@ PRESETS = {
         "rsi_entry_level": 48,
         "rsi_exit_level": 43,
         "atr_pct_max": 0.10,
-        "atr_stop_mult": 2.5,
+        "atr_stop_mult": 1.2,          # Daraltıldı (eskiden 2.5)
         "time_stop_bars": 7,
         "take_profit_mult": 1.5,
     },
@@ -1553,7 +1553,7 @@ def generate_pdf_report(
     else:
         band_lines.append("Bear: N/A")
 
-    band_lines.append(f"RR (bull1 vs ATR stop): {'N/A' if rr is None else f'1:{rr:.2f}'} | Stop(ATR): {fmt_num(stop)}")
+    band_lines.append(f"RR (bull2 vs ATR stop): {'N/A' if rr is None else f'1:{rr:.2f}'} | Stop(ATR): {fmt_num(stop)}")
     y = _pdf_write_lines(c, band_lines, left, y, 12, bottom)
     y -= 6
 
@@ -1696,7 +1696,7 @@ def generate_pdf_report(
 
 
 # =============================
-# RR helper (MODIFIED to use resistance level)
+# RR helper (DEĞİŞTİRİLDİ: bull2 kullanılıyor)
 # =============================
 def rr_from_atr_stop(latest_row: pd.Series, tp_dict: dict, cfg: dict):
     close = float(latest_row["Close"])
@@ -1707,16 +1707,20 @@ def rr_from_atr_stop(latest_row: pd.Series, tp_dict: dict, cfg: dict):
     stop = close - float(cfg["atr_stop_mult"]) * atrv
     risk = close - stop
 
-    # Try to use the nearest resistance level (r1) as target if available and above close
+    # Öncelikle bull2 (3.0 * ATR) kullan
     bull_tuple = tp_dict.get("bull")
-    r1 = bull_tuple[2] if bull_tuple and len(bull_tuple) > 2 else None
-    if r1 is not None and r1 > close:
-        reward = float(r1) - close
-        target_type = "Resistance (R1)"
+    bull2 = bull_tuple[1] if bull_tuple and len(bull_tuple) > 1 else None
+    if bull2 is not None and bull2 > close:
+        reward = float(bull2) - close
+        target_type = "ATR-based (Bull2)"
     else:
-        # Fallback to ATR-based bull1
+        # bull2 yoksa bull1 veya dirence düş
         bull1 = bull_tuple[0] if bull_tuple else None
-        if bull1 is not None:
+        r1 = bull_tuple[2] if bull_tuple else None
+        if r1 is not None and r1 > close:
+            reward = float(r1) - close
+            target_type = "Resistance (R1)"
+        elif bull1 is not None and bull1 > close:
             reward = float(bull1) - close
             target_type = "ATR-based (Bull1)"
         else:
@@ -2654,9 +2658,9 @@ with tab_dash:
                 if target_type == "Resistance (R1)":
                     r1_val = tp.get("bull")[2] if tp.get("bull") else None
                     target_price_desc = f" (Yakın direnç: {r1_val:.2f})" if r1_val else ""
-                elif target_type == "ATR-based (Bull1)":
-                    bull1_val = tp.get("bull")[0] if tp.get("bull") else None
-                    target_price_desc = f" (ATR bazlı ilk hedef: {bull1_val:.2f})" if bull1_val else ""
+                elif target_type == "ATR-based (Bull2)":
+                    bull2_val = tp.get("bull")[1] if tp.get("bull") else None
+                    target_price_desc = f" (ATR bazlı ikinci hedef: {bull2_val:.2f})" if bull2_val else ""
 
                 prompt = f"""
 Sen bir price-action, formasyon okuma, aşırı alım/spekülasyon tespiti ve risk yönetimi odaklı kıdemli finansal analiz asistanısın.
