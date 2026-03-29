@@ -5,6 +5,7 @@ import time
 import base64
 from io import BytesIO
 from typing import Optional, Dict, Any, List, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
@@ -98,7 +99,9 @@ def _flatten_yf(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
     if isinstance(out.columns, pd.MultiIndex):
-        out.columns = [c[0] for c in out.columns]
+        # Sadece (Price, Ticker) formatındaki standart indirmelerde seviye düşür (heatmap'i koru)
+        if len(out.columns.levels) == 2:
+            out.columns = [c[0] for c in out.columns]
 
     required = [c for c in ["Open", "High", "Low", "Close"] if c in out.columns]
     if required:
@@ -236,45 +239,46 @@ def detect_speculation(df: pd.DataFrame) -> Dict[str, Any]:
         "details": {},
     }
 
+    # Normalize edilmiş korelasyon ağırlıkları (max 100'ü hedefleyerek)
     if last["RSI"] > 70:
-        result["overbought_score"] += 25
+        result["overbought_score"] += 40
         result["details"]["rsi"] = f"Aşırı alım (RSI: {last['RSI']:.1f})"
     elif last["RSI"] < 30:
-        result["oversold_score"] += 25
+        result["oversold_score"] += 50
         result["details"]["rsi"] = f"Aşırı satım (RSI: {last['RSI']:.1f})"
 
     if bool(last["BB_OVERBOUGHT"]):
         result["overbought_score"] += 20
         result["details"]["bb"] = "Fiyat Bollinger üst bandında"
     elif bool(last["BB_OVERSOLD"]):
-        result["oversold_score"] += 20
+        result["oversold_score"] += 50
         result["details"]["bb"] = "Fiyat Bollinger alt bandında"
 
     if bool(last["STOCH_OVERBOUGHT"]):
-        result["overbought_score"] += 15
+        result["overbought_score"] += 20
         result["details"]["stoch"] = "Stokastik RSI aşırı alımda"
 
     if bool(last["VOLUME_SPIKE"]):
-        result["speculation_score"] += 30
+        result["speculation_score"] += 60
         result["details"]["volume"] = "Ani hacim artışı (spekülasyon)"
 
     if bool(last["PRICE_EXTREME"]):
-        result["overbought_score"] += 15
+        result["overbought_score"] += 20
         result["details"]["price_extreme"] = f"Fiyat EMA'dan çok uzak (EMA50: %{last['PRICE_TO_EMA50']:.1f})"
 
     if bool(last["WEAK_UPTREND"]):
-        result["speculation_score"] += 20
+        result["speculation_score"] += 40
         result["details"]["weak_trend"] = "Fiyat yükselirken hacim düşüyor (zayıflama)"
 
     result["overbought_score"] = min(100, result["overbought_score"])
     result["oversold_score"] = min(100, result["oversold_score"])
     result["speculation_score"] = min(100, result["speculation_score"])
 
-    if result["overbought_score"] >= 50:
+    if result["overbought_score"] >= 60:
         result["verdict"] = "AŞIRI DEĞERLİ (SAT bölgesi)"
-    elif result["oversold_score"] >= 50:
+    elif result["oversold_score"] >= 60:
         result["verdict"] = "AŞIRI DEĞERSİZ (AL bölgesi)"
-    elif result["speculation_score"] >= 50:
+    elif result["speculation_score"] >= 60:
         result["verdict"] = "SPEKÜLATİF HAREKET (dikkatli olunmalı)"
     else:
         result["verdict"] = "NÖTR (normal değer aralığı)"
@@ -315,7 +319,8 @@ def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
 # =============================
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
 def get_spy_regime_ok() -> bool:
-    spy = yf.download("SPY", period="10y", interval="1d", auto_adjust=True, progress=False)
+    # 10y yerine 2y çekilerek hız kazanıldı
+    spy = yf.download("SPY", period="2y", interval="1d", auto_adjust=True, progress=False)
     spy = _flatten_yf(spy)
     if spy.empty or len(spy) < 260:
         return True
@@ -326,7 +331,8 @@ def get_spy_regime_ok() -> bool:
 
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
 def get_bist_regime_ok() -> bool:
-    xu100 = yf.download("XU100.IS", period="10y", interval="1d", auto_adjust=True, progress=False)
+    # 10y yerine 2y çekilerek hız kazanıldı
+    xu100 = yf.download("XU100.IS", period="2y", interval="1d", auto_adjust=True, progress=False)
     xu100 = _flatten_yf(xu100)
     if xu100.empty or len(xu100) < 200:
         return True
@@ -621,7 +627,8 @@ def backtest_long_only(
             p = win_rate
             q = 1 - p
             kelly = (p * b - q) / b
-            kelly = max(0, min(kelly, 0.25))
+            # Kelly Kriteri maksimizasyonu %10'a (0.10) düşürüldü
+            kelly = max(0, min(kelly, 0.10))
         else:
             kelly = 0.0
     else:
@@ -664,27 +671,22 @@ def fetch_fundamentals_generic(ticker: str, market: str) -> dict:
     except Exception:
         info = {}
 
-    out = {
-        "ticker": ticker,
-        "market": market,
-        "marketCap": safe_float(info.get("marketCap")),
-        "trailingPE": safe_float(info.get("trailingPE")),
-        "forwardPE": safe_float(info.get("forwardPE")),
-        "pegRatio": safe_float(info.get("pegRatio")),
-        "priceToSalesTrailing12Months": safe_float(info.get("priceToSalesTrailing12Months")),
-        "priceToBook": safe_float(info.get("priceToBook")),
-        "returnOnEquity": safe_float(info.get("returnOnEquity")),
-        "profitMargins": safe_float(info.get("profitMargins")),
-        "operatingMargins": safe_float(info.get("operatingMargins")),
-        "debtToEquity": safe_float(info.get("debtToEquity")),
-        "revenueGrowth": safe_float(info.get("revenueGrowth")),
-        "earningsGrowth": safe_float(info.get("earningsGrowth")),
-        "freeCashflow": safe_float(info.get("freeCashflow")),
-        "currentPrice": safe_float(info.get("currentPrice")),
-        "sector": info.get("sector", ""),
-        "industry": info.get("industry", ""),
-        "longName": info.get("longName", "") or info.get("shortName", ""),
-    }
+    # Redundant safe_float calls merged into a loop
+    FUND_KEYS = [
+        "marketCap", "trailingPE", "forwardPE", "pegRatio",
+        "priceToSalesTrailing12Months", "priceToBook", "returnOnEquity",
+        "profitMargins", "operatingMargins", "debtToEquity",
+        "revenueGrowth", "earningsGrowth", "freeCashflow", "currentPrice"
+    ]
+    
+    out = {k: safe_float(info.get(k)) for k in FUND_KEYS}
+
+    out["ticker"] = ticker
+    out["market"] = market
+    out["sector"] = info.get("sector", "")
+    out["industry"] = info.get("industry", "")
+    out["longName"] = info.get("longName", "") or info.get("shortName", "")
+    
     out["debtToEquity"] = _fix_debt_to_equity(out["debtToEquity"])
     return out
 
@@ -810,12 +812,30 @@ def fundamental_score_row(row: dict, mode: str, thresholds: dict) -> Tuple[float
 # =============================
 # Target price band (non-LLM)
 # =============================
-def local_levels(close: pd.Series, lookback: int = 120):
-    s = close.tail(lookback).dropna()
-    if len(s) < 10:
+def _swing_points(high: pd.Series, low: pd.Series, left: int = 2, right: int = 2):
+    hs = []
+    ls = []
+    n = len(high)
+    for i in range(left, n - right):
+        hwin = high.iloc[i - left : i + right + 1]
+        lwin = low.iloc[i - left : i + right + 1]
+        if high.iloc[i] == hwin.max():
+            hs.append((high.index[i], float(high.iloc[i])))
+        if low.iloc[i] == lwin.min():
+            ls.append((low.index[i], float(low.iloc[i])))
+    return hs, ls
+
+def local_levels(high: pd.Series, low: pd.Series, close: pd.Series, lookback: int = 120):
+    h = high.tail(lookback).dropna()
+    l = low.tail(lookback).dropna()
+    c = close.tail(lookback).dropna()
+    if len(c) < 10:
         return []
-    levels = list(np.quantile(s.values, [0.1, 0.25, 0.5, 0.75, 0.9]))
-    levels += [float(s.tail(20).max()), float(s.tail(20).min())]
+    
+    # Gerçek Swing Noktaları kullanılıyor (İstatistiksel Quantile yerine)
+    hs, ls = _swing_points(h, l, left=3, right=3)
+    levels = [v for _, v in hs] + [v for _, v in ls]
+    levels += [float(c.tail(20).max()), float(c.tail(20).min())]
     levels = sorted(list(set([round(float(x), 2) for x in levels if np.isfinite(x)])))
     return levels
 
@@ -825,14 +845,14 @@ def target_price_band(df: pd.DataFrame):
     px_close = float(last["Close"])
     atrv = float(last["ATR"]) if pd.notna(last.get("ATR", np.nan)) else np.nan
     if not np.isfinite(atrv) or atrv <= 0:
-        return {"base": px_close, "bull": None, "bear": None, "levels": local_levels(df["Close"])}
+        return {"base": px_close, "bull": None, "bear": None, "levels": local_levels(df["High"], df["Low"], df["Close"])}
 
     bull1 = px_close + 1.5 * atrv
     bull2 = px_close + 3.0 * atrv
     bear1 = px_close - 1.5 * atrv
     bear2 = px_close - 3.0 * atrv
 
-    lv = local_levels(df["Close"])
+    lv = local_levels(df["High"], df["Low"], df["Close"])
     above = [x for x in lv if x >= px_close]
     below = [x for x in lv if x <= px_close]
     r1 = min(above) if above else None
@@ -873,8 +893,8 @@ def _get_secret(name: str, default: str = "") -> str:
         return default
 
 
-def _http_post_json(url: str, payload: dict, timeout: int = 60) -> dict:
-    r = requests.post(url, json=payload, timeout=timeout)
+def _http_post_json(url: str, payload: dict, headers: dict = None, timeout: int = 60) -> dict:
+    r = requests.post(url, json=payload, headers=headers, timeout=timeout)
     try:
         data = r.json()
     except Exception:
@@ -914,7 +934,10 @@ def gemini_generate_text(
     api_key = _get_secret("GEMINI_API_KEY", "")
     if not api_key:
         return "GEMINI_API_KEY bulunamadı. Streamlit Cloud > Settings > Secrets içine GEMINI_API_KEY=... ekleyin."
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    
+    # API Key URL yerine daha güvenli olan Headers yapısına taşındı
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    headers = {"x-goog-api-key": api_key}
 
     parts = [{"text": prompt}]
     if image_bytes:
@@ -935,7 +958,7 @@ def gemini_generate_text(
             "maxOutputTokens": int(max_output_tokens),
         },
     }
-    resp = _http_post_json(url, payload, timeout=90)
+    resp = _http_post_json(url, payload, headers=headers, timeout=90)
     return _extract_gemini_text(resp)
 
 
@@ -1012,20 +1035,6 @@ Haber Başlıkları:
 # =============================
 # Price Action
 # =============================
-def _swing_points(high: pd.Series, low: pd.Series, left: int = 2, right: int = 2):
-    hs = []
-    ls = []
-    n = len(high)
-    for i in range(left, n - right):
-        hwin = high.iloc[i - left : i + right + 1]
-        lwin = low.iloc[i - left : i + right + 1]
-        if high.iloc[i] == hwin.max():
-            hs.append((high.index[i], float(high.iloc[i])))
-        if low.iloc[i] == lwin.min():
-            ls.append((low.index[i], float(low.iloc[i])))
-    return hs, ls
-
-
 def price_action_pack(df: pd.DataFrame, last_n: int = 20) -> dict:
     use = df.tail(last_n).copy()
     if use.empty or len(use) < 10:
@@ -1114,7 +1123,7 @@ def price_action_pack(df: pd.DataFrame, last_n: int = 20) -> dict:
     return pack
 
 
-def df_snapshot_for_llm(df: pd.DataFrame, n: int = 140) -> dict:
+def df_snapshot_for_llm(df: pd.DataFrame, n: int = 25) -> dict:
     use_cols = [
         "Open",
         "High",
@@ -1148,16 +1157,25 @@ def df_snapshot_for_llm(df: pd.DataFrame, n: int = 140) -> dict:
     cols = [c for c in use_cols if c in df.columns]
     tail = df[cols].tail(n).copy()
     tail.index = tail.index.astype(str)
+    
+    summary = {}
+    if not df.empty:
+        summary["rsi_last"] = float(df["RSI"].iloc[-1]) if "RSI" in df else None
+        summary["rsi_5d_avg"] = float(df["RSI"].tail(5).mean()) if "RSI" in df else None
+        if "EMA50" in df and "EMA200" in df:
+            summary["trend"] = "up" if df["EMA50"].iloc[-1] > df["EMA200"].iloc[-1] else "down"
+
     return {
         "cols": cols,
         "n": int(len(tail)),
         "last_index": str(tail.index[-1]) if len(tail) else None,
         "rows": tail.to_dict(orient="records"),
+        "summary": summary
     }
 
 
 # =============================
-# Presets (DARALTILMIŞ STOP MULTIPLERLERİ)
+# Presets
 # =============================
 PRESETS = {
     "Defansif": {
@@ -1695,7 +1713,7 @@ def generate_pdf_report(
 
 
 # =============================
-# RR helper (GÜNCELLENDİ: backtest'in ilk hedefi kullanılıyor)
+# RR helper
 # =============================
 def rr_from_atr_stop(latest_row: pd.Series, tp_dict: dict, cfg: dict):
     close = float(latest_row["Close"])
@@ -1706,8 +1724,6 @@ def rr_from_atr_stop(latest_row: pd.Series, tp_dict: dict, cfg: dict):
     stop = close - float(cfg["atr_stop_mult"]) * atrv
     risk = close - stop
 
-    # Backtest'teki ilk kar hedefi: target_price = entry_price + tp_mult * atr_stop_mult * ATR
-    # Burada entry_price = close olarak kabul ediyoruz (giriş fiyatı son bar kapanışı)
     tp_mult = cfg.get("take_profit_mult", 2.0)
     atr_stop_mult = cfg["atr_stop_mult"]
     target = close + (tp_mult * atr_stop_mult * atrv)
@@ -1719,8 +1735,6 @@ def rr_from_atr_stop(latest_row: pd.Series, tp_dict: dict, cfg: dict):
         return {"rr": None, "stop": stop, "risk": risk, "reward": reward, "target_type": target_type}
 
     rr_val = float(reward / risk) if reward is not None else None
-    # RR = reward / risk = (tp_mult * atr_stop_mult * ATR) / (atr_stop_mult * ATR) = tp_mult
-    # Yani RR = take_profit_mult değeri (1.5, 2.0, 2.5)
     return {"rr": rr_val, "stop": float(stop), "risk": float(risk), "reward": reward, "target_type": target_type}
 
 
@@ -1755,8 +1769,6 @@ if "screener_df" not in st.session_state:
     st.session_state.screener_df = pd.DataFrame()
 if "selected_ticker" not in st.session_state:
     st.session_state.selected_ticker = None
-if "ai_messages" not in st.session_state:
-    st.session_state.ai_messages = [{"role": "assistant", "content": "Sorunu yaz: örn. “Riskler ne, hedef bant ne, hangi şartta çıkarım?”"}]
 if "ta_ran" not in st.session_state:
     st.session_state.ta_ran = False
 if "gemini_text" not in st.session_state:
@@ -1765,6 +1777,10 @@ if "pa_pack" not in st.session_state:
     st.session_state.pa_pack = {}
 if "sentiment_summary" not in st.session_state:
     st.session_state.sentiment_summary = ""
+
+# AI tab'ı koddan çıkartıldığı için kullanılmayan ai_messages state'ini temizledik.
+if "ai_messages" in st.session_state:
+    del st.session_state.ai_messages
 
 
 # =============================
@@ -1778,6 +1794,14 @@ with st.sidebar:
         index=0,
         help="Analiz edilecek borsayı seçin. USA için ABD hisseleri, BIST için Borsa İstanbul hisseleri.",
     )
+
+    # State Market Change Detector (Pazar değiştiğinde eski verilerin silinmesi için)
+    if "last_market" not in st.session_state:
+        st.session_state.last_market = market
+    elif st.session_state.last_market != market:
+        st.session_state.screener_df = pd.DataFrame()
+        st.session_state.selected_ticker = None
+        st.session_state.last_market = market
 
     usa_bucket = None
     if market == "USA":
@@ -2149,12 +2173,13 @@ with st.sidebar:
 
 
 # -----------------------------
-# Fundamental screener action
+# Fundamental screener action (Multithreading ile Hızlandırıldı)
 # -----------------------------
 if run_screener and use_fa:
-    with st.spinner(f"Fundamental veriler çekiliyor ({market})..."):
+    with st.spinner(f"Fundamental veriler çekiliyor ({market})... (Bu işlem çoklu iş parçacığıyla hızlandırılmıştır)"):
         rows = []
-        for tk in universe:
+        
+        def fetch_one(tk):
             tk_norm = normalize_ticker(tk, market)
             f = fetch_fundamentals_generic(tk_norm, market=market)
             score, breakdown, passed = fundamental_score_row(f, fa_mode, thresholds)
@@ -2162,7 +2187,15 @@ if run_screener and use_fa:
             f["FA_pass"] = passed
             f["FA_ok_count"] = sum(1 for v in breakdown.values() if v.get("available") and v.get("ok"))
             f["FA_coverage"] = sum(1 for v in breakdown.values() if v.get("available"))
-            rows.append(f)
+            return f
+
+        with ThreadPoolExecutor(max_workers=10) as ex:
+            futures = {ex.submit(fetch_one, tk): tk for tk in universe}
+            for future in as_completed(futures):
+                try:
+                    rows.append(future.result())
+                except Exception:
+                    pass
 
         sdf = pd.DataFrame(rows)
         if not sdf.empty:
@@ -2609,7 +2642,6 @@ with tab_dash:
         pa = price_action_pack(df, last_n=20)
         st.session_state.pa_pack = pa
 
-        # IMPROVED GEMINI PROMPT
         user_msg = st.text_area(
             "Gemini'ye sor/talimat ver (spekülasyon sorusu eklendi):",
             value="Ekteki fiyat grafiği resmini ve aşağıdaki JSON'da bulunan son 20 barlık price-action verilerini incele. Ayrıca aşırı alım/spekülasyon göstergelerini de değerlendir (RSI, Bollinger, hacim sıçraması, fiyatın EMA'dan uzaklığı, Stochastic RSI). Bu hisse aşırı değerli mi, spekülatif bir hareket mi var? AL/SAT/İZLE önerisi ve stratejinin bozulacağı şartları yaz. Analizin sonunda aşağıdaki formatta bir tablo ekle:\n\n| Hedef | Fiyat |\n|-------|-------|\n| Alış Fiyatı (önerilen giriş) | ... |\n| Hedef Satış Fiyatı (ilk hedef) | ... |\n| Stop Loss (ATR bazlı) | ... |\n\n",
@@ -2642,7 +2674,6 @@ with tab_dash:
 
                 sentiment_info = st.session_state.get("sentiment_summary", "")
 
-                # Add dynamic RR target info
                 target_type = rr_info.get("target_type", "")
                 target_price_desc = ""
                 if target_type == "Resistance (R1)":
