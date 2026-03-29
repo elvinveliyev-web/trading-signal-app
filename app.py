@@ -946,7 +946,7 @@ def gemini_generate_text(
 
 
 # =============================
-# Sentiment Analysis via Google News RSS + Gemini (BULT-IN XML İLE YENİLENDİ)
+# Sentiment Analysis via Google News RSS + Gemini (BUILT-IN XML İLE YENİLENDİ)
 # =============================
 @st.cache_data(ttl=30 * 60, show_spinner=False)
 def get_news_sentiment(
@@ -954,6 +954,7 @@ def get_news_sentiment(
     company_name: str = "",
     gemini_model: str = "gemini-1.5-flash",
     gemini_temp: float = 0.2,
+    max_tokens: int = 2048, # <-- 512 LİMİTİ KALDIRILDI VE KULLANICI SEÇİMİNE BAĞLANDI
 ) -> Dict[str, Any]:
     
     try:
@@ -964,7 +965,7 @@ def get_news_sentiment(
 
         url = f"https://news.google.com/rss/search?q={requests.utils.quote(query)}&hl=en-US&gl=US&ceid=US:en"
         
-        # feedparser yerine requests ve yerleşik xml.etree kullanıyoruz
+        # feedparser yerine Python'un yerleşik xml.etree kütüphanesini kullanıyoruz
         resp = requests.get(url, timeout=15)
         if resp.status_code != 200:
             return {"error": f"Haberler çekilemedi (HTTP {resp.status_code})", "sentiment": None, "summary": ""}
@@ -995,7 +996,7 @@ Haber Başlıkları:
             prompt=prompt,
             model=gemini_model,
             temperature=gemini_temp,
-            max_output_tokens=512,
+            max_output_tokens=max_tokens, # <-- KULLANICININ SEÇTİĞİ TOKEN LİMİTİ (örn: 2048)
             image_bytes=None,
         )
 
@@ -2298,7 +2299,8 @@ if use_sentiment and ai_on:
             company_name = row["longName"]
 
     with st.spinner("Google News'ten haberler çekiliyor ve Gemini ile analiz ediliyor..."):
-        sent = get_news_sentiment(ticker, company_name, gemini_model, gemini_temp)
+        # gemini_max_tokens EKLENEREK YARIDA KESİLME SORUNU ÇÖZÜLDÜ
+        sent = get_news_sentiment(ticker, company_name, gemini_model, gemini_temp, gemini_max_tokens)
         if sent.get("error") is None:
             sentiment_summary = sent["summary"]
             st.session_state.sentiment_summary = sentiment_summary
