@@ -3,6 +3,7 @@ import re
 import json
 import time
 import base64
+import xml.etree.ElementTree as ET
 from io import BytesIO
 from typing import Optional, Dict, Any, List, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -26,16 +27,6 @@ try:
     from reportlab.lib.utils import ImageReader
 except Exception:
     REPORTLAB_OK = False
-
-# =============================
-# OPTIONAL FEEDPARSER for Google News RSS
-# =============================
-FEEDPARSER_OK = True
-try:
-    import feedparser
-except ImportError:
-    FEEDPARSER_OK = False
-
 
 st.set_page_config(page_title="FA→TA Trading + AI", layout="wide")
 
@@ -99,7 +90,6 @@ def _flatten_yf(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
     if isinstance(out.columns, pd.MultiIndex):
-        # Sadece (Price, Ticker) formatındaki standart indirmelerde seviye düşür (heatmap'i koru)
         if len(out.columns.levels) == 2:
             out.columns = [c[0] for c in out.columns]
 
@@ -239,7 +229,6 @@ def detect_speculation(df: pd.DataFrame) -> Dict[str, Any]:
         "details": {},
     }
 
-    # Normalize edilmiş korelasyon ağırlıkları (max 100'ü hedefleyerek)
     if last["RSI"] > 70:
         result["overbought_score"] += 40
         result["details"]["rsi"] = f"Aşırı alım (RSI: {last['RSI']:.1f})"
@@ -319,7 +308,6 @@ def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
 # =============================
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
 def get_spy_regime_ok() -> bool:
-    # 10y yerine 2y çekilerek hız kazanıldı
     spy = yf.download("SPY", period="2y", interval="1d", auto_adjust=True, progress=False)
     spy = _flatten_yf(spy)
     if spy.empty or len(spy) < 260:
@@ -331,7 +319,6 @@ def get_spy_regime_ok() -> bool:
 
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
 def get_bist_regime_ok() -> bool:
-    # 10y yerine 2y çekilerek hız kazanıldı
     xu100 = yf.download("XU100.IS", period="2y", interval="1d", auto_adjust=True, progress=False)
     xu100 = _flatten_yf(xu100)
     if xu100.empty or len(xu100) < 200:
@@ -627,7 +614,6 @@ def backtest_long_only(
             p = win_rate
             q = 1 - p
             kelly = (p * b - q) / b
-            # Kelly Kriteri maksimizasyonu %10'a (0.10) düşürüldü
             kelly = max(0, min(kelly, 0.10))
         else:
             kelly = 0.0
@@ -671,7 +657,6 @@ def fetch_fundamentals_generic(ticker: str, market: str) -> dict:
     except Exception:
         info = {}
 
-    # Redundant safe_float calls merged into a loop
     FUND_KEYS = [
         "marketCap", "trailingPE", "forwardPE", "pegRatio",
         "priceToSalesTrailing12Months", "priceToBook", "returnOnEquity",
@@ -832,7 +817,6 @@ def local_levels(high: pd.Series, low: pd.Series, close: pd.Series, lookback: in
     if len(c) < 10:
         return []
     
-    # Gerçek Swing Noktaları kullanılıyor (İstatistiksel Quantile yerine)
     hs, ls = _swing_points(h, l, left=3, right=3)
     levels = [v for _, v in hs] + [v for _, v in ls]
     levels += [float(c.tail(20).max()), float(c.tail(20).min())]
@@ -935,7 +919,6 @@ def gemini_generate_text(
     if not api_key:
         return "GEMINI_API_KEY bulunamadı. Streamlit Cloud > Settings > Secrets içine GEMINI_API_KEY=... ekleyin."
     
-    # API Key URL yerine daha güvenli olan Headers yapısına taşındı
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     headers = {"x-goog-api-key": api_key}
 
@@ -963,7 +946,7 @@ def gemini_generate_text(
 
 
 # =============================
-# Sentiment Analysis via Google News RSS + Gemini
+# Sentiment Analysis via Google News RSS + Gemini (BULT-IN XML İLE YENİLENDİ)
 # =============================
 @st.cache_data(ttl=30 * 60, show_spinner=False)
 def get_news_sentiment(
@@ -972,9 +955,7 @@ def get_news_sentiment(
     gemini_model: str = "gemini-1.5-flash",
     gemini_temp: float = 0.2,
 ) -> Dict[str, Any]:
-    if not FEEDPARSER_OK:
-        return {"error": "feedparser kütüphanesi yok. Lütfen 'pip install feedparser' yapın.", "sentiment": None, "summary": ""}
-
+    
     try:
         if company_name and company_name != "":
             query = f"{company_name} stock"
@@ -982,12 +963,21 @@ def get_news_sentiment(
             query = f"{ticker} stock"
 
         url = f"https://news.google.com/rss/search?q={requests.utils.quote(query)}&hl=en-US&gl=US&ceid=US:en"
-        feed = feedparser.parse(url)
+        
+        # feedparser yerine requests ve yerleşik xml.etree kullanıyoruz
+        resp = requests.get(url, timeout=15)
+        if resp.status_code != 200:
+            return {"error": f"Haberler çekilemedi (HTTP {resp.status_code})", "sentiment": None, "summary": ""}
+            
+        root = ET.fromstring(resp.content)
+        titles = []
+        for item in root.findall(".//item")[:10]:
+            title_node = item.find("title")
+            if title_node is not None and title_node.text:
+                titles.append(title_node.text)
 
-        if not feed.entries:
-            return {"error": "No news found", "sentiment": None, "summary": ""}
-
-        titles = [entry.title for entry in feed.entries[:10]]
+        if not titles:
+            return {"error": "Haber bulunamadı", "sentiment": None, "summary": ""}
 
         prompt = f"""Aşağıdaki haber başlıklarının duygu analizini yap (pozitif, negatif, nötr).
 Sonuçları şu formatta ver:
@@ -1722,20 +1712,17 @@ def rr_from_atr_stop(latest_row: pd.Series, tp_dict: dict, cfg: dict):
     if not np.isfinite(atrv) or atrv <= 0:
         return {"rr": None, "stop": None, "risk": None, "reward": None}
 
-    # Risk her zaman stratejinin belirlediği ATR tabanlı stop mesafesidir
     stop = close - (float(cfg["atr_stop_mult"]) * atrv)
     risk = close - stop
 
-    # Reward (Ödül) artık statik bir katsayı değil, grafikteki GERÇEK dirence (R1) bağlanıyor!
     r1 = None
     if tp_dict and tp_dict.get("bull"):
-        r1 = tp_dict["bull"][2] # Swing points'ten gelen Yakın Direnç
+        r1 = tp_dict["bull"][2] 
         
     if r1 is not None and np.isfinite(r1) and r1 > close:
         target = float(r1)
         target_type = "Resistance (R1)"
     else:
-        # Eğer üstte direnç yoksa (All-Time High, tarihi zirve vb.), ATR bazlı hedefi kullan
         tp_mult = cfg.get("take_profit_mult", 2.0)
         target = close + (tp_mult * cfg["atr_stop_mult"] * atrv)
         target_type = f"ATR-based Target ({tp_mult}x)"
@@ -1745,7 +1732,6 @@ def rr_from_atr_stop(latest_row: pd.Series, tp_dict: dict, cfg: dict):
     if risk <= 0 or reward <= 0:
         return {"rr": None, "stop": stop, "risk": risk, "reward": reward, "target_type": target_type}
 
-    # Gerçek Risk/Ödül Oranı
     rr_val = float(reward / risk) if reward is not None else None
     
     return {
@@ -1797,7 +1783,6 @@ if "pa_pack" not in st.session_state:
 if "sentiment_summary" not in st.session_state:
     st.session_state.sentiment_summary = ""
 
-# AI tab'ı koddan çıkartıldığı için kullanılmayan ai_messages state'ini temizledik.
 if "ai_messages" in st.session_state:
     del st.session_state.ai_messages
 
@@ -1814,7 +1799,6 @@ with st.sidebar:
         help="Analiz edilecek borsayı seçin. USA için ABD hisseleri, BIST için Borsa İstanbul hisseleri.",
     )
 
-    # State Market Change Detector (Pazar değiştiğinde eski verilerin silinmesi için)
     if "last_market" not in st.session_state:
         st.session_state.last_market = market
     elif st.session_state.last_market != market:
@@ -2183,7 +2167,7 @@ with st.sidebar:
     use_sentiment = st.checkbox(
         "Haber duygu analizini aktifleştir",
         value=True,
-        help="Google News'ten haber başlıklarını çeker, Gemini ile duygu analizi yapar. 'feedparser' kütüphanesi gerekir.",
+        help="Google News'ten haber başlıklarını çeker, Gemini ile duygu analizi yapar.",
     )
 
     run_btn = st.button("🚀 Teknik Analizi Çalıştır", type="primary")
@@ -2192,7 +2176,7 @@ with st.sidebar:
 
 
 # -----------------------------
-# Fundamental screener action (Multithreading ile Hızlandırıldı)
+# Fundamental screener action
 # -----------------------------
 if run_screener and use_fa:
     with st.spinner(f"Fundamental veriler çekiliyor ({market})... (Bu işlem çoklu iş parçacığıyla hızlandırılmıştır)"):
@@ -2323,8 +2307,7 @@ if use_sentiment and ai_on:
             st.session_state.sentiment_summary = sentiment_summary
 elif use_sentiment and not ai_on:
     st.warning("Haber duygu analizi için Gemini'nin açık olması gerekir.")
-elif use_sentiment and not FEEDPARSER_OK:
-    st.warning("Haber duygu analizi için 'feedparser' kütüphanesi gerekli. Lütfen 'pip install feedparser' yapın.")
+
 
 with st.spinner(f"Veri indiriliyor: {ticker}"):
     df_raw = load_data_cached(ticker, period, interval)
