@@ -1713,29 +1713,48 @@ def generate_pdf_report(
 
 
 # =============================
-# RR helper
+# RR helper (DİNAMİK PRICE ACTION GÜNCELLEMESİ)
 # =============================
 def rr_from_atr_stop(latest_row: pd.Series, tp_dict: dict, cfg: dict):
     close = float(latest_row["Close"])
     atrv = float(latest_row.get("ATR", np.nan)) if pd.notna(latest_row.get("ATR", np.nan)) else np.nan
+    
     if not np.isfinite(atrv) or atrv <= 0:
         return {"rr": None, "stop": None, "risk": None, "reward": None}
 
-    stop = close - float(cfg["atr_stop_mult"]) * atrv
+    # Risk her zaman stratejinin belirlediği ATR tabanlı stop mesafesidir
+    stop = close - (float(cfg["atr_stop_mult"]) * atrv)
     risk = close - stop
 
-    tp_mult = cfg.get("take_profit_mult", 2.0)
-    atr_stop_mult = cfg["atr_stop_mult"]
-    target = close + (tp_mult * atr_stop_mult * atrv)
-    reward = target - close
+    # Reward (Ödül) artık statik bir katsayı değil, grafikteki GERÇEK dirence (R1) bağlanıyor!
+    r1 = None
+    if tp_dict and tp_dict.get("bull"):
+        r1 = tp_dict["bull"][2] # Swing points'ten gelen Yakın Direnç
+        
+    if r1 is not None and np.isfinite(r1) and r1 > close:
+        target = float(r1)
+        target_type = "Resistance (R1)"
+    else:
+        # Eğer üstte direnç yoksa (All-Time High, tarihi zirve vb.), ATR bazlı hedefi kullan
+        tp_mult = cfg.get("take_profit_mult", 2.0)
+        target = close + (tp_mult * cfg["atr_stop_mult"] * atrv)
+        target_type = f"ATR-based Target ({tp_mult}x)"
 
-    target_type = f"Backtest Take Profit (TP mult: {tp_mult:.1f} x ATR)"
+    reward = target - close
 
     if risk <= 0 or reward <= 0:
         return {"rr": None, "stop": stop, "risk": risk, "reward": reward, "target_type": target_type}
 
+    # Gerçek Risk/Ödül Oranı
     rr_val = float(reward / risk) if reward is not None else None
-    return {"rr": rr_val, "stop": float(stop), "risk": float(risk), "reward": reward, "target_type": target_type}
+    
+    return {
+        "rr": rr_val, 
+        "stop": float(stop), 
+        "risk": float(risk), 
+        "reward": reward, 
+        "target_type": target_type
+    }
 
 
 def fmt_rr(rr):
