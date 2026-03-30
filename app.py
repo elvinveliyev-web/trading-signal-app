@@ -946,7 +946,7 @@ def gemini_generate_text(
 
 
 # =============================
-# Sentiment Analysis via Google News RSS + Gemini (BUILT-IN XML İLE YENİLENDİ)
+# Sentiment Analysis via Google News RSS + Gemini
 # =============================
 @st.cache_data(ttl=30 * 60, show_spinner=False)
 def get_news_sentiment(
@@ -954,7 +954,7 @@ def get_news_sentiment(
     company_name: str = "",
     gemini_model: str = "gemini-1.5-flash",
     gemini_temp: float = 0.2,
-    max_tokens: int = 2048, # <-- 512 LİMİTİ KALDIRILDI VE KULLANICI SEÇİMİNE BAĞLANDI
+    max_tokens: int = 2048,
 ) -> Dict[str, Any]:
     
     try:
@@ -965,21 +965,26 @@ def get_news_sentiment(
 
         url = f"https://news.google.com/rss/search?q={requests.utils.quote(query)}&hl=en-US&gl=US&ceid=US:en"
         
-        # feedparser yerine Python'un yerleşik xml.etree kütüphanesini kullanıyoruz
         resp = requests.get(url, timeout=15)
         if resp.status_code != 200:
             return {"error": f"Haberler çekilemedi (HTTP {resp.status_code})", "sentiment": None, "summary": ""}
             
         root = ET.fromstring(resp.content)
-        titles = []
+        
+        # SADECE BAŞLIK DEĞİL, LİNKLERİ DE ÇEKİYORUZ
+        news_items = []
         for item in root.findall(".//item")[:10]:
             title_node = item.find("title")
+            link_node = item.find("link")
             if title_node is not None and title_node.text:
-                titles.append(title_node.text)
+                t = title_node.text
+                l = link_node.text if (link_node is not None and link_node.text) else ""
+                news_items.append({"title": t, "link": l})
 
-        if not titles:
+        if not news_items:
             return {"error": "Haber bulunamadı", "sentiment": None, "summary": ""}
 
+        prompt_titles = [item["title"] for item in news_items]
         prompt = f"""Aşağıdaki haber başlıklarının duygu analizini yap (pozitif, negatif, nötr).
 Sonuçları şu formatta ver:
 Pozitif: [sayı]
@@ -989,14 +994,14 @@ Nötr: [sayı]
 - Kısa bir özet (2 cümle)
 
 Haber Başlıkları:
-{chr(10).join([f"- {title}" for title in titles])}
+{chr(10).join([f"- {t}" for t in prompt_titles])}
 """
 
         response = gemini_generate_text(
             prompt=prompt,
             model=gemini_model,
             temperature=gemini_temp,
-            max_output_tokens=max_tokens, # <-- KULLANICININ SEÇTİĞİ TOKEN LİMİTİ (örn: 2048)
+            max_output_tokens=max_tokens,
             image_bytes=None,
         )
 
@@ -1017,7 +1022,7 @@ Haber Başlıkları:
             "pos": pos / total if total > 0 else 0,
             "neg": neg / total if total > 0 else 0,
             "neu": neu / total if total > 0 else 0,
-            "titles": titles[:3],
+            "news_items": news_items[:5], # SADECE İLK 5 HABERİ LİNK OLARAK DÖNDÜR
         }
     except Exception as e:
         return {"error": str(e), "sentiment": None, "summary": ""}
@@ -1252,6 +1257,7 @@ def build_html_report(
     gemini_insight: Optional[str] = None,
     pa_pack: Optional[Dict[str, Any]] = None,
     sentiment_summary: Optional[str] = None,
+    sentiment_items: Optional[List[dict]] = None,
     overbought_result: Optional[Dict[str, Any]] = None,
 ) -> bytes:
     def esc(x):
@@ -1339,10 +1345,18 @@ def build_html_report(
 
     sentiment_block = ""
     if sentiment_summary:
+        links_html = ""
+        if sentiment_items:
+            links_html = "<br><br><b>Kaynak Haberler:</b><ul>"
+            for item in sentiment_items:
+                links_html += f"<li><a href='{esc(item['link'])}' target='_blank'>{esc(item['title'])}</a></li>"
+            links_html += "</ul>"
+
         sentiment_block = f"""
         <div class="card" style="margin-top:16px;">
             <h2>Haber Duygu Analizi (Google News + Gemini)</h2>
-            <pre>{esc(sentiment_summary)}</pre>
+            <pre style="white-space:pre-wrap; font-family:inherit;">{esc(sentiment_summary)}</pre>
+            {links_html}
         </div>
         """
 
@@ -1457,6 +1471,7 @@ def generate_pdf_report(
     gemini_insight: Optional[str] = None,
     pa_pack: Optional[Dict[str, Any]] = None,
     sentiment_summary: Optional[str] = None,
+    sentiment_items: Optional[List[dict]] = None,
     overbought_result: Optional[Dict[str, Any]] = None,
 ) -> Optional[bytes]:
     if not REPORTLAB_OK:
@@ -1602,6 +1617,18 @@ def generate_pdf_report(
         c.setFont("Helvetica", 9)
         y = _pdf_write_lines(c, sentiment_summary.splitlines(), left, y, 11, bottom)
         y -= 6
+        
+        # KAYNAK HABERLERİ PDF'E EKLE
+        if sentiment_items:
+            c.setFont("Helvetica-Bold", 10)
+            y = _pdf_write_lines(c, ["Kaynak Haberler:"], left, y, 11, bottom)
+            c.setFont("Helvetica", 8)
+            for item in sentiment_items:
+                y = _pdf_write_lines(c, [f"- {item['title'][:110]}"], left, y, 10, bottom)
+                c.setFillColorRGB(0, 0, 1) # Mavi renk
+                y = _pdf_write_lines(c, [f"  {item['link'][:115]}"], left, y, 10, bottom)
+                c.setFillColorRGB(0, 0, 0) # Rengi siyaha sıfırla
+            y -= 6
 
     if pa_pack:
         c.setFont("Helvetica-Bold", 12)
@@ -1783,6 +1810,8 @@ if "pa_pack" not in st.session_state:
     st.session_state.pa_pack = {}
 if "sentiment_summary" not in st.session_state:
     st.session_state.sentiment_summary = ""
+if "sentiment_items" not in st.session_state:
+    st.session_state.sentiment_items = []
 
 if "ai_messages" in st.session_state:
     del st.session_state.ai_messages
@@ -2299,14 +2328,16 @@ if use_sentiment and ai_on:
             company_name = row["longName"]
 
     with st.spinner("Google News'ten haberler çekiliyor ve Gemini ile analiz ediliyor..."):
-        # gemini_max_tokens EKLENEREK YARIDA KESİLME SORUNU ÇÖZÜLDÜ
         sent = get_news_sentiment(ticker, company_name, gemini_model, gemini_temp, gemini_max_tokens)
         if sent.get("error") is None:
             sentiment_summary = sent["summary"]
             st.session_state.sentiment_summary = sentiment_summary
+            # LİNKLERİ SESSION STATE'E KAYDEDİYORUZ
+            st.session_state.sentiment_items = sent.get("news_items", [])
         else:
             sentiment_summary = f"Haber analizi başarısız: {sent['error']}"
             st.session_state.sentiment_summary = sentiment_summary
+            st.session_state.sentiment_items = []
 elif use_sentiment and not ai_on:
     st.warning("Haber duygu analizi için Gemini'nin açık olması gerekir.")
 
@@ -2638,6 +2669,12 @@ with tab_dash:
     if sentiment_summary:
         st.subheader("📰 Haber Duygu Analizi (Google News + Gemini)")
         st.info(sentiment_summary)
+        
+        # HABER LİNKLERİNİN EKLENDİĞİ KISIM (DASHBOARD)
+        if st.session_state.sentiment_items:
+            st.markdown("**Kaynak Haberler:**")
+            for item in st.session_state.sentiment_items:
+                st.markdown(f"- [{item['title']}]({item['link']})")
 
     st.subheader("🤖 Gemini Multimodal AI — Grafik + Price Action + Spekülasyon Analizi")
     if not ai_on:
@@ -2916,6 +2953,7 @@ with tab_export:
     gemini_text = st.session_state.gemini_text if include_gemini else None
     pa_pack_export = st.session_state.pa_pack if include_pa else None
     sentiment_export = st.session_state.sentiment_summary if include_sentiment else None
+    sentiment_items_export = st.session_state.sentiment_items if include_sentiment else None
     overbought_export = overbought_result if include_overbought else None
 
     html_bytes = build_html_report(
@@ -2930,6 +2968,7 @@ with tab_export:
         gemini_insight=gemini_text,
         pa_pack=pa_pack_export,
         sentiment_summary=sentiment_export,
+        sentiment_items=sentiment_items_export,
         overbought_result=overbought_export,
     )
     st.download_button(
@@ -2964,6 +3003,7 @@ with tab_export:
                     gemini_insight=gemini_text,
                     pa_pack=pa_pack_export,
                     sentiment_summary=sentiment_export,
+                    sentiment_items=sentiment_items_export,
                     overbought_result=overbought_export,
                 )
 
