@@ -2042,7 +2042,7 @@ with st.sidebar:
     )
     period = st.selectbox(
         "Periyot",
-        ["6mo", "1y", "2y", "5y", "10y"],
+        ["45d", "3mo", "6mo", "1y", "2y"],
         index=3,
         help="Verinin ne kadar geriye gidileceği. Daha uzun periyot daha sağlıklı backtest sağlar.",
     )
