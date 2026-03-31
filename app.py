@@ -1785,10 +1785,10 @@ def pct_dist(level: float, base: float):
 
 
 # =============================
-# Cached data loader
+# Cached data loader (HACK EKLENDİ)
 # =============================
 @st.cache_data(ttl=300, show_spinner=False)
-def load_data_cached(ticker: str, period: str, interval: str, end_date=None) -> pd.DataFrame:
+def load_data_cached(ticker: str, period: str, interval: str, end_date=None, force_latest: bool = False) -> pd.DataFrame:
     if end_date is not None:
         import datetime
         bitis_obj = end_date + datetime.timedelta(days=1)
@@ -1813,7 +1813,42 @@ def load_data_cached(ticker: str, period: str, interval: str, end_date=None) -> 
     else:
         df = yf.download(ticker, period=period, interval=interval, auto_adjust=True, progress=False)
         
-    return _flatten_yf(df)
+    df = _flatten_yf(df)
+
+    # 🚀 ZORUNLU GÜNCEL MUM (SENTETİK) HACK'İ
+    if force_latest and end_date is None and interval == "1d" and not df.empty:
+        try:
+            today_data = yf.download(ticker, period="1d", interval="1m", progress=False)
+            today_data = _flatten_yf(today_data)
+            
+            if not today_data.empty:
+                today_date = today_data.index[-1].date()
+                last_df_date = df.index[-1].date()
+                
+                if today_date > last_df_date:
+                    o = float(today_data["Open"].iloc[0])
+                    h = float(today_data["High"].max())
+                    l = float(today_data["Low"].min())
+                    c = float(today_data["Close"].iloc[-1])
+                    v = float(today_data["Volume"].sum())
+                    
+                    new_idx = pd.to_datetime(str(today_date))
+                    if df.index.tz is not None:
+                        new_idx = new_idx.tz_localize(df.index.tz)
+                        
+                    new_row = pd.DataFrame({
+                        "Open": [o],
+                        "High": [h],
+                        "Low": [l],
+                        "Close": [c],
+                        "Volume": [v]
+                    }, index=[new_idx])
+                    
+                    df = pd.concat([df, new_row])
+        except Exception:
+            pass
+            
+    return df
 
 
 # =============================
@@ -2083,6 +2118,13 @@ with st.sidebar:
         )
     else:
         custom_end_date = None
+
+    force_latest_candle = st.checkbox(
+        "Eksik Güncel Mumu Zorla Ekle (Live Candle Hack)", 
+        value=False, 
+        disabled=(use_custom_end_date or interval != "1d"),
+        help="Yahoo Finance günlük mumu henüz vermediyse gün içi dakikalık verilerden o mumu inşa eder. (Sadece günlük periyotta ve güncel analizde çalışır)"
+    )
 
     st.divider()
     st.subheader("Teknik Parametreler")
@@ -2380,7 +2422,7 @@ elif use_sentiment and not ai_on:
 
 
 with st.spinner(f"Veri indiriliyor: {ticker}"):
-    df_raw = load_data_cached(ticker, period, interval, end_date=custom_end_date)
+    df_raw = load_data_cached(ticker, period, interval, end_date=custom_end_date, force_latest=force_latest_candle)
 
 if df_raw.empty:
     st.error(f"Veri gelmedi: {ticker}")
@@ -2397,7 +2439,7 @@ if len(df_raw) < 260 and interval == "1d":
 df = build_features(df_raw, cfg)
 
 benchmark_ticker = "SPY" if market == "USA" else "XU100.IS"
-benchmark_df = load_data_cached(benchmark_ticker, period, interval, end_date=custom_end_date)
+benchmark_df = load_data_cached(benchmark_ticker, period, interval, end_date=custom_end_date, force_latest=False)
 benchmark_returns = benchmark_df["Close"].pct_change().dropna() if not benchmark_df.empty else None
 
 df, checkpoints = signal_with_checkpoints(
