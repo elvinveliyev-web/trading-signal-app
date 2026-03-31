@@ -1786,7 +1786,7 @@ def pct_dist(level: float, base: float):
 # =============================
 # Cached data loader
 # =============================
-@st.cache_data(show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def load_data_cached(ticker: str, period: str, interval: str) -> pd.DataFrame:
     df = yf.download(ticker, period=period, interval=interval, auto_adjust=True, progress=False)
     return _flatten_yf(df)
