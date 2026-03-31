@@ -3,6 +3,7 @@ import re
 import json
 import time
 import base64
+import datetime
 import xml.etree.ElementTree as ET
 from io import BytesIO
 from typing import Optional, Dict, Any, List, Tuple
@@ -1787,8 +1788,31 @@ def pct_dist(level: float, base: float):
 # Cached data loader
 # =============================
 @st.cache_data(ttl=300, show_spinner=False)
-def load_data_cached(ticker: str, period: str, interval: str) -> pd.DataFrame:
-    df = yf.download(ticker, period=period, interval=interval, auto_adjust=True, progress=False)
+def load_data_cached(ticker: str, period: str, interval: str, end_date=None) -> pd.DataFrame:
+    if end_date is not None:
+        import datetime
+        bitis_obj = end_date + datetime.timedelta(days=1)
+        bitis_str = bitis_obj.strftime('%Y-%m-%d')
+        
+        if period == "45d":
+            baslangic_obj = end_date - datetime.timedelta(days=45)
+        elif period == "3mo":
+            baslangic_obj = end_date - datetime.timedelta(days=90)
+        elif period == "6mo":
+            baslangic_obj = end_date - datetime.timedelta(days=180)
+        elif period == "1y":
+            baslangic_obj = end_date - datetime.timedelta(days=365)
+        elif period == "2y":
+            baslangic_obj = end_date - datetime.timedelta(days=730)
+        else:
+            baslangic_obj = end_date - datetime.timedelta(days=730)
+            
+        baslangic_str = baslangic_obj.strftime('%Y-%m-%d')
+        
+        df = yf.download(ticker, start=baslangic_str, end=bitis_str, interval=interval, auto_adjust=True, progress=False)
+    else:
+        df = yf.download(ticker, period=period, interval=interval, auto_adjust=True, progress=False)
+        
     return _flatten_yf(df)
 
 
@@ -2046,6 +2070,19 @@ with st.sidebar:
         index=3,
         help="Verinin ne kadar geriye gidileceği. Daha uzun periyot daha sağlıklı backtest sağlar.",
     )
+
+    use_custom_end_date = st.checkbox("Geçmiş Bir Tarihe Göre Analiz Yap (Repaint Önleme)", value=False)
+    if use_custom_end_date:
+        bugun = datetime.date.today()
+        gecen_cuma = bugun - datetime.timedelta(days=bugun.weekday() + 3)
+        
+        custom_end_date = st.date_input(
+            "Bitiş Tarihi Seçin", 
+            value=gecen_cuma,
+            help="Seçtiğiniz tarihe kadar olan veriler çekilir. Haftalık kapanışlar için Cuma gününü seçin."
+        )
+    else:
+        custom_end_date = None
 
     st.divider()
     st.subheader("Teknik Parametreler")
@@ -2343,7 +2380,7 @@ elif use_sentiment and not ai_on:
 
 
 with st.spinner(f"Veri indiriliyor: {ticker}"):
-    df_raw = load_data_cached(ticker, period, interval)
+    df_raw = load_data_cached(ticker, period, interval, end_date=custom_end_date)
 
 if df_raw.empty:
     st.error(f"Veri gelmedi: {ticker}")
@@ -2360,7 +2397,7 @@ if len(df_raw) < 260 and interval == "1d":
 df = build_features(df_raw, cfg)
 
 benchmark_ticker = "SPY" if market == "USA" else "XU100.IS"
-benchmark_df = load_data_cached(benchmark_ticker, period, interval)
+benchmark_df = load_data_cached(benchmark_ticker, period, interval, end_date=custom_end_date)
 benchmark_returns = benchmark_df["Close"].pct_change().dropna() if not benchmark_df.empty else None
 
 df, checkpoints = signal_with_checkpoints(
