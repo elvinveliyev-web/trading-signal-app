@@ -180,6 +180,49 @@ def max_drawdown(eq: pd.Series) -> float:
 
 
 # =============================
+# YENİ EKLENEN İNDİKATÖRLER (TRIPLE SCREEN İÇİN)
+# =============================
+def force_index(close: pd.Series, volume: pd.Series) -> pd.Series:
+    return volume * (close - close.shift(1))
+
+def stochastic(high: pd.Series, low: pd.Series, close: pd.Series, k_period: int = 5, d_period: int = 3):
+    lowest_low = low.rolling(window=k_period).min()
+    highest_high = high.rolling(window=k_period).max()
+    k = 100 * ((close - lowest_low) / (highest_high - lowest_low))
+    d = k.rolling(window=d_period).mean()
+    return k.fillna(50), d.fillna(50)
+
+def elder_ray(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 13):
+    e = ema(close, period)
+    bull_power = high - e
+    bear_power = low - e
+    return e, bull_power, bear_power
+
+def check_bullish_divergence(close: pd.Series, indicator: pd.Series, lookback: int = 30) -> bool:
+    """ Fiyat yeni dip yaparken, indikatörün daha yüksek dip yapması (Pozitif Uyumsuzluk) """
+    if len(close) < lookback: return False
+    c = close.tail(lookback)
+    ind = indicator.tail(lookback)
+    try:
+        min_idx = c.values.argmin() # En düşük fiyatın index numarası
+        if min_idx < 5: return False # Öncesinde yeterli veri yok
+        
+        # O dipten önceki yerel dibi bul
+        prev_c = c.iloc[:min_idx-2]
+        if len(prev_c) < 3: return False
+        prev_min_idx = prev_c.values.argmin()
+        
+        p1, p2 = prev_c.iloc[prev_min_idx], c.iloc[min_idx]
+        i1, i2 = ind.iloc[prev_min_idx], ind.iloc[min_idx]
+        
+        if p2 < p1 and i2 > i1:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+# =============================
 # Overbought / Speculation Indicators
 # =============================
 def add_overbought_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -2576,9 +2619,9 @@ figs_for_report = {
 
 
 # =============================
-# Tabs
+# Tabs (YENİ 4. SEKME EKLENDİ)
 # =============================
-tab_dash, tab_export, tab_heatmap = st.tabs(["📊 Dashboard", "📄 Rapor (PDF/HTML)", "🔥 Sektörel Heatmap"])
+tab_dash, tab_export, tab_heatmap, tab_triple = st.tabs(["📊 Dashboard", "📄 Rapor (PDF/HTML)", "🔥 Sektörel Heatmap", "📺 3 Ekranlı Sistem"])
 
 
 with tab_dash:
@@ -3098,3 +3141,150 @@ with tab_export:
                 st.info("Grafikler gelmiyorsa `kaleido` kütüphanesini requirements'a eklemelisin.")
             else:
                 st.error("PDF üretilemedi.")
+
+# =============================
+# TRIPLE SCREEN TAB (YENİ EKLENEN BÖLÜM)
+# =============================
+with tab_triple:
+    st.header("📺 Üçlü Ekran Trading Sistemi (Triple Screen)")
+    st.caption("Dr. Alexander Elder'in 3 Ekranlı sistemine dayanan, trend, osilatör ve giriş seviyesi analizleri.")
+    
+    if not st.session_state.ta_ran:
+        st.info("Sol menüden 'Teknik Analizi Çalıştır' butonuna basarak sistemi aktifleştirmelisin.")
+    else:
+        if st.button("Üçlü Ekran Verilerini Getir ve Analiz Et", key="run_triple"):
+            with st.spinner("3 Ekran verileri hesaplanıyor (1W, 1D, 4H)..."):
+                
+                # Verileri Yahoo'dan taze çekiyoruz
+                df_1w = load_data_cached(ticker, "2y", "1wk")
+                df_1d = load_data_cached(ticker, "1y", "1d", force_latest=force_latest_candle)
+                df_4h = load_data_cached(ticker, "60d", "4h")
+                
+                if df_1w.empty or df_1d.empty or df_4h.empty:
+                    st.error("Bazı zaman dilimleri için veri çekilemedi (Hisse senedi yeni olabilir veya API gecikmesi var).")
+                else:
+                    t_screen1, t_screen2, t_screen3 = st.tabs(["1. Ekran (Haftalık)", "2. Ekran (Günlük)", "3. Ekran (4 Saatlik)"])
+                    
+                    # --- 1. EKRAN ---
+                    with t_screen1:
+                        st.subheader("1. Ekran: Haftalık (Ana Trend)")
+                        m_line, m_sig, m_hist = macd(df_1w["Close"])
+                        
+                        last_hist = float(m_hist.iloc[-1])
+                        prev_hist = float(m_hist.iloc[-2])
+                        slope_up = last_hist > prev_hist
+                        
+                        div_macd = check_bullish_divergence(df_1w["Close"], m_hist)
+                        
+                        st.metric(
+                            "MACD Histogram Eğimi", 
+                            "YUKARI (AL Sinyali)" if slope_up else "AŞAĞI (SAT Sinyali)", 
+                            f"{last_hist - prev_hist:.2f}"
+                        )
+                        
+                        if div_macd:
+                            st.success("🚀 Sistem Haftalık MACD Histogramında **Pozitif Uyumsuzluk** tespit etti!")
+                            
+                        fig1 = go.Figure()
+                        colors = ['green' if x > 0 else 'red' for x in m_hist.diff()]
+                        fig1.add_trace(go.Bar(x=df_1w.index, y=m_hist, name="MACD Hist", marker_color=colors))
+                        fig1.update_layout(title="Haftalık MACD Histogramı", height=300)
+                        st.plotly_chart(fig1, use_container_width=True)
+
+                    # --- 2. EKRAN ---
+                    with t_screen2:
+                        st.subheader("2. Ekran: Günlük (Osilatörler ve Sapmalar)")
+                        
+                        # 1) Kuvvet Endeksi (Force Index)
+                        fi = force_index(df_1d["Close"], df_1d["Volume"])
+                        fi_ema13 = ema(fi, 13)
+                        fi_ema2 = ema(fi, 2)
+                        
+                        # 2) RSI 13
+                        rsi13 = rsi(df_1d["Close"], 13)
+                        
+                        # 3) Stochastic 5
+                        stoch_k, stoch_d = stochastic(df_1d["High"], df_1d["Low"], df_1d["Close"], k_period=5, d_period=3)
+                        
+                        # 4) Elder-Ray 13
+                        er_ema, bull_p, bear_p = elder_ray(df_1d["High"], df_1d["Low"], df_1d["Close"], 13)
+                        
+                        # Kurallar
+                        fi_al = (fi.iloc[-1] > fi_ema13.iloc[-1]) and (fi_ema2.iloc[-1] < 0)
+                        rsi_al = (rsi13.iloc[-1] < 30)
+                        stoch_al = (stoch_k.iloc[-1] < 20)
+                        
+                        er_ema_up = (er_ema.iloc[-1] > er_ema.iloc[-2])
+                        bp_neg_but_rising = (bear_p.iloc[-1] < 0) and (bear_p.iloc[-1] > bear_p.iloc[-2])
+                        er_al = er_ema_up and bp_neg_but_rising
+                        
+                        div_rsi = check_bullish_divergence(df_1d["Close"], rsi13)
+                        div_stoch = check_bullish_divergence(df_1d["Close"], stoch_k)
+                        div_er = check_bullish_divergence(df_1d["Close"], bear_p)
+                        
+                        c1, c2, c3, c4 = st.columns(4)
+                        c1.metric("Kuvvet Endeksi (FI)", "AL" if fi_al else "BEKLE", "13 EMA Üstü & 2 EMA Negatif" if fi_al else "")
+                        c2.metric("RSI (13)", "AL" if rsi_al else "BEKLE", f"{rsi13.iloc[-1]:.1f}")
+                        c3.metric("Stokastik (5)", "AL" if stoch_al else "BEKLE", f"{stoch_k.iloc[-1]:.1f}")
+                        c4.metric("Elder-Ray", "AL" if er_al else "BEKLE")
+                        
+                        if div_rsi: st.success("🚀 RSI(13)'te **Pozitif Uyumsuzluk** tespit edildi!")
+                        if div_stoch: st.success("🚀 Stokastik(5)'te **Pozitif Uyumsuzluk** tespit edildi!")
+                        if div_er: st.success("🚀 Elder-Ray Bear Power'da **Pozitif Uyumsuzluk (Boğa Uyumsuzluğu)** tespit edildi!")
+                        
+                        if st.session_state.sentiment_summary:
+                            st.info(f"**Haber Etkisi Modülü:** {st.session_state.sentiment_summary}")
+                            
+                        # Kuvvet Endeksi Grafiği
+                        fig2_fi = go.Figure()
+                        fig2_fi.add_trace(go.Scatter(x=df_1d.index, y=fi_ema13, name="FI 13 EMA", line=dict(color='orange')))
+                        fig2_fi.add_trace(go.Bar(x=df_1d.index, y=fi_ema2, name="FI 2 EMA", marker_color='gray'))
+                        fig2_fi.update_layout(title="Kuvvet Endeksi (Force Index)", height=250)
+                        st.plotly_chart(fig2_fi, use_container_width=True)
+                        
+                        # Elder-Ray Grafiği
+                        fig2_er = go.Figure()
+                        fig2_er.add_trace(go.Bar(x=df_1d.index, y=bull_p, name="Bull Power", marker_color='green'))
+                        fig2_er.add_trace(go.Bar(x=df_1d.index, y=bear_p, name="Bear Power", marker_color='red'))
+                        fig2_er.update_layout(title="Elder-Ray (Bull & Bear Power)", height=250)
+                        st.plotly_chart(fig2_er, use_container_width=True)
+
+                    # --- 3. EKRAN ---
+                    with t_screen3:
+                        st.subheader("3. Ekran: 4 Saatlik (Giriş / Penetrasyon)")
+                        
+                        # 4h için EMA 13
+                        ema_4h = ema(df_4h["Close"], 13)
+                        
+                        # Penetrasyon hesabı (Fiyatın EMA altına sarktığı barlar)
+                        pens = ema_4h - df_4h["Low"]
+                        pens_positive = pens[pens > 0]
+                        avg_pen = float(pens_positive.mean()) if not pens_positive.empty else 0.0
+                        
+                        ema_today = float(ema_4h.iloc[-1])
+                        ema_yest = float(ema_4h.iloc[-2])
+                        ema_delta = ema_today - ema_yest
+                        ema_est_tmrw = ema_today + ema_delta
+                        
+                        buy_level = ema_est_tmrw - avg_pen
+                        
+                        st.markdown(f"""
+                        **Hesaplamalar:**
+                        * Güncel EMA (13): **{ema_today:.2f}**
+                        * Yarınki Tahmini EMA: **{ema_est_tmrw:.2f}** *(Bugünkü EMA + Delta)*
+                        * Ortalama Düşüş Penetrasyonu: **{avg_pen:.2f}**
+                        * 🎯 **Önerilen Alış Seviyesi (Buy Limit): {buy_level:.2f}**
+                        """)
+                        
+                        fig3 = go.Figure()
+                        fig3.add_trace(go.Candlestick(x=df_4h.index, open=df_4h["Open"], high=df_4h["High"], low=df_4h["Low"], close=df_4h["Close"], name="Price"))
+                        fig3.add_trace(go.Scatter(x=df_4h.index, y=ema_4h, name="EMA 13", line=dict(color='blue')))
+                        
+                        # Gelecek Bar Noktası ve Buy Limit Çizgisi
+                        last_time = df_4h.index[-1]
+                        next_time = last_time + pd.Timedelta(hours=4)
+                        fig3.add_trace(go.Scatter(x=[next_time], y=[ema_est_tmrw], mode='markers', marker=dict(size=10, color='orange'), name="Tahmini EMA"))
+                        fig3.add_hline(y=buy_level, line_dash="dash", line_color="green", annotation_text="Limit Alım Seviyesi")
+                        
+                        fig3.update_layout(title="4 Saatlik Grafik ve Penetrasyon Tabanlı Alım Seviyesi", height=500, xaxis_rangeslider_visible=False)
+                        st.plotly_chart(fig3, use_container_width=True)
