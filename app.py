@@ -3251,40 +3251,63 @@ with tab_triple:
 
                     # --- 3. EKRAN ---
                     with t_screen3:
-                        st.subheader("3. Ekran: 4 Saatlik (Giriş / Penetrasyon)")
+                        st.subheader("3. Ekran: 4 Saatlik (Giriş / Çıkış ve Hedefler)")
                         
-                        # 4h için EMA 13
+                        # 4h için EMA 13 ve ATR
                         ema_4h = ema(df_4h["Close"], 13)
+                        atr_4h = atr(df_4h["High"], df_4h["Low"], df_4h["Close"], 14)
+                        last_atr_4h = float(atr_4h.iloc[-1]) if not pd.isna(atr_4h.iloc[-1]) else 0.0
                         
-                        # Penetrasyon hesabı (Fiyatın EMA altına sarktığı barlar)
+                        # Düşüş Penetrasyonu hesabı (Alış için)
                         pens = ema_4h - df_4h["Low"]
                         pens_positive = pens[pens > 0]
                         avg_pen = float(pens_positive.mean()) if not pens_positive.empty else 0.0
+                        
+                        # Yükseliş Penetrasyonu hesabı (Hedef 1 için)
+                        up_pens = df_4h["High"] - ema_4h
+                        up_pens_positive = up_pens[up_pens > 0]
+                        avg_up_pen = float(up_pens_positive.mean()) if not up_pens_positive.empty else 0.0
                         
                         ema_today = float(ema_4h.iloc[-1])
                         ema_yest = float(ema_4h.iloc[-2])
                         ema_delta = ema_today - ema_yest
                         ema_est_tmrw = ema_today + ema_delta
                         
+                        # --- ALIM, STOP VE HEDEF HESAPLAMALARI ---
                         buy_level = ema_est_tmrw - avg_pen
                         
+                        # Stop Loss (Alış seviyesinin 1.5 ATR altı)
+                        stop_loss = buy_level - (1.5 * last_atr_4h) if last_atr_4h > 0 else buy_level * 0.98
+                        risk = buy_level - stop_loss
+                        
+                        # Hedef 1: Simetrik Penetrasyon
+                        target_1 = ema_est_tmrw + avg_up_pen
+                        
+                        # Hedef 2: 1:2 Risk/Ödül Oranı
+                        target_2 = buy_level + (risk * 2)
+                        
                         st.markdown(f"""
-                        **Hesaplamalar:**
-                        * Güncel EMA (13): **{ema_today:.2f}**
-                        * Yarınki Tahmini EMA: **{ema_est_tmrw:.2f}** *(Bugünkü EMA + Delta)*
-                        * Ortalama Düşüş Penetrasyonu: **{avg_pen:.2f}**
-                        * 🎯 **Önerilen Alış Seviyesi (Buy Limit): {buy_level:.2f}**
+                        **Hesaplamalar ve Strateji (Buy Limit & Hedefler):**
+                        * 📌 **Güncel EMA (13):** {ema_today:.2f} | **Yarınki Tahmini EMA:** {ema_est_tmrw:.2f}
+                        * 🟢 **Önerilen Alış Seviyesi (Buy Limit): {buy_level:.2f}** *(Ortalama {avg_pen:.2f} düşüş penetrasyonu ile)*
+                        * 🔴 **Zarar Kes (Stop-Loss): {stop_loss:.2f}** *(Alışın 1.5 ATR altı. Risk: {risk:.2f})*
+                        * 🎯 **Hedef 1 (Kısa Vade): {target_1:.2f}** *(Simetrik Yükseliş Penetrasyonu)*
+                        * 🚀 **Hedef 2 (Trend - 1:2 RR): {target_2:.2f}** *(Riske edilen tutarın 2 katı kazanç)*
                         """)
                         
                         fig3 = go.Figure()
                         fig3.add_trace(go.Candlestick(x=df_4h.index, open=df_4h["Open"], high=df_4h["High"], low=df_4h["Low"], close=df_4h["Close"], name="Price"))
                         fig3.add_trace(go.Scatter(x=df_4h.index, y=ema_4h, name="EMA 13", line=dict(color='blue')))
                         
-                        # Gelecek Bar Noktası ve Buy Limit Çizgisi
+                        # Gelecek Bar Noktası ve Çizgiler
                         last_time = df_4h.index[-1]
                         next_time = last_time + pd.Timedelta(hours=4)
                         fig3.add_trace(go.Scatter(x=[next_time], y=[ema_est_tmrw], mode='markers', marker=dict(size=10, color='orange'), name="Tahmini EMA"))
-                        fig3.add_hline(y=buy_level, line_dash="dash", line_color="green", annotation_text="Limit Alım Seviyesi")
                         
-                        fig3.update_layout(title="4 Saatlik Grafik ve Penetrasyon Tabanlı Alım Seviyesi", height=500, xaxis_rangeslider_visible=False)
+                        fig3.add_hline(y=target_2, line_dash="dash", line_color="darkgreen", annotation_text="Hedef 2 (1:2 RR)", annotation_position="top left")
+                        fig3.add_hline(y=target_1, line_dash="dashdot", line_color="cyan", annotation_text="Hedef 1 (Simetrik)", annotation_position="top left")
+                        fig3.add_hline(y=buy_level, line_dash="dash", line_color="lime", annotation_text="Limit Alış Seviyesi", annotation_position="bottom left")
+                        fig3.add_hline(y=stop_loss, line_dash="dot", line_color="red", annotation_text="Stop-Loss (1.5 ATR)", annotation_position="bottom left")
+                        
+                        fig3.update_layout(title="4 Saatlik Giriş/Çıkış Stratejisi (Alış, Hedef ve Stop)", height=600, xaxis_rangeslider_visible=False)
                         st.plotly_chart(fig3, use_container_width=True)
