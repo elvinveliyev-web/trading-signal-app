@@ -2377,6 +2377,24 @@ with st.sidebar:
     if run_btn:
         st.session_state.ta_ran = True
 
+# -----------------------------
+# Config
+# -----------------------------
+cfg = {
+    "ema_fast": ema_fast,
+    "ema_slow": ema_slow,
+    "rsi_period": rsi_period,
+    "bb_period": bb_period,
+    "bb_std": bb_std,
+    "atr_period": atr_period,
+    "vol_sma": vol_sma,
+    "initial_capital": initial_capital,
+    "risk_per_trade": risk_per_trade,
+    "commission_bps": commission_bps,
+    "slippage_bps": slippage_bps,
+}
+cfg.update(PRESETS[preset_name])
+
 
 # -----------------------------
 # Fundamental screener action
