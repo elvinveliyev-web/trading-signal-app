@@ -15,6 +15,7 @@ import yfinance as yf
 import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
+from plotly.subplots import make_subplots
 import requests
 
 # =============================
@@ -2722,6 +2723,24 @@ fig_eq.update_layout(
     xaxis_title="Tarih",
 )
 
+# YENİ EKLENEN GRAFİKLER (Hacim Kıyaslamaları)
+df["VOL_SMA_10"] = df["Volume"].rolling(10).mean()
+if benchmark_df is not None and not benchmark_df.empty:
+    bench_vol = benchmark_df["Volume"].reindex(df.index).fillna(0)
+else:
+    bench_vol = pd.Series(0, index=df.index)
+
+fig_vol_market = make_subplots(specs=[[{"secondary_y": True}]])
+fig_vol_market.add_trace(go.Bar(x=df.index, y=df["Volume"], name="Hisse Hacmi", marker_color='lightblue', opacity=0.7), secondary_y=False)
+fig_vol_market.add_trace(go.Scatter(x=df.index, y=bench_vol, name=f"Endeks ({benchmark_ticker})", line=dict(color='orange', width=2)), secondary_y=True)
+fig_vol_market.update_layout(height=260, title=f"Hisse vs Endeks Hacmi", yaxis_title="Hisse", yaxis2_title="Endeks", xaxis_title="Tarih", margin=dict(l=0, r=0, t=40, b=0))
+
+fig_vol_2wk = go.Figure()
+fig_vol_2wk.add_trace(go.Bar(x=df.index, y=df["Volume"], name="Hacim", marker_color='cadetblue', opacity=0.7))
+fig_vol_2wk.add_trace(go.Scatter(x=df.index, y=df["VOL_SMA_10"], name="2 Haftalık Ort. (10 Bar)", line=dict(color='red', width=2)))
+fig_vol_2wk.update_layout(height=260, title="Hisse Hacmi vs 2 Haftalık Ortalama", yaxis_title="Hacim", xaxis_title="Tarih", margin=dict(l=0, r=0, t=40, b=0))
+
+
 figs_for_report = {
     "Price + EMA + Bollinger + Signals": fig_price,
     "RSI": fig_rsi,
@@ -2730,6 +2749,8 @@ figs_for_report = {
     "Stochastic RSI": fig_stoch,
     "Bollinger Band Width": fig_bbwidth,
     "Volume Ratio": fig_volratio,
+    "Volume vs Market": fig_vol_market,
+    "Volume vs 2W Avg": fig_vol_2wk,
     "Equity Curve": fig_eq,
 }
 
@@ -2905,6 +2926,16 @@ with tab_dash:
     with colF:
         st.plotly_chart(fig_volratio, use_container_width=True)
         st.caption("**Hacim Oranı:** 1.5 üstü anormal hacim (spekülasyon), 0.5 altı düşük hacim (ilgisizlik).")
+
+    # YENİ EKLENEN HACİM GRAFİKLERİ BÖLÜMÜ
+    st.subheader("📊 Hacim Karşılaştırmaları (Endeks ve 2 Haftalık Ort.)")
+    colV1, colV2 = st.columns(2)
+    with colV1:
+        st.plotly_chart(fig_vol_market, use_container_width=True)
+        st.caption("**Hisse vs Endeks Hacmi:** Hissenin hacim eğilimi endeksle uyumlu mu? (Sağ eksen Endeks Hacmi)")
+    with colV2:
+        st.plotly_chart(fig_vol_2wk, use_container_width=True)
+        st.caption("**Hisse vs 2 Haftalık Ortalama:** Son 10 barlık ortalamaya göre güncel hacim ne durumda?")
 
     st.subheader("🧪 Backtest Özeti (Long-only + Scale Out + Time Stop)")
     m1, m2, m3, m4, m5, m6, m7, m8 = st.columns(8)
@@ -3454,10 +3485,12 @@ with tab_triple:
                         fig2_adx.add_trace(go.Scatter(x=df_1d.index, y=adx_1d, name="ADX", line=dict(color='black', width=2.5)))
                         fig2_adx.add_trace(go.Scatter(x=df_1d.index, y=pdi_1d, name="+DI", line=dict(color='green')))
                         fig2_adx.add_trace(go.Scatter(x=df_1d.index, y=mdi_1d, name="-DI", line=dict(color='red')))
+                        
                         fig2_adx.add_hline(y=25, line_dash="dash", line_color="gray", annotation_text="Trend Başlangıcı (25)")
                         fig2_adx.add_hline(y=50, line_dash="dot", line_color="purple", annotation_text="Aşırı Güçlü Trend (50)")
                         fig2_adx.add_hrect(y0=25, y1=100, fillcolor="rgba(0, 255, 0, 0.05)", layer="below", line_width=0)
                         fig2_adx.add_hrect(y0=0, y1=25, fillcolor="rgba(255, 0, 0, 0.05)", layer="below", line_width=0)
+                        
                         fig2_adx.update_layout(title="Günlük ADX ve Yön Göstergeleri (+DI / -DI)", height=250)
                         st.plotly_chart(fig2_adx, use_container_width=True)
 
