@@ -986,7 +986,7 @@ def target_price_band(df: pd.DataFrame):
 
 
 # =============================
-# Live price helper
+# Live price & Short Info helpers
 # =============================
 @st.cache_data(ttl=30, show_spinner=False)
 def get_live_price(ticker: str) -> dict:
@@ -999,6 +999,18 @@ def get_live_price(ticker: str) -> dict:
             out["currency"] = fi.get("currency") or ""
             out["exchange"] = fi.get("exchange") or ""
             out["asof"] = str(fi.get("last_trade_time") or fi.get("lastTradeDate") or "")
+    except Exception:
+        pass
+    return out
+
+@st.cache_data(ttl=12 * 3600, show_spinner=False)
+def get_short_info(ticker: str) -> dict:
+    out = {"short_percent_float": np.nan, "short_ratio": np.nan}
+    try:
+        t = yf.Ticker(ticker)
+        info = t.info or {}
+        out["short_percent_float"] = safe_float(info.get("shortPercentOfFloat"))
+        out["short_ratio"] = safe_float(info.get("shortRatio"))
     except Exception:
         pass
     return out
@@ -1461,6 +1473,12 @@ def build_html_report(
         for _, v in overbought_result.get("details", {}).items():
             ob_details += f"<li>{esc(v)}</li>"
         ob_details += "</ul>"
+        
+        sf_val = overbought_result.get("short_percent_float")
+        sr_val = overbought_result.get("short_ratio")
+        sf_str = f"{sf_val * 100:.2f}%" if pd.notna(sf_val) else "N/A"
+        sr_str = f"{sr_val:.2f}" if pd.notna(sr_val) else "N/A"
+        
         overbought_html = f"""
         <div class="card" style="margin-top:16px;">
             <h2>📊 Aşırı Alım / Spekülasyon Analizi</h2>
@@ -1468,6 +1486,8 @@ def build_html_report(
             <div><b>Aşırı Alım Skoru:</b> {overbought_result['overbought_score']}/100</div>
             <div><b>Aşırı Satım Skoru:</b> {overbought_result['oversold_score']}/100</div>
             <div><b>Spekülasyon Skoru:</b> {overbought_result['speculation_score']}/100</div>
+            <div><b>Kısa Poz. % (Short Float):</b> {sf_str}</div>
+            <div><b>Kapatma Gün (Days to Cover):</b> {sr_str}</div>
             <div><b>Detaylar:</b> {ob_details}</div>
         </div>
         """
@@ -1689,11 +1709,18 @@ def generate_pdf_report(
         c.drawString(left, y, "Aşırı Alım / Spekülasyon")
         y -= 14
         c.setFont("Helvetica", 9)
+        
+        sf_val = overbought_result.get("short_percent_float", np.nan)
+        sr_val = overbought_result.get("short_ratio", np.nan)
+        sf_str = f"{sf_val * 100:.2f}%" if pd.notna(sf_val) else "N/A"
+        sr_str = f"{sr_val:.2f}" if pd.notna(sr_val) else "N/A"
+        
         ob_lines = [
             f"Karar: {overbought_result['verdict']}",
             f"Aşırı Alım Skoru: {overbought_result['overbought_score']}/100",
             f"Aşırı Satım Skoru: {overbought_result['oversold_score']}/100",
             f"Spekülasyon Skoru: {overbought_result['speculation_score']}/100",
+            f"Kısa Poz. %: {sf_str} | Kapatma Gün: {sr_str}",
             "Detaylar:",
         ]
         for _, v in overbought_result.get("details", {}).items():
@@ -2619,6 +2646,10 @@ tp = target_price_band(df)
 rr_info = rr_from_atr_stop(latest, tp, cfg)
 overbought_result = detect_speculation(df)
 
+# YENİ KOD: Short Data verilerini çek ve overbought sözlüğüne ekle
+short_info = get_short_info(ticker)
+overbought_result["short_percent_float"] = short_info["short_percent_float"]
+overbought_result["short_ratio"] = short_info["short_ratio"]
 
 # =============================
 # Build figures
@@ -2799,11 +2830,20 @@ with tab_dash:
         st.dataframe(sdf_show, use_container_width=True, height=360)
 
     st.subheader("📊 Aşırı Alım / Spekülasyon Göstergeleri")
-    col_ob1, col_ob2, col_ob3, col_ob4 = st.columns(4)
+    col_ob1, col_ob2, col_ob3, col_ob4, col_ob5, col_ob6 = st.columns(6)
+    
     col_ob1.metric("Aşırı Alım Skoru", f"{overbought_result['overbought_score']}/100", help="Yüksek skor aşırı değerli olduğunu gösterir (RSI, Bollinger, Stokastik RSI, EMA uzaklığı).")
     col_ob2.metric("Aşırı Satım Skoru", f"{overbought_result['oversold_score']}/100", help="Yüksek skor aşırı değersiz olduğunu gösterir.")
     col_ob3.metric("Spekülasyon Skoru", f"{overbought_result['speculation_score']}/100", help="Ani hacim artışı ve zayıf trend (fiyat yükselirken hacim düşüyor).")
     col_ob4.metric("Genel Karar", overbought_result["verdict"])
+
+    sf_val = overbought_result.get("short_percent_float")
+    sr_val = overbought_result.get("short_ratio")
+    sf_str = f"{sf_val * 100:.2f}%" if pd.notna(sf_val) else "N/A"
+    sr_str = f"{sr_val:.2f}" if pd.notna(sr_val) else "N/A"
+    
+    col_ob5.metric("Kısa Poz. % (Short Float)", sf_str, help="Halka açıklık oranına göre açığa satılan hisse yüzdesi. BIST hisselerinde API genelde N/A döner.")
+    col_ob6.metric("Kapatma Gün (Days to Cover)", sr_str, help="Açık pozisyonların ortalama günlük hacme bölünmesiyle bulunur. Kaç günde kapatılabileceğini gösterir.")
 
     with st.expander("Detaylı Aşırı Alım/Spekülasyon Analizi"):
         for _, v in overbought_result["details"].items():
@@ -2935,7 +2975,6 @@ with tab_dash:
         st.plotly_chart(fig_volratio, use_container_width=True)
         st.caption("**Hacim Oranı:** 1.5 üstü anormal hacim (spekülasyon), 0.5 altı düşük hacim (ilgisizlik).")
 
-    # YENİ EKLENEN HACİM GRAFİKLERİ VE OBV BÖLÜMÜ
     st.subheader("📊 Hacim ve Trend Karşılaştırmaları")
     colV1, colV2, colV3 = st.columns(3)
     with colV1:
