@@ -221,6 +221,36 @@ def check_bullish_divergence(close: pd.Series, indicator: pd.Series, lookback: i
 
 
 # =============================
+# KANGAROO TAIL (KANGURU KUYRUĞU)
+# =============================
+def add_kangaroo_tails(df: pd.DataFrame, lookback: int = 20) -> pd.DataFrame:
+    df = df.copy()
+    df["KANGAROO_BULL"] = 0
+    df["KANGAROO_BEAR"] = 0
+    
+    body = (df["Close"] - df["Open"]).abs()
+    trange = df["High"] - df["Low"]
+    lower_wick = df[["Open", "Close"]].min(axis=1) - df["Low"]
+    upper_wick = df["High"] - df[["Open", "Close"]].max(axis=1)
+    
+    rolling_min = df["Low"].rolling(window=lookback).min()
+    rolling_max = df["High"].rolling(window=lookback).max()
+    
+    atr_approx = trange.rolling(10).mean()
+    valid_trange = trange > 0
+    
+    # Bullish: Low is lowest of N days, body is small, lower wick is huge
+    bull_cond = valid_trange & (df["Low"] == rolling_min) & ((body / trange) <= 0.3) & ((lower_wick / trange) >= 0.6) & (trange >= atr_approx * 0.8)
+    
+    # Bearish: High is highest of N days, body is small, upper wick is huge
+    bear_cond = valid_trange & (df["High"] == rolling_max) & ((body / trange) <= 0.3) & ((upper_wick / trange) >= 0.6) & (trange >= atr_approx * 0.8)
+    
+    df.loc[bull_cond, "KANGAROO_BULL"] = 1
+    df.loc[bear_cond, "KANGAROO_BEAR"] = 1
+    return df
+
+
+# =============================
 # Overbought / Speculation Indicators
 # =============================
 def add_overbought_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -342,6 +372,7 @@ def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     df["VOL_RATIO"] = (df["Volume"] / vol_sma_safe).replace([np.inf, -np.inf], np.nan)
 
     df = add_overbought_indicators(df)
+    df = add_kangaroo_tails(df)
     return df
 
 
@@ -1235,6 +1266,8 @@ def df_snapshot_for_llm(df: pd.DataFrame, n: int = 25) -> dict:
         "PRICE_EXTREME",
         "STOCH_OVERBOUGHT",
         "WEAK_UPTREND",
+        "KANGAROO_BULL",
+        "KANGAROO_BEAR"
     ]
     cols = [c for c in use_cols if c in df.columns]
     tail = df[cols].tail(n).copy()
@@ -1836,7 +1869,12 @@ def rr_from_atr_stop(latest_row: pd.Series, tp_dict: dict, cfg: dict):
     if not np.isfinite(atrv) or atrv <= 0:
         return {"rr": None, "stop": None, "risk": None, "reward": None}
 
-    stop = close - (float(cfg["atr_stop_mult"]) * atrv)
+    # KANGURU KUYRUĞU STOP-LOSS ENTEGRASYONU
+    if latest_row.get("KANGAROO_BULL", 0) == 1:
+        stop = float(latest_row["Low"]) - (0.1 * atrv) # Kuyruk ucunun çok az altı
+    else:
+        stop = close - (float(cfg["atr_stop_mult"]) * atrv)
+        
     risk = close - stop
 
     r1 = None
@@ -2568,14 +2606,21 @@ fig_price.add_trace(go.Scatter(x=df.index, y=df["EMA200"], name="EMA Slow"))
 fig_price.add_trace(go.Scatter(x=df.index, y=df["BB_upper"], name="BB Upper", line=dict(dash="dot")))
 fig_price.add_trace(go.Scatter(x=df.index, y=df["BB_mid"], name="BB Mid", line=dict(dash="dot")))
 fig_price.add_trace(go.Scatter(x=df.index, y=df["BB_lower"], name="BB Lower", line=dict(dash="dot")))
+
 entries = df[df["ENTRY"] == 1]
 exits = df[df["EXIT"] == 1]
 fig_price.add_trace(go.Scatter(x=entries.index, y=entries["Close"], mode="markers", name="ENTRY", marker=dict(symbol="triangle-up", size=10)))
 fig_price.add_trace(go.Scatter(x=exits.index, y=exits["Close"], mode="markers", name="EXIT", marker=dict(symbol="triangle-down", size=10)))
+
+bull_tails = df[df["KANGAROO_BULL"] == 1]
+bear_tails = df[df["KANGAROO_BEAR"] == 1]
+fig_price.add_trace(go.Scatter(x=bull_tails.index, y=bull_tails["Low"], mode="markers+text", name="Kanguru (Boğa)", text="🦘", textposition="bottom center", marker=dict(symbol="circle", size=8, color="purple")))
+fig_price.add_trace(go.Scatter(x=bear_tails.index, y=bear_tails["High"], mode="markers+text", name="Kanguru (Ayı)", text="🦘", textposition="top center", marker=dict(symbol="circle", size=8, color="purple")))
+
 fig_price.update_layout(
     height=600,
     xaxis_rangeslider_visible=False,
-    title="Fiyat Grafiği + EMA + Bollinger + Sinyaller",
+    title="Fiyat Grafiği + EMA + Bollinger + Sinyaller & Kanguru",
     yaxis_title="Fiyat",
     xaxis_title="Tarih",
 )
@@ -2713,15 +2758,21 @@ with tab_dash:
         for _, v in overbought_result["details"].items():
             st.write(f"• {v}")
 
-    c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
+    c1, c2, c3, c4, c5, c6, c7, c8, c9 = st.columns(9)
     c1.metric("Market", market, help="Seçili piyasa.")
     c2.metric("Sembol", ticker, help="Analiz edilen hisse senedi.")
     c3.metric("Daily Close", f"{latest['Close']:.2f}", help="Son mumun kapanış fiyatı (düzeltilmiş).")
     c4.metric("Live/Last", f"{live_price:.2f}" if np.isfinite(live_price) else "N/A", help="Anlık piyasa fiyatı (çekilebildiyse).")
     c5.metric("Skor", f"{latest['SCORE']:.0f}/100", help="Teknik strateji skoru. 0-100 arası, yüksek skor daha güçlü sinyal.")
     c6.metric("Sinyal", rec, help="Algoritmanın son durumu: AL, SAT, İZLE.")
-    c7.metric("Piyasa Rejim Filtresi", "BULL ✅" if market_filter_ok else "BEAR ❌", help="SPY veya XU100 endeksinin 200 günlük ortalamaya göre durumu.")
-    c8.metric("Haftalık Trend", "BULL ✅" if higher_tf_filter_ok else "BEAR ❌", help="Haftalık grafikte fiyatın 200 haftalık ortalamaya göre durumu.")
+    c7.metric("Piyasa Filtresi", "BULL ✅" if market_filter_ok else "BEAR ❌", help="SPY veya XU100 endeksi > 200 EMA")
+    c8.metric("Haftalık Trend", "BULL ✅" if higher_tf_filter_ok else "BEAR ❌", help="Haftalık fiyat > 200 EMA")
+    
+    is_bull_tail = latest.get("KANGAROO_BULL", 0) == 1
+    is_bear_tail = latest.get("KANGAROO_BEAR", 0) == 1
+    tail_val = "BOĞA 🦘" if is_bull_tail else ("AYI 🦘" if is_bear_tail else "YOK")
+    tail_delta = "AL Yönlü" if is_bull_tail else ("-SAT Yönlü" if is_bear_tail else None)
+    c9.metric("Kanguru", tail_val, delta=tail_delta, help="Kanguru Kuyruğu (Kangaroo Tail) formasyonu tespiti.")
 
     st.subheader("✅ Kontrol Noktaları (Son Bar)")
     cp_cols = st.columns(3)
@@ -2807,7 +2858,7 @@ with tab_dash:
 
     st.subheader("📊 Fiyat + EMA + Bollinger + Sinyaller")
     st.plotly_chart(fig_price, use_container_width=True)
-    st.caption("**Yorum:** Mum grafiği, EMA50 (kısa vade), EMA200 (uzun vade) ve Bollinger bantları. Üçgenler alım (yeşil) ve satım (kırmızı) sinyallerini gösterir. Fiyat EMA200 üzerinde trend yükseliş, altında düşüş.")
+    st.caption("**Yorum:** Mum grafiği, EMA50 (kısa vade), EMA200 (uzun vade) ve Bollinger bantları. Üçgenler alım (yeşil) ve satım (kırmızı) sinyallerini gösterir. Fiyat EMA200 üzerinde trend yükseliş, altında düşüş. Kanguru ikonları tuzak alanlarını belirtir.")
 
     st.subheader("📉 RSI / MACD / ATR%")
     colA, colB, colC = st.columns(3)
@@ -2910,7 +2961,7 @@ Sen bir price-action, formasyon okuma, aşırı alım/spekülasyon tespiti ve ri
    - Fiyatın EMA50'den uzaklığı (%20'den fazla mı?)
    - Stokastik RSI (>80 aşırı alım)
    - Fiyat yükselirken hacim düşüyor mu? (zayıflama)
-4. Volatiliteyi (ATR) yorumla ve stop seviyesi için fikir ver.
+4. Volatiliteyi (ATR), Kanguru Kuyruğu (Kangaroo Tail) formasyonu olup olmadığını ve stop seviyesi için fikir ver.
 5. Temel analiz skorunu (FA) değerlendir (eğer varsa).
 6. Haber duyarlılığını dikkate al (eğer varsa).
 7. Tüm bu bilgileri sentezleyerek:
