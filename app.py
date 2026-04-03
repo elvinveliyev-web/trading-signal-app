@@ -223,14 +223,15 @@ def adx_indicator(high: pd.Series, low: pd.Series, close: pd.Series, period: int
     up = high - high.shift(1)
     down = low.shift(1) - low
     
-    plus_dm = np.where((up > down) & (up > 0), up, 0.0)
-    minus_dm = np.where((down > up) & (down > 0), down, 0.0)
+    # DÜZELTME: pandas indeksleri (tarihler) eşleştirildi
+    plus_dm = pd.Series(np.where((up > down) & (up > 0), up, 0.0), index=high.index)
+    minus_dm = pd.Series(np.where((down > up) & (down > 0), down, 0.0), index=high.index)
     
     tr = true_range(high, low, close)
     
     tr_smooth = pd.Series(tr).ewm(alpha=1/period, adjust=False).mean()
-    pdm_smooth = pd.Series(plus_dm).ewm(alpha=1/period, adjust=False).mean()
-    mdm_smooth = pd.Series(minus_dm).ewm(alpha=1/period, adjust=False).mean()
+    pdm_smooth = plus_dm.ewm(alpha=1/period, adjust=False).mean()
+    mdm_smooth = minus_dm.ewm(alpha=1/period, adjust=False).mean()
     
     pdi = 100 * (pdm_smooth / tr_smooth.replace(0, np.nan))
     mdi = 100 * (mdm_smooth / tr_smooth.replace(0, np.nan))
@@ -3315,12 +3316,12 @@ with tab_triple:
                         pdi_val_1w = pdi_1w.iloc[-1]
                         mdi_val_1w = mdi_1w.iloc[-1]
                         
-                        if adx_val_1w > 20 and pdi_val_1w > mdi_val_1w:
-                            adx_sig_1w = "AL"
-                        elif adx_val_1w > 20 and mdi_val_1w > pdi_val_1w:
-                            adx_sig_1w = "SAT"
+                        if adx_val_1w >= 25 and pdi_val_1w > mdi_val_1w:
+                            adx_sig_1w = "AL (Güçlü Trend)"
+                        elif adx_val_1w >= 25 and mdi_val_1w > pdi_val_1w:
+                            adx_sig_1w = "SAT (Güçlü Trend)"
                         else:
-                            adx_sig_1w = "BEKLE"
+                            adx_sig_1w = "BEKLE (Zayıf Trend)"
                         
                         c1w_1, c1w_2, c1w_3 = st.columns(3)
                         c1w_1.metric(
@@ -3356,10 +3357,13 @@ with tab_triple:
                         st.plotly_chart(fig1, use_container_width=True)
 
                         fig1_adx = go.Figure()
-                        fig1_adx.add_trace(go.Scatter(x=df_1w.index, y=adx_1w, name="ADX", line=dict(color='black', width=2)))
+                        fig1_adx.add_trace(go.Scatter(x=df_1w.index, y=adx_1w, name="ADX", line=dict(color='black', width=2.5)))
                         fig1_adx.add_trace(go.Scatter(x=df_1w.index, y=pdi_1w, name="+DI", line=dict(color='green')))
                         fig1_adx.add_trace(go.Scatter(x=df_1w.index, y=mdi_1w, name="-DI", line=dict(color='red')))
-                        fig1_adx.add_hline(y=20, line_dash="dash", line_color="gray", annotation_text="Trend Sınırı (20)")
+                        fig1_adx.add_hline(y=25, line_dash="dash", line_color="gray", annotation_text="Trend Başlangıcı (25)")
+                        fig1_adx.add_hline(y=50, line_dash="dot", line_color="purple", annotation_text="Aşırı Güçlü Trend (50)")
+                        fig1_adx.add_hrect(y0=25, y1=100, fillcolor="rgba(0, 255, 0, 0.05)", layer="below", line_width=0)
+                        fig1_adx.add_hrect(y0=0, y1=25, fillcolor="rgba(255, 0, 0, 0.05)", layer="below", line_width=0)
                         fig1_adx.update_layout(title="Haftalık ADX ve Yön Göstergeleri (+DI / -DI)", height=250)
                         st.plotly_chart(fig1_adx, use_container_width=True)
 
@@ -3406,12 +3410,12 @@ with tab_triple:
                         pdi_val_1d = pdi_1d.iloc[-1]
                         mdi_val_1d = mdi_1d.iloc[-1]
                         
-                        if adx_val_1d > 20 and pdi_val_1d > mdi_val_1d:
-                            adx_sig_1d = "AL"
-                        elif adx_val_1d > 20 and mdi_val_1d > pdi_val_1d:
-                            adx_sig_1d = "SAT"
+                        if adx_val_1d >= 25 and pdi_val_1d > mdi_val_1d:
+                            adx_sig_1d = "AL (Güçlü Trend)"
+                        elif adx_val_1d >= 25 and mdi_val_1d > pdi_val_1d:
+                            adx_sig_1d = "SAT (Güçlü Trend)"
                         else:
-                            adx_sig_1d = "BEKLE"
+                            adx_sig_1d = "BEKLE (Zayıf Trend)"
 
                         c1, c2, c3, c4, c5 = st.columns(5)
                         c1.metric("Kuvvet Endeksi (FI)", "AL" if fi_al else "BEKLE", "13 EMA Üstü & 2 EMA Negatif" if fi_al else "")
@@ -3447,10 +3451,13 @@ with tab_triple:
                         st.plotly_chart(fig2_er, use_container_width=True)
 
                         fig2_adx = go.Figure()
-                        fig2_adx.add_trace(go.Scatter(x=df_1d.index, y=adx_1d, name="ADX", line=dict(color='black', width=2)))
+                        fig2_adx.add_trace(go.Scatter(x=df_1d.index, y=adx_1d, name="ADX", line=dict(color='black', width=2.5)))
                         fig2_adx.add_trace(go.Scatter(x=df_1d.index, y=pdi_1d, name="+DI", line=dict(color='green')))
                         fig2_adx.add_trace(go.Scatter(x=df_1d.index, y=mdi_1d, name="-DI", line=dict(color='red')))
-                        fig2_adx.add_hline(y=20, line_dash="dash", line_color="gray", annotation_text="Trend Sınırı (20)")
+                        fig2_adx.add_hline(y=25, line_dash="dash", line_color="gray", annotation_text="Trend Başlangıcı (25)")
+                        fig2_adx.add_hline(y=50, line_dash="dot", line_color="purple", annotation_text="Aşırı Güçlü Trend (50)")
+                        fig2_adx.add_hrect(y0=25, y1=100, fillcolor="rgba(0, 255, 0, 0.05)", layer="below", line_width=0)
+                        fig2_adx.add_hrect(y0=0, y1=25, fillcolor="rgba(255, 0, 0, 0.05)", layer="below", line_width=0)
                         fig2_adx.update_layout(title="Günlük ADX ve Yön Göstergeleri (+DI / -DI)", height=250)
                         st.plotly_chart(fig2_adx, use_container_width=True)
 
@@ -3462,12 +3469,12 @@ with tab_triple:
                         pdi_val_4h = pdi_4h.iloc[-1]
                         mdi_val_4h = mdi_4h.iloc[-1]
                         
-                        if adx_val_4h > 20 and pdi_val_4h > mdi_val_4h:
-                            adx_sig_4h = "AL"
-                        elif adx_val_4h > 20 and mdi_val_4h > pdi_val_4h:
-                            adx_sig_4h = "SAT"
+                        if adx_val_4h >= 25 and pdi_val_4h > mdi_val_4h:
+                            adx_sig_4h = "AL (Güçlü Trend)"
+                        elif adx_val_4h >= 25 and mdi_val_4h > pdi_val_4h:
+                            adx_sig_4h = "SAT (Güçlü Trend)"
                         else:
-                            adx_sig_4h = "BEKLE"
+                            adx_sig_4h = "BEKLE (Zayıf Trend)"
                         
                         st.metric("4 Saatlik ADX (14)", adx_sig_4h, f"ADX: {adx_val_4h:.1f} | +DI: {pdi_val_4h:.1f} | -DI: {mdi_val_4h:.1f}")
 
@@ -3522,9 +3529,14 @@ with tab_triple:
                         st.plotly_chart(fig3, use_container_width=True)
 
                         fig3_adx = go.Figure()
-                        fig3_adx.add_trace(go.Scatter(x=df_4h.index, y=adx_4h, name="ADX", line=dict(color='black', width=2)))
+                        fig3_adx.add_trace(go.Scatter(x=df_4h.index, y=adx_4h, name="ADX", line=dict(color='black', width=2.5)))
                         fig3_adx.add_trace(go.Scatter(x=df_4h.index, y=pdi_4h, name="+DI", line=dict(color='green')))
                         fig3_adx.add_trace(go.Scatter(x=df_4h.index, y=mdi_4h, name="-DI", line=dict(color='red')))
-                        fig3_adx.add_hline(y=20, line_dash="dash", line_color="gray", annotation_text="Trend Sınırı (20)")
+                        
+                        fig3_adx.add_hline(y=25, line_dash="dash", line_color="gray", annotation_text="Trend Başlangıcı (25)")
+                        fig3_adx.add_hline(y=50, line_dash="dot", line_color="purple", annotation_text="Aşırı Güçlü Trend (50)")
+                        fig3_adx.add_hrect(y0=25, y1=100, fillcolor="rgba(0, 255, 0, 0.05)", layer="below", line_width=0)
+                        fig3_adx.add_hrect(y0=0, y1=25, fillcolor="rgba(255, 0, 0, 0.05)", layer="below", line_width=0)
+                        
                         fig3_adx.update_layout(title="4 Saatlik ADX ve Yön Göstergeleri (+DI / -DI)", height=250)
                         st.plotly_chart(fig3_adx, use_container_width=True)
