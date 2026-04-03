@@ -1285,6 +1285,7 @@ def df_snapshot_for_llm(df: pd.DataFrame, n: int = 25) -> dict:
         "EXIT",
         "RSI_OVERBOUGHT",
         "BB_OVERBOUGHT",
+        "BB_OVERSOLD",
         "VOLUME_SPIKE",
         "PRICE_EXTREME",
         "STOCH_OVERBOUGHT",
@@ -2723,7 +2724,7 @@ fig_eq.update_layout(
     xaxis_title="Tarih",
 )
 
-# YENİ EKLENEN GRAFİKLER (Hacim Kıyaslamaları)
+# YENİ EKLENEN GRAFİKLER (Hacim Kıyaslamaları ve OBV)
 df["VOL_SMA_10"] = df["Volume"].rolling(10).mean()
 if benchmark_df is not None and not benchmark_df.empty:
     bench_vol = benchmark_df["Volume"].reindex(df.index).fillna(0)
@@ -2740,6 +2741,12 @@ fig_vol_2wk.add_trace(go.Bar(x=df.index, y=df["Volume"], name="Hacim", marker_co
 fig_vol_2wk.add_trace(go.Scatter(x=df.index, y=df["VOL_SMA_10"], name="2 Haftalık Ort. (10 Bar)", line=dict(color='red', width=2)))
 fig_vol_2wk.update_layout(height=260, title="Hisse Hacmi vs 2 Haftalık Ortalama", yaxis_title="Hacim", xaxis_title="Tarih", margin=dict(l=0, r=0, t=40, b=0))
 
+fig_obv = go.Figure()
+if "OBV" in df.columns and "OBV_EMA" in df.columns:
+    fig_obv.add_trace(go.Scatter(x=df.index, y=df["OBV"], name="OBV", line=dict(color='blue')))
+    fig_obv.add_trace(go.Scatter(x=df.index, y=df["OBV_EMA"], name="OBV EMA (21)", line=dict(color='orange', dash='dot')))
+fig_obv.update_layout(height=260, title="On-Balance Volume (OBV)", yaxis_title="OBV", xaxis_title="Tarih", margin=dict(l=0, r=0, t=40, b=0))
+
 
 figs_for_report = {
     "Price + EMA + Bollinger + Signals": fig_price,
@@ -2751,6 +2758,7 @@ figs_for_report = {
     "Volume Ratio": fig_volratio,
     "Volume vs Market": fig_vol_market,
     "Volume vs 2W Avg": fig_vol_2wk,
+    "On-Balance Volume": fig_obv,
     "Equity Curve": fig_eq,
 }
 
@@ -2927,15 +2935,18 @@ with tab_dash:
         st.plotly_chart(fig_volratio, use_container_width=True)
         st.caption("**Hacim Oranı:** 1.5 üstü anormal hacim (spekülasyon), 0.5 altı düşük hacim (ilgisizlik).")
 
-    # YENİ EKLENEN HACİM GRAFİKLERİ BÖLÜMÜ
-    st.subheader("📊 Hacim Karşılaştırmaları (Endeks ve 2 Haftalık Ort.)")
-    colV1, colV2 = st.columns(2)
+    # YENİ EKLENEN HACİM GRAFİKLERİ VE OBV BÖLÜMÜ
+    st.subheader("📊 Hacim ve Trend Karşılaştırmaları")
+    colV1, colV2, colV3 = st.columns(3)
     with colV1:
         st.plotly_chart(fig_vol_market, use_container_width=True)
-        st.caption("**Hisse vs Endeks Hacmi:** Hissenin hacim eğilimi endeksle uyumlu mu? (Sağ eksen Endeks Hacmi)")
+        st.caption("**Hisse vs Endeks:** Hacim eğilimi endeksle uyumlu mu?")
     with colV2:
         st.plotly_chart(fig_vol_2wk, use_container_width=True)
-        st.caption("**Hisse vs 2 Haftalık Ortalama:** Son 10 barlık ortalamaya göre güncel hacim ne durumda?")
+        st.caption("**Hisse vs 2H Ort:** Son 10 barlık ortalamaya göre hacim?")
+    with colV3:
+        st.plotly_chart(fig_obv, use_container_width=True)
+        st.caption("**OBV:** Hacim destekli fiyat trendi. OBV EMA'yı keserse trend onayı verir.")
 
     st.subheader("🧪 Backtest Özeti (Long-only + Scale Out + Time Stop)")
     m1, m2, m3, m4, m5, m6, m7, m8 = st.columns(8)
