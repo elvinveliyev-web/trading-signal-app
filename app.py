@@ -219,6 +219,27 @@ def check_bullish_divergence(close: pd.Series, indicator: pd.Series, lookback: i
         pass
     return False
 
+def adx_indicator(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14):
+    up = high - high.shift(1)
+    down = low.shift(1) - low
+    
+    plus_dm = np.where((up > down) & (up > 0), up, 0.0)
+    minus_dm = np.where((down > up) & (down > 0), down, 0.0)
+    
+    tr = true_range(high, low, close)
+    
+    tr_smooth = pd.Series(tr).ewm(alpha=1/period, adjust=False).mean()
+    pdm_smooth = pd.Series(plus_dm).ewm(alpha=1/period, adjust=False).mean()
+    mdm_smooth = pd.Series(minus_dm).ewm(alpha=1/period, adjust=False).mean()
+    
+    pdi = 100 * (pdm_smooth / tr_smooth.replace(0, np.nan))
+    mdi = 100 * (mdm_smooth / tr_smooth.replace(0, np.nan))
+    
+    dx = 100 * (abs(pdi - mdi) / (pdi + mdi).replace(0, np.nan))
+    adx = dx.ewm(alpha=1/period, adjust=False).mean()
+    
+    return adx.fillna(0), pdi.fillna(0), mdi.fillna(0)
+
 
 # =============================
 # KANGAROO TAIL (KANGURU KUYRUĞU)
@@ -3288,8 +3309,20 @@ with tab_triple:
                         slope_up = last_hist > prev_hist
                         
                         div_macd = check_bullish_divergence(df_1w["Close"], m_hist)
+
+                        adx_1w, pdi_1w, mdi_1w = adx_indicator(df_1w["High"], df_1w["Low"], df_1w["Close"])
+                        adx_val_1w = adx_1w.iloc[-1]
+                        pdi_val_1w = pdi_1w.iloc[-1]
+                        mdi_val_1w = mdi_1w.iloc[-1]
                         
-                        c1w_1, c1w_2 = st.columns(2)
+                        if adx_val_1w > 20 and pdi_val_1w > mdi_val_1w:
+                            adx_sig_1w = "AL"
+                        elif adx_val_1w > 20 and mdi_val_1w > pdi_val_1w:
+                            adx_sig_1w = "SAT"
+                        else:
+                            adx_sig_1w = "BEKLE"
+                        
+                        c1w_1, c1w_2, c1w_3 = st.columns(3)
                         c1w_1.metric(
                             "MACD Histogram Eğimi", 
                             "YUKARI (AL Sinyali)" if slope_up else "AŞAĞI (SAT Sinyali)", 
@@ -3299,6 +3332,11 @@ with tab_triple:
                             "Haftalık EMA (13-26)",
                             ema1w_sig,
                             f"EMA13: {ema_1w_13.iloc[-1]:.2f} | EMA26: {ema_1w_26.iloc[-1]:.2f}"
+                        )
+                        c1w_3.metric(
+                            "ADX (14)", 
+                            adx_sig_1w, 
+                            f"ADX: {adx_val_1w:.1f} | +DI: {pdi_val_1w:.1f} | -DI: {mdi_val_1w:.1f}"
                         )
                         
                         if div_macd:
@@ -3314,8 +3352,16 @@ with tab_triple:
                         fig1 = go.Figure()
                         colors = ['green' if x > 0 else 'red' for x in m_hist.diff()]
                         fig1.add_trace(go.Bar(x=df_1w.index, y=m_hist, name="MACD Hist", marker_color=colors))
-                        fig1.update_layout(title="Haftalık MACD Histogramı", height=300)
+                        fig1.update_layout(title="Haftalık MACD Histogramı", height=250)
                         st.plotly_chart(fig1, use_container_width=True)
+
+                        fig1_adx = go.Figure()
+                        fig1_adx.add_trace(go.Scatter(x=df_1w.index, y=adx_1w, name="ADX", line=dict(color='black', width=2)))
+                        fig1_adx.add_trace(go.Scatter(x=df_1w.index, y=pdi_1w, name="+DI", line=dict(color='green')))
+                        fig1_adx.add_trace(go.Scatter(x=df_1w.index, y=mdi_1w, name="-DI", line=dict(color='red')))
+                        fig1_adx.add_hline(y=20, line_dash="dash", line_color="gray", annotation_text="Trend Sınırı (20)")
+                        fig1_adx.update_layout(title="Haftalık ADX ve Yön Göstergeleri (+DI / -DI)", height=250)
+                        st.plotly_chart(fig1_adx, use_container_width=True)
 
                     with t_screen2:
                         st.subheader("2. Ekran: Günlük (Osilatörler ve Sapmalar)")
@@ -3355,11 +3401,24 @@ with tab_triple:
                         div_stoch = check_bullish_divergence(df_1d["Close"], stoch_k)
                         div_er = check_bullish_divergence(df_1d["Close"], bear_p)
                         
-                        c1, c2, c3, c4 = st.columns(4)
+                        adx_1d, pdi_1d, mdi_1d = adx_indicator(df_1d["High"], df_1d["Low"], df_1d["Close"])
+                        adx_val_1d = adx_1d.iloc[-1]
+                        pdi_val_1d = pdi_1d.iloc[-1]
+                        mdi_val_1d = mdi_1d.iloc[-1]
+                        
+                        if adx_val_1d > 20 and pdi_val_1d > mdi_val_1d:
+                            adx_sig_1d = "AL"
+                        elif adx_val_1d > 20 and mdi_val_1d > pdi_val_1d:
+                            adx_sig_1d = "SAT"
+                        else:
+                            adx_sig_1d = "BEKLE"
+
+                        c1, c2, c3, c4, c5 = st.columns(5)
                         c1.metric("Kuvvet Endeksi (FI)", "AL" if fi_al else "BEKLE", "13 EMA Üstü & 2 EMA Negatif" if fi_al else "")
                         c2.metric("RSI (13)", "AL" if rsi_al else "BEKLE", f"{rsi13.iloc[-1]:.1f}")
                         c3.metric("Stokastik (5)", "AL" if stoch_al else "BEKLE", f"{stoch_k.iloc[-1]:.1f}")
                         c4.metric("Elder-Ray", "AL" if er_al else "BEKLE")
+                        c5.metric("ADX (14)", adx_sig_1d, f"ADX: {adx_val_1d:.1f} | +DI: {pdi_val_1d:.1f}")
                         
                         if div_rsi: st.success("🚀 RSI(13)'te **Pozitif Uyumsuzluk** tespit edildi!")
                         if div_stoch: st.success("🚀 Stokastik(5)'te **Pozitif Uyumsuzluk** tespit edildi!")
@@ -3387,9 +3446,31 @@ with tab_triple:
                         fig2_er.update_layout(title="Elder-Ray (Bull & Bear Power)", height=250)
                         st.plotly_chart(fig2_er, use_container_width=True)
 
+                        fig2_adx = go.Figure()
+                        fig2_adx.add_trace(go.Scatter(x=df_1d.index, y=adx_1d, name="ADX", line=dict(color='black', width=2)))
+                        fig2_adx.add_trace(go.Scatter(x=df_1d.index, y=pdi_1d, name="+DI", line=dict(color='green')))
+                        fig2_adx.add_trace(go.Scatter(x=df_1d.index, y=mdi_1d, name="-DI", line=dict(color='red')))
+                        fig2_adx.add_hline(y=20, line_dash="dash", line_color="gray", annotation_text="Trend Sınırı (20)")
+                        fig2_adx.update_layout(title="Günlük ADX ve Yön Göstergeleri (+DI / -DI)", height=250)
+                        st.plotly_chart(fig2_adx, use_container_width=True)
+
                     with t_screen3:
                         st.subheader("3. Ekran: 4 Saatlik (Giriş / Çıkış ve Hedefler)")
                         
+                        adx_4h, pdi_4h, mdi_4h = adx_indicator(df_4h["High"], df_4h["Low"], df_4h["Close"])
+                        adx_val_4h = adx_4h.iloc[-1]
+                        pdi_val_4h = pdi_4h.iloc[-1]
+                        mdi_val_4h = mdi_4h.iloc[-1]
+                        
+                        if adx_val_4h > 20 and pdi_val_4h > mdi_val_4h:
+                            adx_sig_4h = "AL"
+                        elif adx_val_4h > 20 and mdi_val_4h > pdi_val_4h:
+                            adx_sig_4h = "SAT"
+                        else:
+                            adx_sig_4h = "BEKLE"
+                        
+                        st.metric("4 Saatlik ADX (14)", adx_sig_4h, f"ADX: {adx_val_4h:.1f} | +DI: {pdi_val_4h:.1f} | -DI: {mdi_val_4h:.1f}")
+
                         ema_4h = ema(df_4h["Close"], 13)
                         atr_4h = atr(df_4h["High"], df_4h["Low"], df_4h["Close"], 14)
                         last_atr_4h = float(atr_4h.iloc[-1]) if not pd.isna(atr_4h.iloc[-1]) else 0.0
@@ -3437,5 +3518,13 @@ with tab_triple:
                         fig3.add_hline(y=buy_level, line_dash="dash", line_color="lime", annotation_text="Limit Alış Seviyesi", annotation_position="bottom left")
                         fig3.add_hline(y=stop_loss, line_dash="dot", line_color="red", annotation_text="Stop-Loss (1.5 ATR)", annotation_position="bottom left")
                         
-                        fig3.update_layout(title="4 Saatlik Giriş/Çıkış Stratejisi (Alış, Hedef ve Stop)", height=600, xaxis_rangeslider_visible=False)
+                        fig3.update_layout(title="4 Saatlik Giriş/Çıkış Stratejisi (Alış, Hedef ve Stop)", height=450, xaxis_rangeslider_visible=False)
                         st.plotly_chart(fig3, use_container_width=True)
+
+                        fig3_adx = go.Figure()
+                        fig3_adx.add_trace(go.Scatter(x=df_4h.index, y=adx_4h, name="ADX", line=dict(color='black', width=2)))
+                        fig3_adx.add_trace(go.Scatter(x=df_4h.index, y=pdi_4h, name="+DI", line=dict(color='green')))
+                        fig3_adx.add_trace(go.Scatter(x=df_4h.index, y=mdi_4h, name="-DI", line=dict(color='red')))
+                        fig3_adx.add_hline(y=20, line_dash="dash", line_color="gray", annotation_text="Trend Sınırı (20)")
+                        fig3_adx.update_layout(title="4 Saatlik ADX ve Yön Göstergeleri (+DI / -DI)", height=250)
+                        st.plotly_chart(fig3_adx, use_container_width=True)
