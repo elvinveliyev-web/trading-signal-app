@@ -3221,21 +3221,45 @@ with tab_triple:
                         st.subheader("1. Ekran: Haftalık (Ana Trend)")
                         m_line, m_sig, m_hist = macd(df_1w["Close"])
                         
+                        ema_1w_13 = ema(df_1w["Close"], 13)
+                        ema_1w_26 = ema(df_1w["Close"], 26)
+                        
+                        last_close_1w = df_1w["Close"].iloc[-1]
+                        if ema_1w_13.iloc[-1] > ema_1w_26.iloc[-1] and last_close_1w > ema_1w_13.iloc[-1]:
+                            ema1w_sig = "AL"
+                        elif ema_1w_13.iloc[-1] < ema_1w_26.iloc[-1] and last_close_1w < ema_1w_13.iloc[-1]:
+                            ema1w_sig = "SAT"
+                        else:
+                            ema1w_sig = "BEKLE"
+                        
                         last_hist = float(m_hist.iloc[-1])
                         prev_hist = float(m_hist.iloc[-2])
                         slope_up = last_hist > prev_hist
                         
                         div_macd = check_bullish_divergence(df_1w["Close"], m_hist)
                         
-                        st.metric(
+                        c1w_1, c1w_2 = st.columns(2)
+                        c1w_1.metric(
                             "MACD Histogram Eğimi", 
                             "YUKARI (AL Sinyali)" if slope_up else "AŞAĞI (SAT Sinyali)", 
                             f"{last_hist - prev_hist:.2f}"
+                        )
+                        c1w_2.metric(
+                            "Haftalık EMA (13-26)",
+                            ema1w_sig,
+                            f"EMA13: {ema_1w_13.iloc[-1]:.2f} | EMA26: {ema_1w_26.iloc[-1]:.2f}"
                         )
                         
                         if div_macd:
                             st.success("🚀 Sistem Haftalık MACD Histogramında **Pozitif Uyumsuzluk** tespit etti!")
                             
+                        fig1_price = go.Figure()
+                        fig1_price.add_trace(go.Candlestick(x=df_1w.index, open=df_1w["Open"], high=df_1w["High"], low=df_1w["Low"], close=df_1w["Close"], name="Fiyat"))
+                        fig1_price.add_trace(go.Scatter(x=df_1w.index, y=ema_1w_13, name="EMA 13", line=dict(color='blue')))
+                        fig1_price.add_trace(go.Scatter(x=df_1w.index, y=ema_1w_26, name="EMA 26", line=dict(color='red')))
+                        fig1_price.update_layout(title="Haftalık Fiyat ve EMA (13 & 26)", height=350, xaxis_rangeslider_visible=False)
+                        st.plotly_chart(fig1_price, use_container_width=True)
+
                         fig1 = go.Figure()
                         colors = ['green' if x > 0 else 'red' for x in m_hist.diff()]
                         fig1.add_trace(go.Bar(x=df_1w.index, y=m_hist, name="MACD Hist", marker_color=colors))
@@ -3245,6 +3269,19 @@ with tab_triple:
                     with t_screen2:
                         st.subheader("2. Ekran: Günlük (Osilatörler ve Sapmalar)")
                         
+                        ema_1d_11 = ema(df_1d["Close"], 11)
+                        ema_1d_22 = ema(df_1d["Close"], 22)
+                        
+                        last_close_1d = df_1d["Close"].iloc[-1]
+                        if ema_1d_11.iloc[-1] > ema_1d_22.iloc[-1] and last_close_1d > ema_1d_11.iloc[-1]:
+                            ema1d_sig = "AL"
+                        elif ema_1d_11.iloc[-1] < ema_1d_22.iloc[-1] and last_close_1d < ema_1d_11.iloc[-1]:
+                            ema1d_sig = "SAT"
+                        else:
+                            ema1d_sig = "BEKLE"
+                        
+                        st.metric("Günlük EMA (11-22)", ema1d_sig, f"EMA11: {ema_1d_11.iloc[-1]:.2f} | EMA22: {ema_1d_22.iloc[-1]:.2f}")
+
                         fi = force_index(df_1d["Close"], df_1d["Volume"])
                         fi_ema13 = ema(fi, 13)
                         fi_ema2 = ema(fi, 2)
@@ -3280,6 +3317,13 @@ with tab_triple:
                         if st.session_state.sentiment_summary:
                             st.info(f"**Haber Etkisi Modülü:** {st.session_state.sentiment_summary}")
                             
+                        fig2_price = go.Figure()
+                        fig2_price.add_trace(go.Candlestick(x=df_1d.index, open=df_1d["Open"], high=df_1d["High"], low=df_1d["Low"], close=df_1d["Close"], name="Fiyat"))
+                        fig2_price.add_trace(go.Scatter(x=df_1d.index, y=ema_1d_11, name="EMA 11", line=dict(color='blue')))
+                        fig2_price.add_trace(go.Scatter(x=df_1d.index, y=ema_1d_22, name="EMA 22", line=dict(color='red')))
+                        fig2_price.update_layout(title="Günlük Fiyat ve EMA (11 & 22)", height=350, xaxis_rangeslider_visible=False)
+                        st.plotly_chart(fig2_price, use_container_width=True)
+                        
                         fig2_fi = go.Figure()
                         fig2_fi.add_trace(go.Scatter(x=df_1d.index, y=fi_ema13, name="FI 13 EMA", line=dict(color='orange')))
                         fig2_fi.add_trace(go.Bar(x=df_1d.index, y=fi_ema2, name="FI 2 EMA", marker_color='gray'))
