@@ -199,15 +199,13 @@ def elder_ray(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 1
     return e, bull_power, bear_power
 
 def check_bullish_divergence(close: pd.Series, indicator: pd.Series, lookback: int = 30) -> bool:
-    """ Fiyat yeni dip yaparken, indikatörün daha yüksek dip yapması (Pozitif Uyumsuzluk) """
     if len(close) < lookback: return False
     c = close.tail(lookback)
     ind = indicator.tail(lookback)
     try:
-        min_idx = c.values.argmin() # En düşük fiyatın index numarası
-        if min_idx < 5: return False # Öncesinde yeterli veri yok
+        min_idx = c.values.argmin()
+        if min_idx < 5: return False
         
-        # O dipten önceki yerel dibi bul
         prev_c = c.iloc[:min_idx-2]
         if len(prev_c) < 3: return False
         prev_min_idx = prev_c.values.argmin()
@@ -548,42 +546,6 @@ def backtest_long_only(
 
         position_value = shares * price * (1 - slippage)
         equity = cash + position_value
-
-        if shares == 0 and entry_sig.iloc[i] == 1 and pd.notna(row["ATR"]) and row["ATR"] > 0:
-            risk_cash = equity * cfg["risk_per_trade"]
-            stop_dist = cfg["atr_stop_mult"] * float(row["ATR"])
-
-            if stop_dist > 0:
-                qty = risk_cash / stop_dist
-                buy_price = price * (1 + slippage)
-                cost = qty * buy_price
-                fee = cost * commission
-                total_cost = cost + fee
-
-                if total_cost <= cash:
-                    cash -= total_cost
-                    shares = qty
-                    entry_price = buy_price
-                    stop = buy_price - cfg["atr_stop_mult"] * float(row["ATR"])
-                    target_price = buy_price + (tp_mult * cfg["atr_stop_mult"] * float(row["ATR"]))
-                    bars_held = 0
-                    half_sold = False
-
-                    trades.append(
-                        {
-                            "entry_date": date,
-                            "entry_price": buy_price,
-                            "exit_date": None,
-                            "exit_price": None,
-                            "exit_reason": None,
-                            "shares": shares,
-                            "equity_before": equity,
-                            "pnl": None,
-                        }
-                    )
-
-        position_value = shares * price * (1 - slippage)
-        equity = cash + position_value
         equity_curve.append((date, equity))
 
     eq = pd.Series([v for _, v in equity_curve], index=[d for d, _ in equity_curve], name="equity").astype(float)
@@ -839,7 +801,7 @@ def fundamental_score_row(row: dict, mode: str, thresholds: dict) -> Tuple[float
 
 
 # =============================
-# Target price band (non-LLM)
+# Target price band / SR Levels (YENİ GÜÇ-HACİM-UZUNLUK EKLENTİSİ)
 # =============================
 def _swing_points(high: pd.Series, low: pd.Series, left: int = 2, right: int = 2):
     hs = []
@@ -854,39 +816,119 @@ def _swing_points(high: pd.Series, low: pd.Series, left: int = 2, right: int = 2
             ls.append((low.index[i], float(low.iloc[i])))
     return hs, ls
 
-def local_levels(high: pd.Series, low: pd.Series, close: pd.Series, lookback: int = 120):
-    h = high.tail(lookback).dropna()
-    l = low.tail(lookback).dropna()
-    c = close.tail(lookback).dropna()
+def analyze_sr_levels(df: pd.DataFrame, lookback: int = 120, tol=0.015) -> List[dict]:
+    """Destek/Direnç seviyelerinin güç, hacim ve uzunluğunu analiz eder."""
+    h = df["High"].tail(lookback).dropna()
+    l = df["Low"].tail(lookback).dropna()
+    c = df["Close"].tail(lookback).dropna()
     if len(c) < 10:
         return []
-    
+        
+    v = df["Volume"].tail(lookback) if "Volume" in df.columns else pd.Series(dtype=float)
+
     hs, ls = _swing_points(h, l, left=3, right=3)
-    levels = [v for _, v in hs] + [v for _, v in ls]
-    levels += [float(c.tail(20).max()), float(c.tail(20).min())]
-    levels = sorted(list(set([round(float(x), 2) for x in levels if np.isfinite(x)])))
-    return levels
+    raw_levels = [val for _, val in hs] + [val for _, val in ls]
+    raw_levels += [float(c.tail(20).max()), float(c.tail(20).min())]
+    raw_levels = sorted(list(set([round(float(x), 2) for x in raw_levels if np.isfinite(x)])))
+
+    if not raw_levels:
+        return []
+
+    # Yakın seviyeleri grupla (Cluster)
+    clusters = []
+    for rl in raw_levels:
+        placed = False
+        for cl in clusters:
+            if abs(rl - cl['center']) / cl['center'] <= tol:
+                cl['points'].append(rl)
+                cl['center'] = sum(cl['points'])/len(cl['points'])
+                placed = True
+                break
+        if not placed:
+            clusters.append({'center': rl, 'points': [rl]})
+
+    avg_vol_normal = float(v.mean()) if not v.empty else 1.0
+    if avg_vol_normal <= 0: avg_vol_normal = 1.0
+
+    details = []
+    df_lookback = df.tail(lookback)
+    
+    for cl in clusters:
+        level_px = cl['center']
+        lower_bound = level_px * (1 - tol/2)
+        upper_bound = level_px * (1 + tol/2)
+
+        touches = df_lookback[(df_lookback["High"] >= lower_bound) & (df_lookback["Low"] <= upper_bound)]
+
+        num_touches = len(touches)
+        if num_touches == 0:
+            continue
+
+        # 1. Uzunluk (Bar sayısı)
+        first_touch_idx = touches.index[0]
+        first_idx_num = df_lookback.index.get_loc(first_touch_idx)
+        duration_bars = len(df_lookback) - first_idx_num
+
+        # 2. Hacim Oranı (%)
+        if "Volume" in df_lookback.columns and not touches.empty:
+            vol_at_level = float(touches["Volume"].mean())
+        else:
+            vol_at_level = avg_vol_normal
+
+        vol_diff_pct = (vol_at_level / avg_vol_normal - 1.0) * 100.0
+
+        # 3. Güç Skoru Hesaplama (Temas Sayısı + Hacim Etkisi + Yaş)
+        score_touches = min(num_touches * 10, 40) # Maksimum 40 puan (4+ temas)
+        score_vol = min(max(vol_diff_pct / 2.0, 0), 35) # Maksimum 35 puan (+70% hacimde tam puan)
+        score_dur = min(duration_bars / 2.0, 25) # Maksimum 25 puan (50 bar eski ise tam puan)
+
+        strength_pct = min(score_touches + score_vol + score_dur, 99.0)
+
+        details.append({
+            "price": round(level_px, 2),
+            "duration_bars": int(duration_bars),
+            "vol_at_level": float(vol_at_level),
+            "vol_diff_pct": float(vol_diff_pct),
+            "strength_pct": float(strength_pct),
+            "touches": int(num_touches)
+        })
+
+    return sorted(details, key=lambda x: x["price"])
 
 
 def target_price_band(df: pd.DataFrame):
     last = df.iloc[-1]
     px_close = float(last["Close"])
     atrv = float(last["ATR"]) if pd.notna(last.get("ATR", np.nan)) else np.nan
+
+    # Detaylı S/R hesaplamasını al (Güç, Hacim, Uzunluk vb.)
+    lv_details = analyze_sr_levels(df)
+
     if not np.isfinite(atrv) or atrv <= 0:
-        return {"base": px_close, "bull": None, "bear": None, "levels": local_levels(df["High"], df["Low"], df["Close"])}
+        return {"base": px_close, "bull": None, "bear": None, "levels": lv_details, "r1_dict": None, "s1_dict": None}
 
     bull1 = px_close + 1.5 * atrv
     bull2 = px_close + 3.0 * atrv
     bear1 = px_close - 1.5 * atrv
     bear2 = px_close - 3.0 * atrv
 
-    lv = local_levels(df["High"], df["Low"], df["Close"])
-    above = [x for x in lv if x >= px_close]
-    below = [x for x in lv if x <= px_close]
-    r1 = min(above) if above else None
-    s1 = max(below) if below else None
+    above = [x for x in lv_details if x["price"] >= px_close]
+    below = [x for x in lv_details if x["price"] <= px_close]
+    
+    r1_dict = min(above, key=lambda x: x["price"]) if above else None
+    s1_dict = max(below, key=lambda x: x["price"]) if below else None
 
-    return {"base": px_close, "bull": (bull1, bull2, r1), "bear": (bear1, bear2, s1), "levels": lv}
+    r1 = r1_dict["price"] if r1_dict else None
+    s1 = s1_dict["price"] if s1_dict else None
+
+    return {
+        "base": px_close,
+        "bull": (bull1, bull2, r1),
+        "bear": (bear1, bear2, s1),
+        "levels": lv_details,
+        "r1_dict": r1_dict,
+        "s1_dict": s1_dict
+    }
 
 
 # =============================
@@ -1319,7 +1361,11 @@ def build_html_report(
     bull = tp.get("bull")
     bear = tp.get("bear")
     levels = tp.get("levels", []) or []
-    levels_txt = ", ".join([f"{x:.2f}" for x in levels[:120]])
+    
+    levels_txt = "<br>".join([
+        f"{x['price']:.2f} (Güç: %{x['strength_pct']:.0f}, Uzunluk: {x['duration_bars']} Bar, Hacim: %{x['vol_diff_pct']:+.1f})"
+        for x in levels[:120]
+    ]) if levels else "N/A"
 
     show_cols = [
         ("ticker", "Ticker"),
@@ -1462,7 +1508,7 @@ def build_html_report(
     <div>Bull: {(bull[0] if bull else 0):.2f} → {(bull[1] if bull else 0):.2f} | R1: {(bull[2] if bull else 'N/A')}</div>
     <div>Bear: {(bear[0] if bear else 0):.2f} → {(bear[1] if bear else 0):.2f} | S1: {(bear[2] if bear else 'N/A')}</div>
     <div>RR: {('N/A' if rr_info.get('rr') is None else f"1:{rr_info.get('rr'):.2f}")}</div>
-    <div class="muted">Levels: {esc(levels_txt)}</div>
+    <div class="muted"><br>Seviyeler ve Güçleri:<br>{levels_txt}</div>
   </div>
   {gemini_block}
   {sentiment_block}
@@ -1508,7 +1554,7 @@ def generate_pdf_report(
     rr_info: dict,
     backtest_metrics: dict,
     fa_row: Optional[Dict[str, Any]],
-    levels: Optional[List[float]],
+    levels: Optional[List[dict]],
     trades_df: Optional[pd.DataFrame],
     figs: Optional[Dict[str, go.Figure]],
     include_charts: bool = True,
@@ -1625,11 +1671,18 @@ def generate_pdf_report(
     y -= 6
 
     c.setFont("Helvetica-Bold", 12)
-    c.drawString(left, y, "Levels (Approx.)")
+    c.drawString(left, y, "Levels (Güç, Uzunluk, Hacim)")
     y -= 14
 
     c.setFont("Helvetica", 9)
-    lv_lines = [", ".join([fmt_num(x) for x in levels[i : i + 10]]) for i in range(0, len(levels), 10)] if levels else ["N/A"]
+    if levels:
+        lv_lines = []
+        for i in range(0, min(len(levels), 20), 2):
+            chunk = levels[i:i+2]
+            line = " | ".join([f"{x['price']:.2f} (G:%{x.get('strength_pct',0):.0f}, {x.get('duration_bars',0)}B, V:%{x.get('vol_diff_pct',0):+.1f})" for x in chunk])
+            lv_lines.append(line)
+    else:
+        lv_lines = ["N/A"]
     y = _pdf_write_lines(c, lv_lines, left, y, 11, bottom)
     y -= 6
 
@@ -1662,16 +1715,15 @@ def generate_pdf_report(
         y = _pdf_write_lines(c, sentiment_summary.splitlines(), left, y, 11, bottom)
         y -= 6
         
-        # KAYNAK HABERLERİ PDF'E EKLE
         if sentiment_items:
             c.setFont("Helvetica-Bold", 10)
             y = _pdf_write_lines(c, ["Kaynak Haberler:"], left, y, 11, bottom)
             c.setFont("Helvetica", 8)
             for item in sentiment_items:
                 y = _pdf_write_lines(c, [f"- {item['title'][:110]}"], left, y, 10, bottom)
-                c.setFillColorRGB(0, 0, 1) # Mavi renk
+                c.setFillColorRGB(0, 0, 1)
                 y = _pdf_write_lines(c, [f"  {item['link'][:115]}"], left, y, 10, bottom)
-                c.setFillColorRGB(0, 0, 0) # Rengi siyaha sıfırla
+                c.setFillColorRGB(0, 0, 0)
             y -= 6
 
     if pa_pack:
@@ -1858,7 +1910,6 @@ def load_data_cached(ticker: str, period: str, interval: str, end_date=None, for
         
     df = _flatten_yf(df)
 
-    # 🚀 ZORUNLU GÜNCEL MUM (SENTETİK) HACK'İ
     if force_latest and end_date is None and interval == "1d" and not df.empty:
         try:
             today_data = yf.download(ticker, period="1d", interval="1m", progress=False)
@@ -2360,25 +2411,6 @@ if run_screener and use_fa:
 
 
 # -----------------------------
-# Config
-# -----------------------------
-cfg = {
-    "ema_fast": ema_fast,
-    "ema_slow": ema_slow,
-    "rsi_period": rsi_period,
-    "bb_period": bb_period,
-    "bb_std": bb_std,
-    "atr_period": atr_period,
-    "vol_sma": vol_sma,
-    "initial_capital": initial_capital,
-    "risk_per_trade": risk_per_trade,
-    "commission_bps": commission_bps,
-    "slippage_bps": slippage_bps,
-}
-cfg.update(PRESETS[preset_name])
-
-
-# -----------------------------
 # If TA not ran yet: show screener and stop
 # -----------------------------
 if not st.session_state.ta_ran:
@@ -2454,7 +2486,6 @@ if use_sentiment and ai_on:
         if sent.get("error") is None:
             sentiment_summary = sent["summary"]
             st.session_state.sentiment_summary = sentiment_summary
-            # LİNKLERİ SESSION STATE'E KAYDEDİYORUZ
             st.session_state.sentiment_items = sent.get("news_items", [])
         else:
             sentiment_summary = f"Haber analizi başarısız: {sent['error']}"
@@ -2619,7 +2650,7 @@ figs_for_report = {
 
 
 # =============================
-# Tabs (YENİ 4. SEKME EKLENDİ)
+# Tabs
 # =============================
 tab_dash, tab_export, tab_heatmap, tab_triple = st.tabs(["📊 Dashboard", "📄 Rapor (PDF/HTML)", "🔥 Sektörel Heatmap", "📺 3 Ekranlı Sistem"])
 
@@ -2711,7 +2742,11 @@ with tab_dash:
         bull1, bull2, r1 = tp["bull"]
         bcol2.metric("Bull Band", f"{bull1:.2f} → {bull2:.2f}", help="ATR bazlı yukarı yönlü dinamik hedef bölgesi. İlk hedef, ikinci hedef.")
         if r1 is not None and np.isfinite(r1):
-            bcol2.caption(f"Yakın direnç: {r1:.2f} ({pct_dist(r1, base_px):+.2f}%)")
+            r1_info = tp.get("r1_dict") or {}
+            dur = r1_info.get("duration_bars", 0)
+            vol_pct = r1_info.get("vol_diff_pct", 0)
+            str_pct = r1_info.get("strength_pct", 0)
+            bcol2.caption(f"Yakın direnç: {r1:.2f} ({pct_dist(r1, base_px):+.2f}%)\n\n**Güç:** %{str_pct:.0f} | **Uzunluk:** {dur} Bar | **Hacim:** %{vol_pct:+.1f} (Ort.)")
     else:
         bcol2.metric("Bull Band", "N/A")
         r1 = None
@@ -2721,22 +2756,32 @@ with tab_dash:
         target_info = f" | Hedef: {rr_info.get('target_type','')}" if rr_info.get('target_type') else ""
         bcol3.metric("Bear Band", f"{bear1:.2f} → {bear2:.2f}  |  RR {rr_str}{target_info}", help="ATR bazlı aşağı yönlü dinamik stop bölgesi ve Risk/Ödül oranı.")
         if s1 is not None and np.isfinite(s1):
-            bcol3.caption(f"Yakın destek: {s1:.2f} ({pct_dist(s1, base_px):+.2f}%)")
+            s1_info = tp.get("s1_dict") or {}
+            dur = s1_info.get("duration_bars", 0)
+            vol_pct = s1_info.get("vol_diff_pct", 0)
+            str_pct = s1_info.get("strength_pct", 0)
+            bcol3.caption(f"Yakın destek: {s1:.2f} ({pct_dist(s1, base_px):+.2f}%)\n\n**Güç:** %{str_pct:.0f} | **Uzunluk:** {dur} Bar | **Hacim:** %{vol_pct:+.1f} (Ort.)")
     else:
         bcol3.metric("Bear Band", f"N/A  |  RR {rr_str}")
         s1 = None
 
-    def render_levels_marked(levels: List[float], base: float, s1, r1):
+    def render_levels_marked(levels: List[dict], base: float, s1, r1):
         lines = []
-        for lv in (levels or []):
+        for lv_dict in (levels or []):
+            lv = float(lv_dict["price"])
+            dur = lv_dict["duration_bars"]
+            vol_pct = lv_dict["vol_diff_pct"]
+            str_pct = lv_dict["strength_pct"]
+
             tag = ""
-            if s1 is not None and np.isfinite(s1) and abs(float(lv) - float(s1)) < 1e-9:
+            if s1 is not None and np.isfinite(s1) and abs(lv - float(s1)) < 1e-9:
                 tag = " 🟩 Yakın Destek"
-            if r1 is not None and np.isfinite(r1) and abs(float(lv) - float(r1)) < 1e-9:
+            if r1 is not None and np.isfinite(r1) and abs(lv - float(r1)) < 1e-9:
                 tag = " 🟥 Yakın Direnç"
-            dist = pct_dist(float(lv), base)
+
+            dist = pct_dist(lv, base)
             dist_txt = f"{dist:+.2f}%" if dist is not None else ""
-            lines.append(f"- {float(lv):.2f}  ({dist_txt}){tag}")
+            lines.append(f"- **{lv:.2f}** ({dist_txt}) | Güç: %{str_pct:.0f} | Uzunluk: {dur} Bar | Hacim: %{vol_pct:+.1f} {tag}")
         return "\n".join(lines) if lines else "_Seviye yok_"
 
     with st.expander("Seviye listesi (yaklaşık) — işaretli + fiyata uzaklık %", expanded=False):
@@ -2792,7 +2837,6 @@ with tab_dash:
         st.subheader("📰 Haber Duygu Analizi (Google News + Gemini)")
         st.info(sentiment_summary)
         
-        # HABER LİNKLERİNİN EKLENDİĞİ KISIM (DASHBOARD)
         if st.session_state.sentiment_items:
             st.markdown("**Kaynak Haberler:**")
             for item in st.session_state.sentiment_items:
@@ -2836,15 +2880,6 @@ with tab_dash:
                     sector_comp = f"Sektör: {fa_row_local['sector']}, F/K: {fa_row_local['trailingPE']:.2f}"
 
                 sentiment_info = st.session_state.get("sentiment_summary", "")
-
-                target_type = rr_info.get("target_type", "")
-                target_price_desc = ""
-                if target_type == "Resistance (R1)":
-                    r1_val = tp.get("bull")[2] if tp.get("bull") else None
-                    target_price_desc = f" (Yakın direnç: {r1_val:.2f})" if r1_val else ""
-                elif target_type == "ATR-based (Bull2)":
-                    bull2_val = tp.get("bull")[1] if tp.get("bull") else None
-                    target_price_desc = f" (ATR bazlı ikinci hedef: {bull2_val:.2f})" if bull2_val else ""
 
                 prompt = f"""
 Sen bir price-action, formasyon okuma, aşırı alım/spekülasyon tespiti ve risk yönetimi odaklı kıdemli finansal analiz asistanısın. Kesin yatırım tavsiyesi verme, sadece objektif ve eğitim amaçlı analiz yap. Lütfen aşağıdaki adımları takip ederek analiz yap:
@@ -3143,7 +3178,7 @@ with tab_export:
                 st.error("PDF üretilemedi.")
 
 # =============================
-# TRIPLE SCREEN TAB (YENİ EKLENEN BÖLÜM)
+# TRIPLE SCREEN TAB
 # =============================
 with tab_triple:
     st.header("📺 Üçlü Ekran Trading Sistemi (Triple Screen)")
@@ -3155,7 +3190,6 @@ with tab_triple:
         if st.button("Üçlü Ekran Verilerini Getir ve Analiz Et", key="run_triple"):
             with st.spinner("3 Ekran verileri hesaplanıyor (1W, 1D, 4H)..."):
                 
-                # Verileri Yahoo'dan taze çekiyoruz
                 df_1w = load_data_cached(ticker, "2y", "1wk")
                 df_1d = load_data_cached(ticker, "1y", "1d", force_latest=force_latest_candle)
                 df_4h = load_data_cached(ticker, "60d", "4h")
@@ -3165,7 +3199,6 @@ with tab_triple:
                 else:
                     t_screen1, t_screen2, t_screen3 = st.tabs(["1. Ekran (Haftalık)", "2. Ekran (Günlük)", "3. Ekran (4 Saatlik)"])
                     
-                    # --- 1. EKRAN ---
                     with t_screen1:
                         st.subheader("1. Ekran: Haftalık (Ana Trend)")
                         m_line, m_sig, m_hist = macd(df_1w["Close"])
@@ -3191,25 +3224,19 @@ with tab_triple:
                         fig1.update_layout(title="Haftalık MACD Histogramı", height=300)
                         st.plotly_chart(fig1, use_container_width=True)
 
-                    # --- 2. EKRAN ---
                     with t_screen2:
                         st.subheader("2. Ekran: Günlük (Osilatörler ve Sapmalar)")
                         
-                        # 1) Kuvvet Endeksi (Force Index)
                         fi = force_index(df_1d["Close"], df_1d["Volume"])
                         fi_ema13 = ema(fi, 13)
                         fi_ema2 = ema(fi, 2)
                         
-                        # 2) RSI 13
                         rsi13 = rsi(df_1d["Close"], 13)
                         
-                        # 3) Stochastic 5
                         stoch_k, stoch_d = stochastic(df_1d["High"], df_1d["Low"], df_1d["Close"], k_period=5, d_period=3)
                         
-                        # 4) Elder-Ray 13
                         er_ema, bull_p, bear_p = elder_ray(df_1d["High"], df_1d["Low"], df_1d["Close"], 13)
                         
-                        # Kurallar
                         fi_al = (fi.iloc[-1] > fi_ema13.iloc[-1]) and (fi_ema2.iloc[-1] < 0)
                         rsi_al = (rsi13.iloc[-1] < 30)
                         stoch_al = (stoch_k.iloc[-1] < 20)
@@ -3235,35 +3262,29 @@ with tab_triple:
                         if st.session_state.sentiment_summary:
                             st.info(f"**Haber Etkisi Modülü:** {st.session_state.sentiment_summary}")
                             
-                        # Kuvvet Endeksi Grafiği
                         fig2_fi = go.Figure()
                         fig2_fi.add_trace(go.Scatter(x=df_1d.index, y=fi_ema13, name="FI 13 EMA", line=dict(color='orange')))
                         fig2_fi.add_trace(go.Bar(x=df_1d.index, y=fi_ema2, name="FI 2 EMA", marker_color='gray'))
                         fig2_fi.update_layout(title="Kuvvet Endeksi (Force Index)", height=250)
                         st.plotly_chart(fig2_fi, use_container_width=True)
                         
-                        # Elder-Ray Grafiği
                         fig2_er = go.Figure()
                         fig2_er.add_trace(go.Bar(x=df_1d.index, y=bull_p, name="Bull Power", marker_color='green'))
                         fig2_er.add_trace(go.Bar(x=df_1d.index, y=bear_p, name="Bear Power", marker_color='red'))
                         fig2_er.update_layout(title="Elder-Ray (Bull & Bear Power)", height=250)
                         st.plotly_chart(fig2_er, use_container_width=True)
 
-                    # --- 3. EKRAN ---
                     with t_screen3:
                         st.subheader("3. Ekran: 4 Saatlik (Giriş / Çıkış ve Hedefler)")
                         
-                        # 4h için EMA 13 ve ATR
                         ema_4h = ema(df_4h["Close"], 13)
                         atr_4h = atr(df_4h["High"], df_4h["Low"], df_4h["Close"], 14)
                         last_atr_4h = float(atr_4h.iloc[-1]) if not pd.isna(atr_4h.iloc[-1]) else 0.0
                         
-                        # Düşüş Penetrasyonu hesabı (Alış için)
                         pens = ema_4h - df_4h["Low"]
                         pens_positive = pens[pens > 0]
                         avg_pen = float(pens_positive.mean()) if not pens_positive.empty else 0.0
                         
-                        # Yükseliş Penetrasyonu hesabı (Hedef 1 için)
                         up_pens = df_4h["High"] - ema_4h
                         up_pens_positive = up_pens[up_pens > 0]
                         avg_up_pen = float(up_pens_positive.mean()) if not up_pens_positive.empty else 0.0
@@ -3273,17 +3294,12 @@ with tab_triple:
                         ema_delta = ema_today - ema_yest
                         ema_est_tmrw = ema_today + ema_delta
                         
-                        # --- ALIM, STOP VE HEDEF HESAPLAMALARI ---
                         buy_level = ema_est_tmrw - avg_pen
                         
-                        # Stop Loss (Alış seviyesinin 1.5 ATR altı)
                         stop_loss = buy_level - (1.5 * last_atr_4h) if last_atr_4h > 0 else buy_level * 0.98
                         risk = buy_level - stop_loss
                         
-                        # Hedef 1: Simetrik Penetrasyon
                         target_1 = ema_est_tmrw + avg_up_pen
-                        
-                        # Hedef 2: 1:2 Risk/Ödül Oranı
                         target_2 = buy_level + (risk * 2)
                         
                         st.markdown(f"""
@@ -3299,7 +3315,6 @@ with tab_triple:
                         fig3.add_trace(go.Candlestick(x=df_4h.index, open=df_4h["Open"], high=df_4h["High"], low=df_4h["Low"], close=df_4h["Close"], name="Price"))
                         fig3.add_trace(go.Scatter(x=df_4h.index, y=ema_4h, name="EMA 13", line=dict(color='blue')))
                         
-                        # Gelecek Bar Noktası ve Çizgiler
                         last_time = df_4h.index[-1]
                         next_time = last_time + pd.Timedelta(hours=4)
                         fig3.add_trace(go.Scatter(x=[next_time], y=[ema_est_tmrw], mode='markers', marker=dict(size=10, color='orange'), name="Tahmini EMA"))
