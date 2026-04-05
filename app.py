@@ -220,17 +220,38 @@ def check_bullish_divergence(close: pd.Series, indicator: pd.Series, lookback: i
         pass
     return False
 
+# DEEPSEEK FIX: Ayı uyumsuzluğu (Bearish Divergence) Tespiti Eklendi
+def check_bearish_divergence(close: pd.Series, indicator: pd.Series, lookback: int = 30) -> bool:
+    if len(close) < lookback: return False
+    c = close.tail(lookback)
+    ind = indicator.tail(lookback)
+    try:
+        max_idx = c.values.argmax()
+        if max_idx < 5: return False
+        
+        prev_c = c.iloc[:max_idx-2]
+        if len(prev_c) < 3: return False
+        prev_max_idx = prev_c.values.argmax()
+        
+        p1, p2 = prev_c.iloc[prev_max_idx], c.iloc[max_idx]
+        i1, i2 = ind.iloc[prev_max_idx], ind.iloc[max_idx]
+        
+        if p2 > p1 and i2 < i1:
+            return True
+    except Exception:
+        pass
+    return False
+
 def adx_indicator(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14):
     up = high - high.shift(1)
     down = low.shift(1) - low
     
-    # DÜZELTME: pandas indeksleri (tarihler) eşleştirildi
     plus_dm = pd.Series(np.where((up > down) & (up > 0), up, 0.0), index=high.index)
     minus_dm = pd.Series(np.where((down > up) & (down > 0), down, 0.0), index=high.index)
     
     tr = true_range(high, low, close)
     
-    tr_smooth = pd.Series(tr).ewm(alpha=1/period, adjust=False).mean()
+    tr_smooth = pd.Series(tr, index=high.index).ewm(alpha=1/period, adjust=False).mean()
     pdm_smooth = plus_dm.ewm(alpha=1/period, adjust=False).mean()
     mdm_smooth = minus_dm.ewm(alpha=1/period, adjust=False).mean()
     
@@ -262,10 +283,7 @@ def add_kangaroo_tails(df: pd.DataFrame, lookback: int = 20) -> pd.DataFrame:
     atr_approx = trange.rolling(10).mean()
     valid_trange = trange > 0
     
-    # Bullish: Low is lowest of N days, body is small, lower wick is huge
     bull_cond = valid_trange & (df["Low"] == rolling_min) & ((body / trange) <= 0.3) & ((lower_wick / trange) >= 0.6) & (trange >= atr_approx * 0.8)
-    
-    # Bearish: High is highest of N days, body is small, upper wick is huge
     bear_cond = valid_trange & (df["High"] == rolling_max) & ((body / trange) <= 0.3) & ((upper_wick / trange) >= 0.6) & (trange >= atr_approx * 0.8)
     
     df.loc[bull_cond, "KANGAROO_BULL"] = 1
@@ -480,7 +498,8 @@ def signal_with_checkpoints(
         + w["obv"] * obv_ok.astype(int)
     ).astype(float)
 
-    entry_triggers = (rsi_cross.astype(int) + macd_turn.astype(int) + bb_break.astype(int)) >= 2
+    # USER FIX: Sinyali esnettik, 3 şarttan 1'i bile sağlansa backtest işleme girer (Sıfır işlemleri önler)
+    entry_triggers = (rsi_cross.astype(int) + macd_turn.astype(int) + bb_break.astype(int)) >= 1
     entry = trend_ok & vol_ok & liq_ok & entry_triggers & market_filter_ok & higher_tf_filter_ok
 
     exit_ = (
@@ -540,6 +559,8 @@ def backtest_long_only(
     slippage = cfg["slippage_bps"] / 10000.0
     time_stop_bars = cfg.get("time_stop_bars", 10)
     tp_mult = cfg.get("take_profit_mult", 2.0)
+    
+    risk_pct = float(cfg.get("risk_per_trade", 0.01)) 
 
     for i in range(len(df)):
         row = df.iloc[i]
@@ -549,6 +570,38 @@ def backtest_long_only(
         if shares > 0 and pd.notna(row["ATR"]) and row["ATR"] > 0:
             new_stop = price - cfg["atr_stop_mult"] * float(row["ATR"])
             stop = max(stop, new_stop) if pd.notna(stop) else new_stop
+
+        # CLAUDE FIX: Backtest'te Kanguru formasyonuna göre Stop-Loss uyarlanması
+        if shares == 0 and entry_sig.iloc[i] == 1:
+            atrv = float(row.get("ATR", np.nan))
+            if pd.notna(atrv) and atrv > 0:
+                risk_amount = cash * risk_pct
+                
+                is_kangaroo = int(row.get("KANGAROO_BULL", 0)) == 1
+                if is_kangaroo:
+                    stop_price = float(row["Low"]) - (0.5 * atrv)
+                    stop_dist = price - stop_price
+                else:
+                    stop_dist = cfg["atr_stop_mult"] * atrv
+                    stop_price = price - stop_dist
+                
+                potential_shares = risk_amount / stop_dist
+                max_shares = cash / (price * (1 + slippage + commission))
+                shares_to_buy = min(potential_shares, max_shares)
+                
+                if shares_to_buy > 0.001: 
+                    shares = shares_to_buy
+                    entry_price = price * (1 + slippage)
+                    fee = (shares * entry_price) * commission
+                    cash -= ((shares * entry_price) + fee)
+                    
+                    stop = stop_price  # Dinamik belirlenen stop atanıyor
+                    target_price = entry_price + (tp_mult * stop_dist)
+                    trades.append({
+                        "entry_date": date, 
+                        "entry_price": entry_price, 
+                        "equity_before": cash + (shares * price)
+                    })
 
         position_value = shares * price * (1 - slippage)
         equity = cash + position_value
@@ -855,7 +908,7 @@ def fundamental_score_row(row: dict, mode: str, thresholds: dict) -> Tuple[float
 
 
 # =============================
-# Target price band / SR Levels (YENİ GÜÇ-HACİM-UZUNLUK EKLENTİSİ)
+# Target price band / SR Levels 
 # =============================
 def _swing_points(high: pd.Series, low: pd.Series, left: int = 2, right: int = 2):
     hs = []
@@ -871,7 +924,6 @@ def _swing_points(high: pd.Series, low: pd.Series, left: int = 2, right: int = 2
     return hs, ls
 
 def analyze_sr_levels(df: pd.DataFrame, lookback: int = 120, tol=0.015) -> List[dict]:
-    """Destek/Direnç seviyelerinin güç, hacim ve uzunluğunu analiz eder."""
     h = df["High"].tail(lookback).dropna()
     l = df["Low"].tail(lookback).dropna()
     c = df["Close"].tail(lookback).dropna()
@@ -888,14 +940,13 @@ def analyze_sr_levels(df: pd.DataFrame, lookback: int = 120, tol=0.015) -> List[
     if not raw_levels:
         return []
 
-    # Yakın seviyeleri grupla (Cluster)
     clusters = []
     for rl in raw_levels:
         placed = False
         for cl in clusters:
             if abs(rl - cl['center']) / cl['center'] <= tol:
                 cl['points'].append(rl)
-                cl['center'] = sum(cl['points'])/len(cl['points'])
+                # CLAUDE FIX: Drift'i engellemek için center (merkez) güncellenmiyor.
                 placed = True
                 break
         if not placed:
@@ -918,12 +969,10 @@ def analyze_sr_levels(df: pd.DataFrame, lookback: int = 120, tol=0.015) -> List[
         if num_touches == 0:
             continue
 
-        # 1. Uzunluk (Bar sayısı)
         first_touch_idx = touches.index[0]
         first_idx_num = df_lookback.index.get_loc(first_touch_idx)
         duration_bars = len(df_lookback) - first_idx_num
 
-        # 2. Hacim Oranı (%)
         if "Volume" in df_lookback.columns and not touches.empty:
             vol_at_level = float(touches["Volume"].mean())
         else:
@@ -931,10 +980,9 @@ def analyze_sr_levels(df: pd.DataFrame, lookback: int = 120, tol=0.015) -> List[
 
         vol_diff_pct = (vol_at_level / avg_vol_normal - 1.0) * 100.0
 
-        # 3. Güç Skoru Hesaplama (Temas Sayısı + Hacim Etkisi + Yaş)
-        score_touches = min(num_touches * 10, 40) # Maksimum 40 puan (4+ temas)
-        score_vol = min(max(vol_diff_pct / 2.0, 0), 35) # Maksimum 35 puan (+70% hacimde tam puan)
-        score_dur = min(duration_bars / 2.0, 25) # Maksimum 25 puan (50 bar eski ise tam puan)
+        score_touches = min(num_touches * 10, 40) 
+        score_vol = min(max(vol_diff_pct / 2.0, 0), 35) 
+        score_dur = min(duration_bars / 2.0, 25) 
 
         strength_pct = min(score_touches + score_vol + score_dur, 99.0)
 
@@ -955,7 +1003,6 @@ def target_price_band(df: pd.DataFrame):
     px_close = float(last["Close"])
     atrv = float(last["ATR"]) if pd.notna(last.get("ATR", np.nan)) else np.nan
 
-    # Detaylı S/R hesaplamasını al (Güç, Hacim, Uzunluk vb.)
     lv_details = analyze_sr_levels(df)
 
     if not np.isfinite(atrv) or atrv <= 0:
@@ -1123,7 +1170,6 @@ def get_news_sentiment(
             
         root = ET.fromstring(resp.content)
         
-        # SADECE BAŞLIK DEĞİL, LİNKLERİ DE ÇEKİYORUZ
         news_items = []
         for item in root.findall(".//item")[:10]:
             title_node = item.find("title")
@@ -1174,7 +1220,7 @@ Haber Başlıkları:
             "pos": pos / total if total > 0 else 0,
             "neg": neg / total if total > 0 else 0,
             "neu": neu / total if total > 0 else 0,
-            "news_items": news_items[:5], # SADECE İLK 5 HABERİ LİNK OLARAK DÖNDÜR
+            "news_items": news_items[:5], 
         }
     except Exception as e:
         return {"error": str(e), "sentiment": None, "summary": ""}
@@ -1911,7 +1957,7 @@ def generate_pdf_report(
 
 
 # =============================
-# RR helper (DİNAMİK PRICE ACTION GÜNCELLEMESİ)
+# RR helper 
 # =============================
 def rr_from_atr_stop(latest_row: pd.Series, tp_dict: dict, cfg: dict):
     close = float(latest_row["Close"])
@@ -1920,9 +1966,8 @@ def rr_from_atr_stop(latest_row: pd.Series, tp_dict: dict, cfg: dict):
     if not np.isfinite(atrv) or atrv <= 0:
         return {"rr": None, "stop": None, "risk": None, "reward": None}
 
-    # KANGURU KUYRUĞU STOP-LOSS ENTEGRASYONU
     if latest_row.get("KANGAROO_BULL", 0) == 1:
-        stop = float(latest_row["Low"]) - (0.1 * atrv) # Kuyruk ucunun çok az altı
+        stop = float(latest_row["Low"]) - (0.5 * atrv)
     else:
         stop = close - (float(cfg["atr_stop_mult"]) * atrv)
         
@@ -1969,7 +2014,7 @@ def pct_dist(level: float, base: float):
 
 
 # =============================
-# Cached data loader (HACK EKLENDİ)
+# Cached data loader
 # =============================
 @st.cache_data(ttl=300, show_spinner=False)
 def load_data_cached(ticker: str, period: str, interval: str, end_date=None, force_latest: bool = False) -> pd.DataFrame:
@@ -2009,25 +2054,27 @@ def load_data_cached(ticker: str, period: str, interval: str, end_date=None, for
                 last_df_date = df.index[-1].date()
                 
                 if today_date > last_df_date:
-                    o = float(today_data["Open"].iloc[0])
-                    h = float(today_data["High"].max())
-                    l = float(today_data["Low"].min())
-                    c = float(today_data["Close"].iloc[-1])
+                    # DEEPSEEK FIX: Hacimsiz borsa kapalı mumunu engellemek için güvenlik kilidi
                     v = float(today_data["Volume"].sum())
-                    
-                    new_idx = pd.to_datetime(str(today_date))
-                    if df.index.tz is not None:
-                        new_idx = new_idx.tz_localize(df.index.tz)
+                    if v > 0:
+                        o = float(today_data["Open"].iloc[0])
+                        h = float(today_data["High"].max())
+                        l = float(today_data["Low"].min())
+                        c = float(today_data["Close"].iloc[-1])
                         
-                    new_row = pd.DataFrame({
-                        "Open": [o],
-                        "High": [h],
-                        "Low": [l],
-                        "Close": [c],
-                        "Volume": [v]
-                    }, index=[new_idx])
-                    
-                    df = pd.concat([df, new_row])
+                        new_idx = pd.to_datetime(str(today_date))
+                        if df.index.tz is not None:
+                            new_idx = new_idx.tz_localize(df.index.tz)
+                            
+                        new_row = pd.DataFrame({
+                            "Open": [o],
+                            "High": [h],
+                            "Low": [l],
+                            "Close": [c],
+                            "Volume": [v]
+                        }, index=[new_idx])
+                        
+                        df = pd.concat([df, new_row])
         except Exception:
             pass
             
@@ -2646,7 +2693,6 @@ tp = target_price_band(df)
 rr_info = rr_from_atr_stop(latest, tp, cfg)
 overbought_result = detect_speculation(df)
 
-# YENİ KOD: Short Data verilerini çek ve overbought sözlüğüne ekle
 short_info = get_short_info(ticker)
 overbought_result["short_percent_float"] = short_info["short_percent_float"]
 overbought_result["short_ratio"] = short_info["short_ratio"]
@@ -2667,10 +2713,31 @@ exits = df[df["EXIT"] == 1]
 fig_price.add_trace(go.Scatter(x=entries.index, y=entries["Close"], mode="markers", name="ENTRY", marker=dict(symbol="triangle-up", size=10)))
 fig_price.add_trace(go.Scatter(x=exits.index, y=exits["Close"], mode="markers", name="EXIT", marker=dict(symbol="triangle-down", size=10)))
 
+# YENİ EKLENTİ: Kanguruları artık emojinin ötesinde renklendirilmiş OKLAR ve YAZILAR ile belirliyoruz.
 bull_tails = df[df["KANGAROO_BULL"] == 1]
 bear_tails = df[df["KANGAROO_BEAR"] == 1]
-fig_price.add_trace(go.Scatter(x=bull_tails.index, y=bull_tails["Low"], mode="markers+text", name="Kanguru (Boğa)", text="🦘", textposition="bottom center", marker=dict(symbol="circle", size=8, color="purple")))
-fig_price.add_trace(go.Scatter(x=bear_tails.index, y=bear_tails["High"], mode="markers+text", name="Kanguru (Ayı)", text="🦘", textposition="top center", marker=dict(symbol="circle", size=8, color="purple")))
+
+fig_price.add_trace(go.Scatter(
+    x=bull_tails.index, 
+    y=bull_tails["Low"], 
+    mode="markers+text", 
+    name="Kanguru (AL/Boğa)", 
+    text="🟩🦘 LONG", 
+    textposition="bottom center", 
+    textfont=dict(color="green", size=13, family="Arial Black"),
+    marker=dict(symbol="triangle-up", size=14, color="green", line=dict(width=2, color="DarkSlateGrey"))
+))
+
+fig_price.add_trace(go.Scatter(
+    x=bear_tails.index, 
+    y=bear_tails["High"], 
+    mode="markers+text", 
+    name="Kanguru (SAT/Ayı)", 
+    text="🟥🦘 SHORT", 
+    textposition="top center", 
+    textfont=dict(color="red", size=13, family="Arial Black"),
+    marker=dict(symbol="triangle-down", size=14, color="red", line=dict(width=2, color="DarkSlateGrey"))
+))
 
 fig_price.update_layout(
     height=600,
@@ -2755,7 +2822,6 @@ fig_eq.update_layout(
     xaxis_title="Tarih",
 )
 
-# YENİ EKLENEN GRAFİKLER (Hacim Kıyaslamaları ve OBV)
 df["VOL_SMA_10"] = df["Volume"].rolling(10).mean()
 if benchmark_df is not None and not benchmark_df.empty:
     bench_vol = benchmark_df["Volume"].reindex(df.index).fillna(0)
@@ -2801,6 +2867,16 @@ tab_dash, tab_export, tab_heatmap, tab_triple = st.tabs(["📊 Dashboard", "📄
 
 
 with tab_dash:
+    if interval == "1d" and not force_latest_candle and not df.empty:
+        last_date = df.index[-1].date()
+        today_date = datetime.date.today()
+        if today_date > last_date and today_date.weekday() < 5:
+            st.warning(
+                f"⚠️ **Gecikmeli Veri Uyarısı:** Grafikteki son mum dünün ({last_date.strftime('%d.%m.%Y')}) tarihine ait. "
+                "Yahoo Finance bugünün günlük mumunu henüz kapatmamış/güncellememiş görünüyor. "
+                "Sol menüden **'Eksik Güncel Mumu Zorla Ekle'** seçeneğini işaretleyerek bugünün güncel fiyatını grafiğe dahil edebilirsiniz."
+            )
+
     if use_fa and not st.session_state.screener_df.empty:
         st.subheader(f"🧾 Fundamental Screener Sonuçları ({market})")
         sdf = st.session_state.screener_df.copy()
@@ -3360,6 +3436,9 @@ with tab_triple:
         st.info("Sol menüden 'Teknik Analizi Çalıştır' butonuna basarak sistemi aktifleştirmelisin.")
     else:
         if st.button("Üçlü Ekran Verilerini Getir ve Analiz Et", key="run_triple"):
+            st.session_state.run_triple_screen = True
+            
+        if st.session_state.get("run_triple_screen", False):
             with st.spinner("3 Ekran verileri hesaplanıyor (1W, 1D, 4H)..."):
                 
                 df_1w = load_data_cached(ticker, "2y", "1wk")
@@ -3485,6 +3564,7 @@ with tab_triple:
                         div_rsi = check_bullish_divergence(df_1d["Close"], rsi13)
                         div_stoch = check_bullish_divergence(df_1d["Close"], stoch_k)
                         div_er = check_bullish_divergence(df_1d["Close"], bear_p)
+                        div_er_bear = check_bearish_divergence(df_1d["Close"], bull_p)
                         
                         adx_1d, pdi_1d, mdi_1d = adx_indicator(df_1d["High"], df_1d["Low"], df_1d["Close"])
                         adx_val_1d = adx_1d.iloc[-1]
@@ -3508,6 +3588,7 @@ with tab_triple:
                         if div_rsi: st.success("🚀 RSI(13)'te **Pozitif Uyumsuzluk** tespit edildi!")
                         if div_stoch: st.success("🚀 Stokastik(5)'te **Pozitif Uyumsuzluk** tespit edildi!")
                         if div_er: st.success("🚀 Elder-Ray Bear Power'da **Pozitif Uyumsuzluk (Boğa Uyumsuzluğu)** tespit edildi!")
+                        if div_er_bear: st.warning("⚠️ Elder-Ray Bull Power'da **Negatif Uyumsuzluk (Ayı Uyumsuzluğu)** tespit edildi!")
                         
                         if st.session_state.sentiment_summary:
                             st.info(f"**Haber Etkisi Modülü:** {st.session_state.sentiment_summary}")
