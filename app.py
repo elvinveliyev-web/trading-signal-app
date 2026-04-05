@@ -703,6 +703,12 @@ def backtest_long_only(
 
     tdf = pd.DataFrame(trades)
     if not tdf.empty:
+        # HATA DÜZELTMESİ: Henüz kapanmamış (açık) işlemler için eksik sütunları korumaya alıyoruz
+        if "pnl" not in tdf.columns:
+            tdf["pnl"] = np.nan
+        if "exit_date" not in tdf.columns:
+            tdf["exit_date"] = pd.NaT
+
         tdf["pnl"] = tdf["pnl"].astype(float)
         tdf["return_%"] = (tdf["pnl"] / tdf["equity_before"]) * 100
         tdf["holding_days"] = (pd.to_datetime(tdf["exit_date"]) - pd.to_datetime(tdf["entry_date"])).dt.days
@@ -718,7 +724,7 @@ def backtest_long_only(
         else:
             profit_factor = 0.0
 
-    if not tdf.empty and len(tdf) > 5:
+    if not tdf.empty and len(tdf) > 5 and "pnl" in tdf.columns:
         win_rate = (tdf["pnl"] > 0).mean()
         avg_win = tdf.loc[tdf["pnl"] > 0, "pnl"].mean() if win_rate > 0 else 0
         avg_loss = -tdf.loc[tdf["pnl"] < 0, "pnl"].mean() if win_rate < 1 else 0
@@ -742,7 +748,7 @@ def backtest_long_only(
         "Calmar": float(calmar),
         "Max Drawdown": float(mdd),
         "Trades": int(len(tdf)) if not tdf.empty else 0,
-        "Win Rate": float((tdf["pnl"] > 0).mean()) if not tdf.empty else 0.0,
+        "Win Rate": float((tdf["pnl"] > 0).mean()) if not tdf.empty and "pnl" in tdf.columns else 0.0,
         "Profit Factor": float(profit_factor) if np.isfinite(profit_factor) else float("inf"),
         "Beta": float(beta),
         "Alpha": float(alpha),
