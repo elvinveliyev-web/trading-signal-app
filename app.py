@@ -914,7 +914,7 @@ def fundamental_score_row(row: dict, mode: str, thresholds: dict) -> Tuple[float
 
 
 # =============================
-# Target price band / SR Levels 
+# Target price band / SR Levels (YENİ GÜÇLÜ S/R FİLTRESİ)
 # =============================
 def _swing_points(high: pd.Series, low: pd.Series, left: int = 2, right: int = 2):
     hs = []
@@ -929,7 +929,8 @@ def _swing_points(high: pd.Series, low: pd.Series, left: int = 2, right: int = 2
             ls.append((low.index[i], float(low.iloc[i])))
     return hs, ls
 
-def analyze_sr_levels(df: pd.DataFrame, lookback: int = 120, tol=0.015) -> List[dict]:
+# CLAUDE FIX 2: Lookback 200, Tolerance 0.02'ye çıkarıldı.
+def analyze_sr_levels(df: pd.DataFrame, lookback: int = 200, tol=0.02) -> List[dict]:
     h = df["High"].tail(lookback).dropna()
     l = df["Low"].tail(lookback).dropna()
     c = df["Close"].tail(lookback).dropna()
@@ -1022,8 +1023,13 @@ def target_price_band(df: pd.DataFrame):
     above = [x for x in lv_details if x["price"] >= px_close]
     below = [x for x in lv_details if x["price"] <= px_close]
     
-    r1_dict = min(above, key=lambda x: x["price"]) if above else None
-    s1_dict = max(below, key=lambda x: x["price"]) if below else None
+    # YENİ EKLENTİ: Sadece Güç Skoru (strength_pct) 30'un üzerinde olan "Gerçek" destek/dirençleri filtrele
+    strong_above = [x for x in above if x["strength_pct"] >= 30]
+    strong_below = [x for x in below if x["strength_pct"] >= 30]
+    
+    # Önce güçlü seviyelerden en yakın olanı ara. Eğer güçlü seviye yoksa mecburen zayıflardan en yakınını al.
+    r1_dict = min(strong_above, key=lambda x: x["price"]) if strong_above else (min(above, key=lambda x: x["price"]) if above else None)
+    s1_dict = max(strong_below, key=lambda x: x["price"]) if strong_below else (max(below, key=lambda x: x["price"]) if below else None)
 
     r1 = r1_dict["price"] if r1_dict else None
     s1 = s1_dict["price"] if s1_dict else None
