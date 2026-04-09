@@ -220,7 +220,6 @@ def check_bullish_divergence(close: pd.Series, indicator: pd.Series, lookback: i
         pass
     return False
 
-# DEEPSEEK FIX: Ayı uyumsuzluğu (Bearish Divergence) Tespiti Eklendi
 def check_bearish_divergence(close: pd.Series, indicator: pd.Series, lookback: int = 30) -> bool:
     if len(close) < lookback: return False
     c = close.tail(lookback)
@@ -498,7 +497,7 @@ def signal_with_checkpoints(
         + w["obv"] * obv_ok.astype(int)
     ).astype(float)
 
-    # USER FIX: Sinyali esnettik, 3 şarttan 1'i bile sağlansa backtest işleme girer (Sıfır işlemleri önler)
+    # Sinyali esnettik, 3 şarttan 1'i bile sağlansa backtest işleme girer
     entry_triggers = (rsi_cross.astype(int) + macd_turn.astype(int) + bb_break.astype(int)) >= 1
     entry = trend_ok & vol_ok & liq_ok & entry_triggers & market_filter_ok & higher_tf_filter_ok
 
@@ -571,7 +570,7 @@ def backtest_long_only(
             new_stop = price - cfg["atr_stop_mult"] * float(row["ATR"])
             stop = max(stop, new_stop) if pd.notna(stop) else new_stop
 
-        # CLAUDE FIX: Backtest'te Kanguru formasyonuna göre Stop-Loss uyarlanması
+        # Backtest'te Kanguru formasyonuna göre Stop-Loss uyarlanması
         if shares == 0 and entry_sig.iloc[i] == 1:
             atrv = float(row.get("ATR", np.nan))
             if pd.notna(atrv) and atrv > 0:
@@ -595,7 +594,7 @@ def backtest_long_only(
                     fee = (shares * entry_price) * commission
                     cash -= ((shares * entry_price) + fee)
                     
-                    stop = stop_price  # Dinamik belirlenen stop atanıyor
+                    stop = stop_price  
                     target_price = entry_price + (tp_mult * stop_dist)
                     trades.append({
                         "entry_date": date, 
@@ -703,7 +702,6 @@ def backtest_long_only(
 
     tdf = pd.DataFrame(trades)
     if not tdf.empty:
-        # HATA DÜZELTMESİ: Henüz kapanmamış (açık) işlemler için eksik sütunları korumaya alıyoruz
         if "pnl" not in tdf.columns:
             tdf["pnl"] = np.nan
         if "exit_date" not in tdf.columns:
@@ -1018,18 +1016,21 @@ def target_price_band(df: pd.DataFrame):
     bear1 = px_close - 1.5 * atrv
     bear2 = px_close - 3.0 * atrv
 
-    # KURAL 1: Bulunduğumuz fiyatı (px_close) hem destek hem direnç sanmasını engellemek için %0.3'lük bir tampon bölge (buffer) koyduk.
+    # %0.3 Tampon Bölge
     above = [x for x in lv_details if x["price"] > px_close * 1.003]
     below = [x for x in lv_details if x["price"] < px_close * 0.997]
     
-    # KURAL 2: Sahte hız tümseklerini (3 barlık kademeleri) yok ediyoruz.
-    # Güç skoru en az 35 VE Uzunluğu (duration) en az 14 bar olmayan hiçbir seviye GERÇEK kabul edilemez!
-    strong_above = [x for x in above if x["strength_pct"] >= 35 and x["duration_bars"] >= 14]
+    # DESTEKLER için katı kural (Sahte 3 barlık dipleri engellemek için)
     strong_below = [x for x in below if x["strength_pct"] >= 35 and x["duration_bars"] >= 14]
     
-    # Zayıf seviyeleri çöpe attıktan sonra geriye güçlü seviye kalmadıysa sahte destek vermek yerine "Yok (None)" diyoruz.
-    r1_dict = min(strong_above, key=lambda x: x["price"]) if strong_above else None
-    s1_dict = max(strong_below, key=lambda x: x["price"]) if strong_below else None
+    # DİRENÇLER için daha esnek kural (Çünkü tepeler genelde "V" şeklindedir, daha az temaslı ve hızlı oluşur)
+    strong_above = [x for x in above if x["strength_pct"] >= 20]
+    
+    # DİRENÇ BUL (YEDEK PLAN EKLENDİ): Önce güçlüleri ara, bulamazsan mecburen zayıflardan en yakınını ver
+    r1_dict = min(strong_above, key=lambda x: x["price"]) if strong_above else (min(above, key=lambda x: x["price"]) if above else None)
+    
+    # DESTEK BUL (YEDEK PLAN EKLENDİ): Önce güçlü betonları ara, bulamazsan zayıflardan en yakınını ver
+    s1_dict = max(strong_below, key=lambda x: x["price"]) if strong_below else (max(below, key=lambda x: x["price"]) if below else None)
 
     r1 = r1_dict["price"] if r1_dict else None
     s1 = s1_dict["price"] if s1_dict else None
@@ -2066,7 +2067,6 @@ def load_data_cached(ticker: str, period: str, interval: str, end_date=None, for
                 last_df_date = df.index[-1].date()
                 
                 if today_date > last_df_date:
-                    # DEEPSEEK FIX: Hacimsiz borsa kapalı mumunu engellemek için güvenlik kilidi
                     v = float(today_data["Volume"].sum())
                     if v > 0:
                         o = float(today_data["Open"].iloc[0])
