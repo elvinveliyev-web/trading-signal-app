@@ -1978,26 +1978,11 @@ def generate_pdf_report(
     c.setFont("Helvetica", 9)
     if fa_row:
         keys = [
-            "ticker",
-            "longName",
-            "FA_pass",
-            "FA_score",
-            "FA_ok_count",
-            "FA_coverage",
-            "sector",
-            "industry",
-            "trailingPE",
-            "forwardPE",
-            "pegRatio",
-            "priceToSalesTrailing12Months",
-            "priceToBook",
-            "returnOnEquity",
-            "operatingMargins",
-            "profitMargins",
-            "debtToEquity",
-            "revenueGrowth",
-            "earningsGrowth",
-            "marketCap",
+            "ticker", "longName", "FA_pass", "FA_score", "FA_ok_count", "FA_coverage",
+            "sector", "industry", "trailingPE", "forwardPE", "pegRatio",
+            "priceToSalesTrailing12Months", "priceToBook", "returnOnEquity",
+            "operatingMargins", "profitMargins", "debtToEquity",
+            "revenueGrowth", "earningsGrowth", "marketCap",
         ]
         lines = [f"{k}: {fa_row.get(k)}" for k in keys if k in fa_row]
         if not lines:
@@ -2197,6 +2182,10 @@ if "sentiment_summary" not in st.session_state:
     st.session_state.sentiment_summary = ""
 if "sentiment_items" not in st.session_state:
     st.session_state.sentiment_items = []
+
+# Yeni kanal butonu için state ayarı
+if "show_ema13_channel" not in st.session_state:
+    st.session_state.show_ema13_channel = False
 
 if "ai_messages" in st.session_state:
     del st.session_state.ai_messages
@@ -2793,11 +2782,18 @@ short_info = get_short_info(ticker)
 overbought_result["short_percent_float"] = short_info["short_percent_float"]
 overbought_result["short_ratio"] = short_info["short_ratio"]
 
+# ==========================================
+# GÜVENLİ EKLEME: Sadece Grafikte Göstermek İçin 13 EMA'lar Hesaplanıyor
+# Bu blok core/backtest hesabına etki etmez. Sadece çizim içindir.
+# ==========================================
+df["EMA13_High"] = ema(df["High"], 13)
+df["EMA13_Low"] = ema(df["Low"], 13)
+df["EMA13_Close"] = ema(df["Close"], 13)
+
 # =============================
 # Build figures
 # =============================
 
-# GÖRSEL DÜZELTME 2: Çizim ayarını hafızada tutma (Buton için state)
 if "show_chart_patterns" not in st.session_state:
     st.session_state.show_chart_patterns = True
 
@@ -2808,6 +2804,14 @@ fig_price.add_trace(go.Scatter(x=df.index, y=df["EMA200"], name="EMA Slow"))
 fig_price.add_trace(go.Scatter(x=df.index, y=df["BB_upper"], name="BB Upper", line=dict(dash="dot")))
 fig_price.add_trace(go.Scatter(x=df.index, y=df["BB_mid"], name="BB Mid", line=dict(dash="dot")))
 fig_price.add_trace(go.Scatter(x=df.index, y=df["BB_lower"], name="BB Lower", line=dict(dash="dot")))
+
+# ==========================================
+# GÜVENLİ EKLEME: 13 EMA Kanalları Çizimi
+# ==========================================
+if st.session_state.show_ema13_channel:
+    fig_price.add_trace(go.Scatter(x=df.index, y=df["EMA13_High"], name="13 EMA High", line=dict(color='rgba(255, 165, 0, 0.8)', width=1)))
+    fig_price.add_trace(go.Scatter(x=df.index, y=df["EMA13_Low"], name="13 EMA Low", fill='tonexty', fillcolor='rgba(255, 165, 0, 0.2)', line=dict(color='rgba(255, 165, 0, 0.8)', width=1)))
+    fig_price.add_trace(go.Scatter(x=df.index, y=df["EMA13_Close"], name="13 EMA Close", line=dict(color='darkorange', width=2)))
 
 entries = df[df["ENTRY"] == 1]
 exits = df[df["EXIT"] == 1]
@@ -2844,15 +2848,12 @@ if st.session_state.show_chart_patterns:
         "PATTERN_EVENING_STAR": "🔴🌃 E.STAR"
     }
 
-    # GÖRSEL DÜZELTME 1: Üst Üste Binme (Overlapping) Çözümü
-    # Önce tüm formasyon metinlerini günlere göre birleştiriyoruz ki aynı noktada 2 yazı üst üste çıkmasın.
     bull_texts = pd.Series("", index=df.index)
     bear_texts = pd.Series("", index=df.index)
 
     for col, name in bull_patterns.items():
         if col in df.columns:
             mask = df[col] == 1
-            # Plotly <br> etiketini tanır ve yazıyı bir alt satıra atar.
             bull_texts[mask] += name + "<br>"
 
     for col, name in bear_patterns.items():
@@ -2860,11 +2861,9 @@ if st.session_state.show_chart_patterns:
             mask = df[col] == 1
             bear_texts[mask] += name + "<br>"
 
-    # Metinlerin sonundaki fazladan <br> boşluğunu temizliyoruz
     bull_texts = bull_texts.str.rstrip("<br>")
     bear_texts = bear_texts.str.rstrip("<br>")
 
-    # Sadece formasyon bulunan günleri grafiğe tek bir katman (trace) olarak ekliyoruz.
     bull_mask = bull_texts != ""
     if bull_mask.any():
         fig_price.add_trace(go.Scatter(
@@ -3027,7 +3026,7 @@ with tab_dash:
     c7.metric("Piyasa Filtresi", "BULL ✅" if market_filter_ok else "BEAR ❌")
     c8.metric("Haftalık Trend", "BULL ✅" if higher_tf_filter_ok else "BEAR ❌")
     
-    # ===== MUM FORMASYONLARI SATIRI (Metrikler Geri Getirildi) =====
+    # ===== MUM FORMASYONLARI SATIRI =====
     st.subheader("🕯️ Fiyat Aksiyonu (Price Action) Mum Formasyonları - Son Bar")
     
     is_bull_tail = latest.get("KANGAROO_BULL", 0) == 1
@@ -3125,6 +3124,24 @@ with tab_dash:
     st.subheader("📊 Fiyat + EMA + Bollinger + Sinyaller")
     st.plotly_chart(fig_price, use_container_width=True)
 
+    # ==========================================
+    # GÜVENLİ DEĞİŞİKLİK: TAŞINAN GRAFİK ARAÇLARI BÖLÜMÜ (Yeni Buton ile)
+    # ==========================================
+    st.subheader("🛠️ Grafik Analiz Araçları")
+    tools_col1, tools_col2, tools_col3 = st.columns(3)
+    
+    if tools_col1.button("Sadece Grafiği Analiz Et", use_container_width=True, help="Grafikteki tüm formasyon işaretlerini (Kanguru vb.) kaldırır."):
+        st.session_state.show_chart_patterns = False
+        st.rerun()
+        
+    if tools_col2.button("Formasyonları Geri Getir", use_container_width=True, help="Kaldırılan tüm formasyon işaretlerini grafiğe geri ekler."):
+        st.session_state.show_chart_patterns = True
+        st.rerun()
+        
+    if tools_col3.button("13 EMA Kanalını Aç / Kapat", use_container_width=True, help="Grafiğe 13 EMA High, Low ve Close kanallarını ekler veya kaldırır."):
+        st.session_state.show_ema13_channel = not st.session_state.show_ema13_channel
+        st.rerun()
+
     st.subheader("📉 RSI / MACD / ATR%")
     colA, colB, colC = st.columns(3)
     with colA: st.plotly_chart(fig_rsi, use_container_width=True)
@@ -3143,18 +3160,6 @@ with tab_dash:
     with colV2: st.plotly_chart(fig_vol_2wk, use_container_width=True)
     with colV3: st.plotly_chart(fig_obv, use_container_width=True)
 
-    # ==========================================
-    # GÖRSEL DÜZELTME 2: GRAFİK ANALİZ ARAÇLARI BUTONLARI EKLENDİ
-    # ==========================================
-    st.subheader("🛠️ Grafik Analiz Araçları")
-    tools_col1, tools_col2 = st.columns(2)
-    if tools_col1.button("Sadece Grafiği Analiz Et", use_container_width=True, help="Grafikteki tüm formasyon işaretlerini (Kanguru vb.) kaldırır."):
-        st.session_state.show_chart_patterns = False
-        st.rerun()
-    if tools_col2.button("Formasyonları Geri Getir", use_container_width=True, help="Kaldırılan tüm formasyon işaretlerini grafiğe geri ekler."):
-        st.session_state.show_chart_patterns = True
-        st.rerun()
-        
     st.subheader("🧪 Backtest Özeti (Long-only + Scale Out + Time Stop)")
     m1, m2, m3, m4, m5, m6, m7, m8 = st.columns(8)
     m1.metric("Total Return", f"{metrics['Total Return']*100:.1f}%")
@@ -3501,7 +3506,8 @@ with tab_triple:
                         c1w_2.metric("Haftalık EMA (13-26)", ema1w_sig, f"EMA13: {ema_1w_13.iloc[-1]:.2f} | EMA26: {ema_1w_26.iloc[-1]:.2f}")
                         c1w_3.metric("ADX (14)", adx_sig_1w, f"ADX: {adx_val_1w:.1f} | +DI: {pdi_val_1w:.1f} | -DI: {mdi_val_1w:.1f}")
                         
-                        if div_macd: st.success("🚀 Sistem Haftalık MACD Histogramında **Pozitif Uyumsuzluk** tespit etti!")
+                        if div_macd:
+                            st.success("🚀 Sistem Haftalık MACD Histogramında **Pozitif Uyumsuzluk** tespit etti!")
                             
                         fig1_price = go.Figure()
                         fig1_price.add_trace(go.Candlestick(x=df_1w.index, open=df_1w["Open"], high=df_1w["High"], low=df_1w["Low"], close=df_1w["Close"], name="Fiyat"))
@@ -3585,10 +3591,14 @@ with tab_triple:
                         c4.metric("Elder-Ray", "AL" if er_al else "BEKLE")
                         c5.metric("ADX (14)", adx_sig_1d, f"ADX: {adx_val_1d:.1f} | +DI: {pdi_val_1d:.1f}")
                         
-                        if div_rsi: st.success("🚀 RSI(13)'te **Pozitif Uyumsuzluk** tespit edildi!")
-                        if div_stoch: st.success("🚀 Stokastik(5)'te **Pozitif Uyumsuzluk** tespit edildi!")
-                        if div_er: st.success("🚀 Elder-Ray Bear Power'da **Pozitif Uyumsuzluk (Boğa Uyumsuzluğu)** tespit edildi!")
-                        if div_er_bear: st.warning("⚠️ Elder-Ray Bull Power'da **Negatif Uyumsuzluk (Ayı Uyumsuzluğu)** tespit edildi!")
+                        if div_rsi:
+                            st.success("🚀 RSI(13)'te **Pozitif Uyumsuzluk** tespit edildi!")
+                        if div_stoch:
+                            st.success("🚀 Stokastik(5)'te **Pozitif Uyumsuzluk** tespit edildi!")
+                        if div_er:
+                            st.success("🚀 Elder-Ray Bear Power'da **Pozitif Uyumsuzluk (Boğa Uyumsuzluğu)** tespit edildi!")
+                        if div_er_bear:
+                            st.warning("⚠️ Elder-Ray Bull Power'da **Negatif Uyumsuzluk (Ayı Uyumsuzluğu)** tespit edildi!")
                         
                         if st.session_state.sentiment_summary:
                             st.info(f"**Haber Etkisi Modülü:** {st.session_state.sentiment_summary}")
