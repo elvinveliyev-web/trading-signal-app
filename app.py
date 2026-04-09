@@ -289,6 +289,81 @@ def add_kangaroo_tails(df: pd.DataFrame, lookback: int = 20) -> pd.DataFrame:
     df.loc[bear_cond, "KANGAROO_BEAR"] = 1
     return df
 
+# =============================
+# PRICE ACTION PATTERNS (CANDLESTICKS)
+# =============================
+def add_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    O = df["Open"]
+    H = df["High"]
+    L = df["Low"]
+    C = df["Close"]
+
+    Body = (C - O).abs()
+    Range = H - L
+    UpperWick = H - df[["Open", "Close"]].max(axis=1)
+    LowerWick = df[["Open", "Close"]].min(axis=1) - L
+    AvgRange = Range.rolling(10).mean()
+
+    is_bull = C > O
+    is_bear = C < O
+
+    # 4. Doji
+    df["PATTERN_DOJI"] = (Body <= 0.1 * Range) & (Range > 0)
+    
+    # 5. Long-Legged Doji
+    df["PATTERN_LL_DOJI"] = df["PATTERN_DOJI"] & (UpperWick >= 0.35 * Range) & (LowerWick >= 0.35 * Range) & (Range > AvgRange * 0.8)
+
+    # 1. Hammer / Hanging Man
+    shape_hammer = (LowerWick >= 2 * Body) & (UpperWick <= 0.2 * Range) & (Body > 0.02 * Range)
+    df["PATTERN_HAMMER"] = shape_hammer & (C < df.get("EMA50", C)) 
+    df["PATTERN_HANGING_MAN"] = shape_hammer & (C > df.get("EMA50", C)) 
+
+    # 2. Shooting Star / Inverted Hammer
+    shape_star = (UpperWick >= 2 * Body) & (LowerWick <= 0.2 * Range) & (Body > 0.02 * Range)
+    df["PATTERN_SHOOTING_STAR"] = shape_star & (C > df.get("EMA50", C)) 
+    df["PATTERN_INV_HAMMER"] = shape_star & (C < df.get("EMA50", C)) 
+
+    # 7. Marubozu
+    df["PATTERN_MARUBOZU_BULL"] = is_bull & (Body >= 0.85 * Range) & (Range > AvgRange * 0.5)
+    df["PATTERN_MARUBOZU_BEAR"] = is_bear & (Body >= 0.85 * Range) & (Range > AvgRange * 0.5)
+
+    # Shifting values for multi-day patterns
+    prev_is_bear = is_bear.shift(1)
+    prev_is_bull = is_bull.shift(1)
+    prev_O = O.shift(1)
+    prev_C = C.shift(1)
+
+    # 3. Engulfing
+    df["PATTERN_ENGULFING_BULL"] = is_bull & prev_is_bear & (O <= prev_C) & (C >= prev_O) & (Body > (prev_O - prev_C))
+    df["PATTERN_ENGULFING_BEAR"] = is_bear & prev_is_bull & (O >= prev_C) & (C <= prev_O) & (Body > (prev_C - prev_O))
+
+    # 6. Harami
+    df["PATTERN_HARAMI_BULL"] = is_bull & prev_is_bear & (O > prev_C) & (C < prev_O) & ((prev_O - prev_C) > AvgRange * 0.5)
+    df["PATTERN_HARAMI_BEAR"] = is_bear & prev_is_bull & (O < prev_C) & (C > prev_O) & ((prev_C - prev_O) > AvgRange * 0.5)
+
+    # 8. Tweezer Top / Bottom
+    prev_H = H.shift(1)
+    prev_L = L.shift(1)
+    df["PATTERN_TWEEZER_TOP"] = (abs(H - prev_H) <= 0.002 * C) & is_bear & prev_is_bull & (H > df.get("EMA50", C))
+    df["PATTERN_TWEEZER_BOTTOM"] = (abs(L - prev_L) <= 0.002 * C) & is_bull & prev_is_bear & (L < df.get("EMA50", C))
+
+    # 10. Piercing Pattern / Dark Cloud Cover
+    df["PATTERN_PIERCING"] = is_bull & prev_is_bear & (O < L.shift(1)) & (C > (prev_O + prev_C)/2) & (C < prev_O)
+    df["PATTERN_DARK_CLOUD"] = is_bear & prev_is_bull & (O > H.shift(1)) & (C < (prev_O + prev_C)/2) & (C > prev_O)
+
+    # 9. Morning Star / Evening Star (3-day pattern)
+    prev2_is_bear = is_bear.shift(2)
+    prev2_is_bull = is_bull.shift(2)
+    prev2_O = O.shift(2)
+    prev2_C = C.shift(2)
+
+    df["PATTERN_MORNING_STAR"] = is_bull & prev2_is_bear & (prev_C < prev2_C) & (O > prev_C) & (C > (prev2_O + prev2_C)/2)
+    df["PATTERN_EVENING_STAR"] = is_bear & prev2_is_bull & (prev_C > prev2_C) & (O < prev_C) & (C < (prev2_O + prev2_C)/2)
+
+    return df
+
 
 # =============================
 # Overbought / Speculation Indicators
@@ -413,6 +488,7 @@ def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
 
     df = add_overbought_indicators(df)
     df = add_kangaroo_tails(df)
+    df = add_candlestick_patterns(df)
     return df
 
 
@@ -1017,22 +1093,18 @@ def target_price_band(df: pd.DataFrame):
     above = [x for x in lv_details if x["price"] >= px_close * 1.005]
     below = [x for x in lv_details if x["price"] <= px_close * 0.995]
     
-    # KESİN KURAL: En az 10 bar yaşamamış VE en az 2 temas almamış hiçbir şey DİRENÇ/DESTEK Olamaz!
     valid_above = [x for x in above if x["duration_bars"] >= 10 and x["touches"] >= 2]
     valid_below = [x for x in below if x["duration_bars"] >= 10 and x["touches"] >= 2]
     
-    # GÜÇ KURALI: Yukarıdaki barajı geçenler arasında yüksek puanlı olanlar
     strong_above = [x for x in valid_above if x["strength_pct"] >= 25]
     strong_below = [x for x in valid_below if x["strength_pct"] >= 35]
     
-    # YEDEK PLAN HATASI DÜZELTİLDİ: Yedek plan artık asla 10 bardan düşükleri ekrana çıkaramaz (Çünkü valid listesine bakıyor)
     r1_dict = min(strong_above, key=lambda x: x["price"]) if strong_above else (min(valid_above, key=lambda x: x["price"]) if valid_above else None)
     s1_dict = max(strong_below, key=lambda x: x["price"]) if strong_below else (max(valid_below, key=lambda x: x["price"]) if valid_below else None)
 
     r1 = r1_dict["price"] if r1_dict else None
     s1 = s1_dict["price"] if s1_dict else None
     
-    # PİYASANIN DOĞASI (ATH) ÇÖZÜMÜ: Eğer hisse tarihi zirvedeyse veya o bölgede eski fiyat yoksa Sentetik Direnç Üret!
     if r1 is None:
         pivot = (float(last["High"]) + float(last["Low"]) + px_close) / 3.0
         synth_r1 = (2 * pivot) - float(last["Low"])
@@ -2737,36 +2809,62 @@ exits = df[df["EXIT"] == 1]
 fig_price.add_trace(go.Scatter(x=entries.index, y=entries["Close"], mode="markers", name="ENTRY", marker=dict(symbol="triangle-up", size=10)))
 fig_price.add_trace(go.Scatter(x=exits.index, y=exits["Close"], mode="markers", name="EXIT", marker=dict(symbol="triangle-down", size=10)))
 
-# Kanguru İkonları
-bull_tails = df[df["KANGAROO_BULL"] == 1]
-bear_tails = df[df["KANGAROO_BEAR"] == 1]
+# =============================
+# Formasyon Çizimleri (Kanguru + Diğer Mumlar)
+# =============================
+bull_patterns = {
+    "KANGAROO_BULL": "🟩🦘 LONG KANGURU",
+    "PATTERN_HAMMER": "🟩🔨 HAMMER",
+    "PATTERN_INV_HAMMER": "🟩🔨 INV HAMMER",
+    "PATTERN_ENGULFING_BULL": "🟢 ENGULFING",
+    "PATTERN_HARAMI_BULL": "🟢🤰 HARAMI",
+    "PATTERN_MARUBOZU_BULL": "🟩 MARUBOZU",
+    "PATTERN_TWEEZER_BOTTOM": "🟢✌️ TWEEZER",
+    "PATTERN_PIERCING": "🟢🗡️ PIERCING",
+    "PATTERN_MORNING_STAR": "🟢🌅 M.STAR",
+    "PATTERN_LL_DOJI": "🟢⚖️ LL DOJI",
+}
 
-fig_price.add_trace(go.Scatter(
-    x=bull_tails.index, 
-    y=bull_tails["Low"], 
-    mode="markers+text", 
-    name="Kanguru (AL/Boğa)", 
-    text="🟩🦘 LONG", 
-    textposition="bottom center", 
-    textfont=dict(color="green", size=13, family="Arial Black"),
-    marker=dict(symbol="triangle-up", size=14, color="green", line=dict(width=2, color="DarkSlateGrey"))
-))
+bear_patterns = {
+    "KANGAROO_BEAR": "🟥🦘 SHORT KANGURU",
+    "PATTERN_HANGING_MAN": "🟥🪢 HANGING M.",
+    "PATTERN_SHOOTING_STAR": "🟥🌠 S.STAR",
+    "PATTERN_ENGULFING_BEAR": "🔴 ENGULFING",
+    "PATTERN_HARAMI_BEAR": "🔴🤰 HARAMI",
+    "PATTERN_MARUBOZU_BEAR": "🟥 MARUBOZU",
+    "PATTERN_TWEEZER_TOP": "🔴✌️ TWEEZER",
+    "PATTERN_DARK_CLOUD": "🔴🌩️ D.CLOUD",
+    "PATTERN_EVENING_STAR": "🔴🌃 E.STAR"
+}
 
-fig_price.add_trace(go.Scatter(
-    x=bear_tails.index, 
-    y=bear_tails["High"], 
-    mode="markers+text", 
-    name="Kanguru (SAT/Ayı)", 
-    text="🟥🦘 SHORT", 
-    textposition="top center", 
-    textfont=dict(color="red", size=13, family="Arial Black"),
-    marker=dict(symbol="triangle-down", size=14, color="red", line=dict(width=2, color="DarkSlateGrey"))
-))
+# Boğa Formasyonlarını Grafiğe Ekle
+for col, name in bull_patterns.items():
+    if col in df.columns:
+        m = df[df[col] == True] # YA DA 1
+        if not m.empty:
+            fig_price.add_trace(go.Scatter(
+                x=m.index, y=m["Low"], mode="markers+text", name=name,
+                text=name, textposition="bottom center",
+                textfont=dict(color="green", size=10, family="Arial Black"),
+                marker=dict(symbol="triangle-up", size=10, color="green", line=dict(width=1, color="DarkSlateGrey"))
+            ))
+
+# Ayı Formasyonlarını Grafiğe Ekle
+for col, name in bear_patterns.items():
+    if col in df.columns:
+        m = df[df[col] == True]
+        if not m.empty:
+            fig_price.add_trace(go.Scatter(
+                x=m.index, y=m["High"], mode="markers+text", name=name,
+                text=name, textposition="top center",
+                textfont=dict(color="red", size=10, family="Arial Black"),
+                marker=dict(symbol="triangle-down", size=10, color="red", line=dict(width=1, color="DarkSlateGrey"))
+            ))
 
 fig_price.update_layout(
     height=600,
     xaxis_rangeslider_visible=False,
-    title="Fiyat Grafiği + EMA + Bollinger + Sinyaller & Kanguru",
+    title="Fiyat Grafiği + EMA + Bollinger + Sinyaller & Formasyonlar",
     yaxis_title="Fiyat",
     xaxis_title="Tarih",
 )
@@ -2896,7 +2994,8 @@ with tab_dash:
         for _, v in overbought_result["details"].items():
             st.write(f"• {v}")
 
-    c1, c2, c3, c4, c5, c6, c7, c8, c9 = st.columns(9)
+    # ===== ANA BİLGİ SATIRI (Kanguru Buradan Çıkarıldı) =====
+    c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
     c1.metric("Market", market)
     c2.metric("Sembol", ticker)
     c3.metric("Daily Close", f"{latest['Close']:.2f}")
@@ -2906,11 +3005,29 @@ with tab_dash:
     c7.metric("Piyasa Filtresi", "BULL ✅" if market_filter_ok else "BEAR ❌")
     c8.metric("Haftalık Trend", "BULL ✅" if higher_tf_filter_ok else "BEAR ❌")
     
+    # ===== YENİ MUM FORMASYONLARI SATIRI (Kanguru Buraya Eklendi) =====
+    st.subheader("🕯️ Fiyat Aksiyonu (Price Action) Mum Formasyonları - Son Bar")
+    
     is_bull_tail = latest.get("KANGAROO_BULL", 0) == 1
     is_bear_tail = latest.get("KANGAROO_BEAR", 0) == 1
     tail_val = "BOĞA 🦘" if is_bull_tail else ("AYI 🦘" if is_bear_tail else "YOK")
     tail_delta = "AL Yönlü" if is_bull_tail else ("-SAT Yönlü" if is_bear_tail else None)
-    c9.metric("Kanguru", tail_val, delta=tail_delta)
+    
+    pa_c1, pa_c2, pa_c3, pa_c4, pa_c5, pa_c6 = st.columns(6)
+    pa_c1.metric("1. Kanguru", tail_val, delta=tail_delta)
+    pa_c2.metric("2. Engulfing", "Boğa 🟢" if latest.get("PATTERN_ENGULFING_BULL") else ("Ayı 🔴" if latest.get("PATTERN_ENGULFING_BEAR") else "Yok"))
+    pa_c3.metric("3. Hammer / Star", "Çekiç 🟢" if latest.get("PATTERN_HAMMER") else ("Kayan Yıldız 🔴" if latest.get("PATTERN_SHOOTING_STAR") else "Yok"))
+    pa_c4.metric("4. Doji", "Uzun Bacak ⚪" if latest.get("PATTERN_LL_DOJI") else ("Doji ⚪" if latest.get("PATTERN_DOJI") else "Yok"))
+    pa_c5.metric("5. Marubozu", "Boğa 🟢" if latest.get("PATTERN_MARUBOZU_BULL") else ("Ayı 🔴" if latest.get("PATTERN_MARUBOZU_BEAR") else "Yok"))
+    pa_c6.metric("6. Harami", "Boğa 🟢" if latest.get("PATTERN_HARAMI_BULL") else ("Ayı 🔴" if latest.get("PATTERN_HARAMI_BEAR") else "Yok"))
+    
+    pa2_c1, pa2_c2, pa2_c3, pa2_c4, pa2_c5, pa2_c6 = st.columns(6)
+    pa2_c1.metric("7. Tweezer", "Dip 🟢" if latest.get("PATTERN_TWEEZER_BOTTOM") else ("Tepe 🔴" if latest.get("PATTERN_TWEEZER_TOP") else "Yok"))
+    pa2_c2.metric("8. M./E. Star", "Sabah 🟢" if latest.get("PATTERN_MORNING_STAR") else ("Akşam 🔴" if latest.get("PATTERN_EVENING_STAR") else "Yok"))
+    pa2_c3.metric("9. Piercing / Dark", "Delen 🟢" if latest.get("PATTERN_PIERCING") else ("Kara Bulut 🔴" if latest.get("PATTERN_DARK_CLOUD") else "Yok"))
+    pa2_c4.metric("10. Inv. H / Hang", "Ters Çekiç 🟢" if latest.get("PATTERN_INV_HAMMER") else ("Asılı Adam 🔴" if latest.get("PATTERN_HANGING_MAN") else "Yok"))
+    pa2_c5.metric("11. Filtre Durumu", "Aktif ✅", help="Formasyonlar (2-3 günlük trendler ve EMA) gürültüyü azaltmak için filtrelendi.")
+    pa2_c6.write("") # Boşluk düzenlemesi
 
     st.subheader("✅ Kontrol Noktaları (Son Bar)")
     cp_cols = st.columns(3)
@@ -2926,7 +3043,6 @@ with tab_dash:
     bcol1, bcol2, bcol3 = st.columns(3)
     bcol1.metric("Base", f"{base_px:.2f}", help="Referans alınan anlık/kapanış fiyat.")
 
-    # DİRENÇ EKRANI GÜNCELLEMESİ (SENTETİK DİRENÇ DESTEĞİ)
     if tp.get("bull"):
         bull1, bull2, r1 = tp["bull"]
         bcol2.metric("Bull Band", f"{bull1:.2f} → {bull2:.2f}", help="ATR bazlı dinamik hedef.")
@@ -2944,7 +3060,6 @@ with tab_dash:
     else:
         bcol2.metric("Bull Band", "N/A")
 
-    # DESTEK EKRANI GÜNCELLEMESİ (SENTETİK DESTEK DESTEĞİ)
     if tp.get("bear"):
         bear1, bear2, s1 = tp["bear"]
         target_info = f" | Hedef: {rr_info.get('target_type','')}" if rr_info.get('target_type') else ""
