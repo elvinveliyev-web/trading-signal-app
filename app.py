@@ -199,13 +199,15 @@ def elder_ray(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 1
     bear_power = low - e
     return e, bull_power, bear_power
 
+# GÜNCELLEME: Uyumsuzluk fonksiyonlarına son 5 bar şartı eklendi.
 def check_bullish_divergence(close: pd.Series, indicator: pd.Series, lookback: int = 30) -> bool:
     if len(close) < lookback: return False
     c = close.tail(lookback)
     ind = indicator.tail(lookback)
     try:
         min_idx = c.values.argmin()
-        if min_idx < 5: return False
+        # GÜNCELLEME: Dip noktası son 5 bar içinde değilse, eski/bayat bir sinyaldir, yoksay.
+        if min_idx < (lookback - 5): return False 
         
         prev_c = c.iloc[:min_idx-2]
         if len(prev_c) < 3: return False
@@ -220,13 +222,15 @@ def check_bullish_divergence(close: pd.Series, indicator: pd.Series, lookback: i
         pass
     return False
 
+# GÜNCELLEME: Uyumsuzluk fonksiyonlarına son 5 bar şartı eklendi.
 def check_bearish_divergence(close: pd.Series, indicator: pd.Series, lookback: int = 30) -> bool:
     if len(close) < lookback: return False
     c = close.tail(lookback)
     ind = indicator.tail(lookback)
     try:
         max_idx = c.values.argmax()
-        if max_idx < 5: return False
+        # GÜNCELLEME: Tepe noktası son 5 bar içinde değilse, eski/bayat bir sinyaldir, yoksay.
+        if max_idx < (lookback - 5): return False
         
         prev_c = c.iloc[:max_idx-2]
         if len(prev_c) < 3: return False
@@ -2183,7 +2187,6 @@ if "sentiment_summary" not in st.session_state:
 if "sentiment_items" not in st.session_state:
     st.session_state.sentiment_items = []
 
-# Yeni kanal butonu için state ayarı
 if "show_ema13_channel" not in st.session_state:
     st.session_state.show_ema13_channel = False
 
@@ -2782,10 +2785,6 @@ short_info = get_short_info(ticker)
 overbought_result["short_percent_float"] = short_info["short_percent_float"]
 overbought_result["short_ratio"] = short_info["short_ratio"]
 
-# ==========================================
-# GÜVENLİ EKLEME: Sadece Grafikte Göstermek İçin 13 EMA'lar Hesaplanıyor
-# Bu blok core/backtest hesabına etki etmez. Sadece çizim içindir.
-# ==========================================
 df["EMA13_High"] = ema(df["High"], 13)
 df["EMA13_Low"] = ema(df["Low"], 13)
 df["EMA13_Close"] = ema(df["Close"], 13)
@@ -2805,9 +2804,6 @@ fig_price.add_trace(go.Scatter(x=df.index, y=df["BB_upper"], name="BB Upper", li
 fig_price.add_trace(go.Scatter(x=df.index, y=df["BB_mid"], name="BB Mid", line=dict(dash="dot")))
 fig_price.add_trace(go.Scatter(x=df.index, y=df["BB_lower"], name="BB Lower", line=dict(dash="dot")))
 
-# ==========================================
-# GÜVENLİ EKLEME: 13 EMA Kanalları Çizimi
-# ==========================================
 if st.session_state.show_ema13_channel:
     fig_price.add_trace(go.Scatter(x=df.index, y=df["EMA13_High"], name="13 EMA High", line=dict(color='rgba(255, 165, 0, 0.8)', width=1)))
     fig_price.add_trace(go.Scatter(x=df.index, y=df["EMA13_Low"], name="13 EMA Low", fill='tonexty', fillcolor='rgba(255, 165, 0, 0.2)', line=dict(color='rgba(255, 165, 0, 0.8)', width=1)))
@@ -2818,10 +2814,6 @@ exits = df[df["EXIT"] == 1]
 fig_price.add_trace(go.Scatter(x=entries.index, y=entries["Close"], mode="markers", name="ENTRY", marker=dict(symbol="triangle-up", size=10)))
 fig_price.add_trace(go.Scatter(x=exits.index, y=exits["Close"], mode="markers", name="EXIT", marker=dict(symbol="triangle-down", size=10)))
 
-# =============================
-# Formasyon Çizimleri (Kanguru + Diğer Mumlar)
-# =============================
-# Eğer butonla kapatılmadıysa çizdir
 if st.session_state.show_chart_patterns:
     bull_patterns = {
         "KANGAROO_BULL": "🟩🦘 LONG KANGURU",
@@ -3015,7 +3007,6 @@ with tab_dash:
         for _, v in overbought_result["details"].items():
             st.write(f"• {v}")
 
-    # ===== ANA BİLGİ SATIRI =====
     c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
     c1.metric("Market", market)
     c2.metric("Sembol", ticker)
@@ -3026,7 +3017,6 @@ with tab_dash:
     c7.metric("Piyasa Filtresi", "BULL ✅" if market_filter_ok else "BEAR ❌")
     c8.metric("Haftalık Trend", "BULL ✅" if higher_tf_filter_ok else "BEAR ❌")
     
-    # ===== MUM FORMASYONLARI SATIRI =====
     st.subheader("🕯️ Fiyat Aksiyonu (Price Action) Mum Formasyonları - Son Bar")
     
     is_bull_tail = latest.get("KANGAROO_BULL", 0) == 1
@@ -3124,9 +3114,6 @@ with tab_dash:
     st.subheader("📊 Fiyat + EMA + Bollinger + Sinyaller")
     st.plotly_chart(fig_price, use_container_width=True)
 
-    # ==========================================
-    # GÜVENLİ DEĞİŞİKLİK: TAŞINAN GRAFİK ARAÇLARI BÖLÜMÜ (Yeni Buton ile)
-    # ==========================================
     st.subheader("🛠️ Grafik Analiz Araçları")
     tools_col1, tools_col2, tools_col3 = st.columns(3)
     
