@@ -199,51 +199,49 @@ def elder_ray(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 1
     bear_power = low - e
     return e, bull_power, bear_power
 
-# GÜNCELLEME: Uyumsuzluk fonksiyonlarına son 5 bar şartı eklendi.
-def check_bullish_divergence(close: pd.Series, indicator: pd.Series, lookback: int = 30) -> bool:
-    if len(close) < lookback: return False
+# GÜNCELLEME: Filtre kaldırıldı, yerine "kaç bar önce (bars_ago)" döndürülecek şekilde yapılandırıldı.
+def check_bullish_divergence(close: pd.Series, indicator: pd.Series, lookback: int = 30) -> Tuple[bool, int]:
+    if len(close) < lookback: return False, 0
     c = close.tail(lookback)
     ind = indicator.tail(lookback)
     try:
         min_idx = c.values.argmin()
-        # GÜNCELLEME: Dip noktası son 5 bar içinde değilse, eski/bayat bir sinyaldir, yoksay.
-        if min_idx < (lookback - 5): return False 
+        bars_ago = (lookback - 1) - min_idx
         
         prev_c = c.iloc[:min_idx-2]
-        if len(prev_c) < 3: return False
+        if len(prev_c) < 3: return False, 0
         prev_min_idx = prev_c.values.argmin()
         
         p1, p2 = prev_c.iloc[prev_min_idx], c.iloc[min_idx]
         i1, i2 = ind.iloc[prev_min_idx], ind.iloc[min_idx]
         
         if p2 < p1 and i2 > i1:
-            return True
+            return True, bars_ago
     except Exception:
         pass
-    return False
+    return False, 0
 
-# GÜNCELLEME: Uyumsuzluk fonksiyonlarına son 5 bar şartı eklendi.
-def check_bearish_divergence(close: pd.Series, indicator: pd.Series, lookback: int = 30) -> bool:
-    if len(close) < lookback: return False
+# GÜNCELLEME: Filtre kaldırıldı, yerine "kaç bar önce (bars_ago)" döndürülecek şekilde yapılandırıldı.
+def check_bearish_divergence(close: pd.Series, indicator: pd.Series, lookback: int = 30) -> Tuple[bool, int]:
+    if len(close) < lookback: return False, 0
     c = close.tail(lookback)
     ind = indicator.tail(lookback)
     try:
         max_idx = c.values.argmax()
-        # GÜNCELLEME: Tepe noktası son 5 bar içinde değilse, eski/bayat bir sinyaldir, yoksay.
-        if max_idx < (lookback - 5): return False
+        bars_ago = (lookback - 1) - max_idx
         
         prev_c = c.iloc[:max_idx-2]
-        if len(prev_c) < 3: return False
+        if len(prev_c) < 3: return False, 0
         prev_max_idx = prev_c.values.argmax()
         
         p1, p2 = prev_c.iloc[prev_max_idx], c.iloc[max_idx]
         i1, i2 = ind.iloc[prev_max_idx], ind.iloc[max_idx]
         
         if p2 > p1 and i2 < i1:
-            return True
+            return True, bars_ago
     except Exception:
         pass
-    return False
+    return False, 0
 
 def adx_indicator(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14):
     up = high - high.shift(1)
@@ -3474,7 +3472,7 @@ with tab_triple:
                         prev_hist = float(m_hist.iloc[-2])
                         slope_up = last_hist > prev_hist
                         
-                        div_macd = check_bullish_divergence(df_1w["Close"], m_hist)
+                        div_macd, macd_ago = check_bullish_divergence(df_1w["Close"], m_hist)
 
                         adx_1w, pdi_1w, mdi_1w = adx_indicator(df_1w["High"], df_1w["Low"], df_1w["Close"])
                         adx_val_1w = adx_1w.iloc[-1]
@@ -3494,7 +3492,7 @@ with tab_triple:
                         c1w_3.metric("ADX (14)", adx_sig_1w, f"ADX: {adx_val_1w:.1f} | +DI: {pdi_val_1w:.1f} | -DI: {mdi_val_1w:.1f}")
                         
                         if div_macd:
-                            st.success("🚀 Sistem Haftalık MACD Histogramında **Pozitif Uyumsuzluk** tespit etti!")
+                            st.success(f"🚀 Sistem Haftalık MACD Histogramında **Pozitif Uyumsuzluk** tespit etti! ({macd_ago} bar önce)")
                             
                         fig1_price = go.Figure()
                         fig1_price.add_trace(go.Candlestick(x=df_1w.index, open=df_1w["Open"], high=df_1w["High"], low=df_1w["Low"], close=df_1w["Close"], name="Fiyat"))
@@ -3554,10 +3552,10 @@ with tab_triple:
                         bp_neg_but_rising = (bear_p.iloc[-1] < 0) and (bear_p.iloc[-1] > bear_p.iloc[-2])
                         er_al = er_ema_up and bp_neg_but_rising
                         
-                        div_rsi = check_bullish_divergence(df_1d["Close"], rsi13)
-                        div_stoch = check_bullish_divergence(df_1d["Close"], stoch_k)
-                        div_er = check_bullish_divergence(df_1d["Close"], bear_p)
-                        div_er_bear = check_bearish_divergence(df_1d["Close"], bull_p)
+                        div_rsi, rsi_ago = check_bullish_divergence(df_1d["Close"], rsi13)
+                        div_stoch, stoch_ago = check_bullish_divergence(df_1d["Close"], stoch_k)
+                        div_er, er_ago = check_bullish_divergence(df_1d["Close"], bear_p)
+                        div_er_bear, er_bear_ago = check_bearish_divergence(df_1d["Close"], bull_p)
                         
                         adx_1d, pdi_1d, mdi_1d = adx_indicator(df_1d["High"], df_1d["Low"], df_1d["Close"])
                         adx_val_1d = adx_1d.iloc[-1]
@@ -3579,13 +3577,13 @@ with tab_triple:
                         c5.metric("ADX (14)", adx_sig_1d, f"ADX: {adx_val_1d:.1f} | +DI: {pdi_val_1d:.1f}")
                         
                         if div_rsi:
-                            st.success("🚀 RSI(13)'te **Pozitif Uyumsuzluk** tespit edildi!")
+                            st.success(f"🚀 RSI(13)'te **Pozitif Uyumsuzluk** tespit edildi! ({rsi_ago} bar önce)")
                         if div_stoch:
-                            st.success("🚀 Stokastik(5)'te **Pozitif Uyumsuzluk** tespit edildi!")
+                            st.success(f"🚀 Stokastik(5)'te **Pozitif Uyumsuzluk** tespit edildi! ({stoch_ago} bar önce)")
                         if div_er:
-                            st.success("🚀 Elder-Ray Bear Power'da **Pozitif Uyumsuzluk (Boğa Uyumsuzluğu)** tespit edildi!")
+                            st.success(f"🚀 Elder-Ray Bear Power'da **Pozitif Uyumsuzluk (Boğa Uyumsuzluğu)** tespit edildi! ({er_ago} bar önce)")
                         if div_er_bear:
-                            st.warning("⚠️ Elder-Ray Bull Power'da **Negatif Uyumsuzluk (Ayı Uyumsuzluğu)** tespit edildi!")
+                            st.warning(f"⚠️ Elder-Ray Bull Power'da **Negatif Uyumsuzluk (Ayı Uyumsuzluğu)** tespit edildi! ({er_bear_ago} bar önce)")
                         
                         if st.session_state.sentiment_summary:
                             st.info(f"**Haber Etkisi Modülü:** {st.session_state.sentiment_summary}")
