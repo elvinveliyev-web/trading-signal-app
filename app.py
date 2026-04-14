@@ -3064,8 +3064,10 @@ with tab_dash:
     c4.metric("Live/Last", f"{live_price:.2f}" if np.isfinite(live_price) else "N/A")
     c5.metric("Skor", f"{latest['SCORE']:.0f}/100")
     c6.metric("Sinyal", rec)
-    c7.metric("Piyasa Filtresi", "BULL ✅" if market_filter_ok else "BEAR ❌")
-    c8.metric("Haftalık Trend", "BULL ✅" if higher_tf_filter_ok else "BEAR ❌")
+    market_filter_now = checkpoints.get("Market Filter OK", True)
+    higher_tf_now = checkpoints.get("Higher TF Filter OK", True)
+    c7.metric("Piyasa Filtresi", "BULL ✅" if market_filter_now else "BEAR ❌")
+    c8.metric("Haftalık Trend", "BULL ✅" if higher_tf_now else "BEAR ❌")
     
     st.subheader("🕯️ Fiyat Aksiyonu (Price Action) Mum Formasyonları - Son Bar")
     
