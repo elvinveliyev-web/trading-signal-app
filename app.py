@@ -199,7 +199,6 @@ def elder_ray(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 1
     bear_power = low - e
     return e, bull_power, bear_power
 
-# GÜNCELLEME: Filtre kaldırıldı, yerine "kaç bar önce (bars_ago)" döndürülecek şekilde yapılandırıldı.
 def check_bullish_divergence(close: pd.Series, indicator: pd.Series, lookback: int = 30) -> Tuple[bool, int]:
     if len(close) < lookback: return False, 0
     c = close.tail(lookback)
@@ -221,7 +220,6 @@ def check_bullish_divergence(close: pd.Series, indicator: pd.Series, lookback: i
         pass
     return False, 0
 
-# GÜNCELLEME: Filtre kaldırıldı, yerine "kaç bar önce (bars_ago)" döndürülecek şekilde yapılandırıldı.
 def check_bearish_divergence(close: pd.Series, indicator: pd.Series, lookback: int = 30) -> Tuple[bool, int]:
     if len(close) < lookback: return False, 0
     c = close.tail(lookback)
@@ -495,60 +493,73 @@ def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
 
 
 # =============================
-# Market regime filters
+# Market regime filters (GÜNCELLENDİ: Zaman Serisi Döndürür)
 # =============================
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
-def get_spy_regime_ok() -> bool:
-    spy = yf.download("SPY", period="2y", interval="1d", auto_adjust=True, progress=False)
-    spy = _flatten_yf(spy)
-    if spy.empty or len(spy) < 260:
-        return True
-    spy["EMA200"] = ema(spy["Close"], 200)
-    last = spy.iloc[-1]
-    return bool(last["Close"] > last["EMA200"])
+def get_spy_regime_series() -> pd.Series:
+    try:
+        spy = yf.download("SPY", period="2y", interval="1d", auto_adjust=True, progress=False)
+        spy = _flatten_yf(spy)
+        if spy.empty or len(spy) < 260:
+            return pd.Series(dtype=bool)
+        spy["EMA200"] = ema(spy["Close"], 200)
+        return spy["Close"] > spy["EMA200"]
+    except Exception:
+        return pd.Series(dtype=bool)
 
 
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
-def get_bist_regime_ok() -> bool:
-    xu100 = yf.download("XU100.IS", period="2y", interval="1d", auto_adjust=True, progress=False)
-    xu100 = _flatten_yf(xu100)
-    if xu100.empty or len(xu100) < 200:
-        return True
-    xu100["EMA200"] = ema(xu100["Close"], 200)
-    last = xu100.iloc[-1]
-    return bool(last["Close"] > last["EMA200"])
+def get_bist_regime_series() -> pd.Series:
+    try:
+        xu100 = yf.download("XU100.IS", period="2y", interval="1d", auto_adjust=True, progress=False)
+        xu100 = _flatten_yf(xu100)
+        if xu100.empty or len(xu100) < 200:
+            return pd.Series(dtype=bool)
+        xu100["EMA200"] = ema(xu100["Close"], 200)
+        return xu100["Close"] > xu100["EMA200"]
+    except Exception:
+        return pd.Series(dtype=bool)
 
 
 # =============================
-# Higher timeframe trend filter
+# Higher timeframe trend filter (GÜNCELLENDİ: Zaman Serisi Döndürür)
 # =============================
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
-def get_higher_tf_trend(ticker: str, higher_tf_interval: str = "1wk", ema_period: int = 200) -> bool:
+def get_higher_tf_trend_series(ticker: str, higher_tf_interval: str = "1wk", ema_period: int = 200) -> pd.Series:
     try:
         df = yf.download(ticker, period="5y", interval=higher_tf_interval, auto_adjust=True, progress=False)
         df = _flatten_yf(df)
         if df.empty or len(df) < min(ema_period, 100):
-            return True
+            return pd.Series(dtype=bool)
         df["EMA"] = ema(df["Close"], ema_period)
-        last = df.iloc[-1]
-        return bool(last["Close"] > last["EMA"])
+        return df["Close"] > df["EMA"]
     except Exception:
-        return True
+        return pd.Series(dtype=bool)
 
 
 # =============================
-# Strategy: scoring + checkpoints
+# Strategy: scoring + checkpoints (GÜNCELLENDİ: Seriler ile Look-ahead önleme)
 # =============================
 def signal_with_checkpoints(
     df: pd.DataFrame,
     cfg: dict,
-    market_filter_ok: bool = True,
-    higher_tf_filter_ok: bool = True,
+    market_filter_series: pd.Series = None,
+    higher_tf_filter_series: pd.Series = None,
 ):
     df = df.copy()
 
     liq_ok = (df["Volume"] > df["VOL_SMA"]).fillna(False)
     trend_ok = (df["Close"] > df["EMA200"]) & (df["EMA50"] > df["EMA200"])
+
+    if market_filter_series is not None and not market_filter_series.empty:
+        aligned_market = market_filter_series.reindex(df.index).ffill().fillna(True)
+    else:
+        aligned_market = pd.Series(True, index=df.index)
+
+    if higher_tf_filter_series is not None and not higher_tf_filter_series.empty:
+        aligned_htf = higher_tf_filter_series.reindex(df.index).ffill().fillna(True)
+    else:
+        aligned_htf = pd.Series(True, index=df.index)
 
     rsi_ok = df["RSI"] > cfg["rsi_entry_level"]
     rsi_cross = (df["RSI"] > cfg["rsi_entry_level"]) & (df["RSI"].shift(1) <= cfg["rsi_entry_level"])
@@ -576,7 +587,10 @@ def signal_with_checkpoints(
     ).astype(float)
 
     entry_triggers = (rsi_cross.astype(int) + macd_turn.astype(int) + bb_break.astype(int)) >= 1
-    entry = trend_ok & vol_ok & liq_ok & entry_triggers & market_filter_ok & higher_tf_filter_ok
+    
+    # Burada aligned_market ve aligned_htf mevcut günün bilgisidir. Backtest tarafında shift(1) yapılacağı için
+    # geleceği görme hatası tamamen ortadan kalkar.
+    entry = trend_ok & vol_ok & liq_ok & entry_triggers & aligned_market & aligned_htf
 
     exit_ = (
         (df["Close"] < df["EMA50"])
@@ -591,8 +605,8 @@ def signal_with_checkpoints(
 
     last = df.iloc[-1]
     cp = {
-        "Market Filter OK": bool(market_filter_ok),
-        "Higher TF Filter OK": bool(higher_tf_filter_ok),
+        "Market Filter OK": bool(aligned_market.iloc[-1]),
+        "Higher TF Filter OK": bool(aligned_htf.iloc[-1]),
         "Liquidity (Volume > VolSMA)": bool(last["Volume"] > last["VOL_SMA"]) if pd.notna(last["VOL_SMA"]) else False,
         "Trend (Close>EMA200 & EMA50>EMA200)": bool((last["Close"] > last["EMA200"]) and (last["EMA50"] > last["EMA200"]))
         if pd.notna(last["EMA200"]) else False,
@@ -2170,6 +2184,9 @@ def load_data_cached(ticker: str, period: str, interval: str, end_date=None, for
 st.title("📈 FA→TA Trading Uygulaması + 🤖 AI Analiz")
 st.caption("Önce fundamental ile evreni daralt, sonra teknik analizle giriş/çıkış zamanla. Otomatik emir göndermez.")
 
+if "app_errors" not in st.session_state:
+    st.session_state.app_errors = []
+
 if "screener_df" not in st.session_state:
     st.session_state.screener_df = pd.DataFrame()
 if "selected_ticker" not in st.session_state:
@@ -2626,22 +2643,29 @@ if run_screener and use_fa:
         rows = []
         
         def fetch_one(tk):
-            tk_norm = normalize_ticker(tk, market)
-            f = fetch_fundamentals_generic(tk_norm, market=market)
-            score, breakdown, passed = fundamental_score_row(f, fa_mode, thresholds)
-            f["FA_score"] = score
-            f["FA_pass"] = passed
-            f["FA_ok_count"] = sum(1 for v in breakdown.values() if v.get("available") and v.get("ok"))
-            f["FA_coverage"] = sum(1 for v in breakdown.values() if v.get("available"))
-            return f
+            try:
+                tk_norm = normalize_ticker(tk, market)
+                f = fetch_fundamentals_generic(tk_norm, market=market)
+                score, breakdown, passed = fundamental_score_row(f, fa_mode, thresholds)
+                f["FA_score"] = score
+                f["FA_pass"] = passed
+                f["FA_ok_count"] = sum(1 for v in breakdown.values() if v.get("available") and v.get("ok"))
+                f["FA_coverage"] = sum(1 for v in breakdown.values() if v.get("available"))
+                return f
+            except Exception as e:
+                return {"ticker": tk, "error": f"{str(e)}"}
 
         with ThreadPoolExecutor(max_workers=10) as ex:
             futures = {ex.submit(fetch_one, tk): tk for tk in universe}
             for future in as_completed(futures):
                 try:
-                    rows.append(future.result())
-                except Exception:
-                    pass
+                    res = future.result()
+                    if "error" in res:
+                        st.session_state.app_errors.append(f"FA Hatası ({res.get('ticker','')}): {res['error']}")
+                    else:
+                        rows.append(res)
+                except Exception as e:
+                    st.session_state.app_errors.append(f"Thread Hatası: {str(e)}")
 
         sdf = pd.DataFrame(rows)
         if not sdf.empty:
@@ -2654,6 +2678,12 @@ if run_screener and use_fa:
 # If TA not ran yet: show screener and stop
 # -----------------------------
 if not st.session_state.ta_ran:
+    # Hata Gösterimi
+    if "app_errors" in st.session_state and st.session_state.app_errors:
+        for err in st.session_state.app_errors:
+            st.error(f"⚠️ {err}")
+        st.session_state.app_errors = []
+
     if use_fa and not st.session_state.screener_df.empty:
         st.subheader(f"🧾 Fundamental Screener Sonuçları ({market})")
         sdf = st.session_state.screener_df.copy()
@@ -2700,18 +2730,18 @@ if not st.session_state.ta_ran:
 # =============================
 # Run TA pipeline
 # =============================
-market_filter_ok = True
+market_filter_series = None
 if market == "USA" and use_spy_filter:
     with st.spinner("SPY rejimi kontrol ediliyor..."):
-        market_filter_ok = get_spy_regime_ok()
+        market_filter_series = get_spy_regime_series()
 elif market == "BIST" and use_bist_filter:
     with st.spinner("XU100 rejimi kontrol ediliyor..."):
-        market_filter_ok = get_bist_regime_ok()
+        market_filter_series = get_bist_regime_series()
 
-higher_tf_filter_ok = True
+higher_tf_filter_series = None
 if use_higher_tf_filter:
     with st.spinner("Haftalık trend kontrol ediliyor..."):
-        higher_tf_filter_ok = get_higher_tf_trend(ticker, higher_tf_interval="1wk", ema_period=200)
+        higher_tf_filter_series = get_higher_tf_trend_series(ticker, higher_tf_interval="1wk", ema_period=200)
 
 sentiment_summary = ""
 if use_sentiment and ai_on:
@@ -2739,11 +2769,13 @@ with st.spinner(f"Veri indiriliyor: {ticker}"):
     df_raw = load_data_cached(ticker, period, interval, end_date=custom_end_date, force_latest=force_latest_candle)
 
 if df_raw.empty:
+    st.session_state.app_errors.append(f"Veri çekilemedi: {ticker} (Bölünme/delist veya API engeli olabilir)")
     st.error(f"Veri gelmedi: {ticker}")
     st.stop()
 
 required_cols = {"Open", "High", "Low", "Close", "Volume"}
 if not required_cols.issubset(set(df_raw.columns)):
+    st.session_state.app_errors.append(f"Eksik veri sütunları var (Örn: Hacim verisi yok): {ticker}")
     st.error("Veri setinde gerekli OHLCV kolonları eksik.")
     st.stop()
 
@@ -2759,8 +2791,8 @@ benchmark_returns = benchmark_df["Close"].pct_change().dropna() if not benchmark
 df, checkpoints = signal_with_checkpoints(
     df,
     cfg,
-    market_filter_ok=market_filter_ok,
-    higher_tf_filter_ok=higher_tf_filter_ok,
+    market_filter_series=market_filter_series,
+    higher_tf_filter_series=higher_tf_filter_series,
 )
 latest = df.iloc[-1]
 
@@ -2962,6 +2994,11 @@ figs_for_report = {
 tab_dash, tab_export, tab_heatmap, tab_triple = st.tabs(["📊 Dashboard", "📄 Rapor (PDF/HTML)", "🔥 Sektörel Heatmap", "📺 3 Ekranlı Sistem"])
 
 with tab_dash:
+    if "app_errors" in st.session_state and st.session_state.app_errors:
+        for err in st.session_state.app_errors:
+            st.error(f"⚠️ {err}")
+        st.session_state.app_errors = []
+
     if interval == "1d" and not force_latest_candle and not df.empty:
         last_date = df.index[-1].date()
         today_date = datetime.date.today()
@@ -3363,15 +3400,18 @@ with tab_export:
     include_overbought = st.checkbox("Aşırı alım/spekülasyon analizini rapora ekle", value=True)
 
     with st.spinner("Fundamental + screener satırı hazırlanıyor..."):
-        f_single = fetch_fundamentals_generic(ticker, market=market)
-        f_score, f_breakdown, f_pass = fundamental_score_row(f_single, fa_mode, thresholds)
-        fa_eval = {
-            "mode": fa_mode, "score": f_score, "passed": f_pass,
-            "ok_cnt": sum(1 for v in f_breakdown.values() if v.get("available") and v.get("ok")),
-            "coverage": sum(1 for v in f_breakdown.values() if v.get("available")),
-        }
-        screener_row = find_screener_row(st.session_state.get("screener_df", pd.DataFrame()), ticker)
-        fa_row = merge_fa_row(screener_row, f_single, fa_eval)
+        try:
+            f_single = fetch_fundamentals_generic(ticker, market=market)
+            f_score, f_breakdown, f_pass = fundamental_score_row(f_single, fa_mode, thresholds)
+            fa_eval = {
+                "mode": fa_mode, "score": f_score, "passed": f_pass,
+                "ok_cnt": sum(1 for v in f_breakdown.values() if v.get("available") and v.get("ok")),
+                "coverage": sum(1 for v in f_breakdown.values() if v.get("available")),
+            }
+            screener_row = find_screener_row(st.session_state.get("screener_df", pd.DataFrame()), ticker)
+            fa_row = merge_fa_row(screener_row, f_single, fa_eval)
+        except Exception:
+            fa_row = None
 
     meta = {
         "market": market, "ticker": ticker, "interval": interval, "period": period,
@@ -3442,16 +3482,16 @@ with tab_triple:
             st.session_state.run_triple_screen = True
             
         if st.session_state.get("run_triple_screen", False):
-            with st.spinner("3 Ekran verileri hesaplanıyor (1W, 1D, 4H)..."):
+            with st.spinner("3 Ekran verileri hesaplanıyor (1W, 1D, 1H)..."):
                 
                 df_1w = load_data_cached(ticker, "2y", "1wk")
                 df_1d = load_data_cached(ticker, "1y", "1d", force_latest=force_latest_candle)
-                df_4h = load_data_cached(ticker, "60d", "4h")
+                df_1h = load_data_cached(ticker, "60d", "1h")
                 
-                if df_1w.empty or df_1d.empty or df_4h.empty:
+                if df_1w.empty or df_1d.empty or df_1h.empty:
                     st.error("Bazı zaman dilimleri için veri çekilemedi (Hisse senedi yeni olabilir veya API gecikmesi var).")
                 else:
-                    t_screen1, t_screen2, t_screen3 = st.tabs(["1. Ekran (Haftalık)", "2. Ekran (Günlük)", "3. Ekran (4 Saatlik)"])
+                    t_screen1, t_screen2, t_screen3 = st.tabs(["1. Ekran (Haftalık)", "2. Ekran (Günlük)", "3. Ekran (1 Saatlik)"])
                     
                     with t_screen1:
                         st.subheader("1. Ekran: Haftalık (Ana Trend)")
@@ -3544,7 +3584,7 @@ with tab_triple:
                         
                         er_ema, bull_p, bear_p = elder_ray(df_1d["High"], df_1d["Low"], df_1d["Close"], 13)
                         
-                        fi_al = (fi.iloc[-1] > fi_ema13.iloc[-1]) and (fi_ema2.iloc[-1] < 0)
+                        fi_al = (fi_ema2.iloc[-1] < 0) and (fi_ema2.iloc[-1] > fi_ema2.iloc[-2])
                         rsi_al = (rsi13.iloc[-1] < 30)
                         stoch_al = (stoch_k.iloc[-1] < 20)
                         
@@ -3570,7 +3610,7 @@ with tab_triple:
                             adx_sig_1d = "BEKLE (Zayıf Trend)"
 
                         c1, c2, c3, c4, c5 = st.columns(5)
-                        c1.metric("Kuvvet Endeksi (FI)", "AL" if fi_al else "BEKLE", "13 EMA Üstü & 2 EMA Negatif" if fi_al else "")
+                        c1.metric("Kuvvet Endeksi (FI)", "AL" if fi_al else "BEKLE", "2 EMA Negatif & Yukarı Dönüş" if fi_al else "")
                         c2.metric("RSI (13)", "AL" if rsi_al else "BEKLE", f"{rsi13.iloc[-1]:.1f}")
                         c3.metric("Stokastik (5)", "AL" if stoch_al else "BEKLE", f"{stoch_k.iloc[-1]:.1f}")
                         c4.metric("Elder-Ray", "AL" if er_al else "BEKLE")
@@ -3621,42 +3661,42 @@ with tab_triple:
                         st.plotly_chart(fig2_adx, use_container_width=True)
 
                     with t_screen3:
-                        st.subheader("3. Ekran: 4 Saatlik (Giriş / Çıkış ve Hedefler)")
+                        st.subheader("3. Ekran: 1 Saatlik (Giriş / Çıkış ve Hedefler)")
                         
-                        adx_4h, pdi_4h, mdi_4h = adx_indicator(df_4h["High"], df_4h["Low"], df_4h["Close"])
-                        adx_val_4h = adx_4h.iloc[-1]
-                        pdi_val_4h = pdi_4h.iloc[-1]
-                        mdi_val_4h = mdi_4h.iloc[-1]
+                        adx_1h, pdi_1h, mdi_1h = adx_indicator(df_1h["High"], df_1h["Low"], df_1h["Close"])
+                        adx_val_1h = adx_1h.iloc[-1]
+                        pdi_val_1h = pdi_1h.iloc[-1]
+                        mdi_val_1h = mdi_1h.iloc[-1]
                         
-                        if adx_val_4h >= 25 and pdi_val_4h > mdi_val_4h:
-                            adx_sig_4h = "AL (Güçlü Trend)"
-                        elif adx_val_4h >= 25 and mdi_val_4h > pdi_val_4h:
-                            adx_sig_4h = "SAT (Güçlü Trend)"
+                        if adx_val_1h >= 25 and pdi_val_1h > mdi_val_1h:
+                            adx_sig_1h = "AL (Güçlü Trend)"
+                        elif adx_val_1h >= 25 and mdi_val_1h > pdi_val_1h:
+                            adx_sig_1h = "SAT (Güçlü Trend)"
                         else:
-                            adx_sig_4h = "BEKLE (Zayıf Trend)"
+                            adx_sig_1h = "BEKLE (Zayıf Trend)"
                         
-                        st.metric("4 Saatlik ADX (14)", adx_sig_4h, f"ADX: {adx_val_4h:.1f} | +DI: {pdi_val_4h:.1f} | -DI: {mdi_val_4h:.1f}")
+                        st.metric("1 Saatlik ADX (14)", adx_sig_1h, f"ADX: {adx_val_1h:.1f} | +DI: {pdi_val_1h:.1f} | -DI: {mdi_val_1h:.1f}")
 
-                        ema_4h = ema(df_4h["Close"], 13)
-                        atr_4h = atr(df_4h["High"], df_4h["Low"], df_4h["Close"], 14)
-                        last_atr_4h = float(atr_4h.iloc[-1]) if not pd.isna(atr_4h.iloc[-1]) else 0.0
+                        ema_1h = ema(df_1h["Close"], 13)
+                        atr_1h = atr(df_1h["High"], df_1h["Low"], df_1h["Close"], 14)
+                        last_atr_1h = float(atr_1h.iloc[-1]) if not pd.isna(atr_1h.iloc[-1]) else 0.0
                         
-                        pens = ema_4h - df_4h["Low"]
+                        pens = ema_1h - df_1h["Low"]
                         pens_positive = pens[pens > 0]
                         avg_pen = float(pens_positive.mean()) if not pens_positive.empty else 0.0
                         
-                        up_pens = df_4h["High"] - ema_4h
+                        up_pens = df_1h["High"] - ema_1h
                         up_pens_positive = up_pens[up_pens > 0]
                         avg_up_pen = float(up_pens_positive.mean()) if not up_pens_positive.empty else 0.0
                         
-                        ema_today = float(ema_4h.iloc[-1])
-                        ema_yest = float(ema_4h.iloc[-2])
+                        ema_today = float(ema_1h.iloc[-1])
+                        ema_yest = float(ema_1h.iloc[-2])
                         ema_delta = ema_today - ema_yest
                         ema_est_tmrw = ema_today + ema_delta
                         
                         buy_level = ema_est_tmrw - avg_pen
                         
-                        stop_loss = buy_level - (1.5 * last_atr_4h) if last_atr_4h > 0 else buy_level * 0.98
+                        stop_loss = buy_level - (1.5 * last_atr_1h) if last_atr_1h > 0 else buy_level * 0.98
                         risk = buy_level - stop_loss
                         
                         target_1 = ema_est_tmrw + avg_up_pen
@@ -3664,7 +3704,7 @@ with tab_triple:
                         
                         st.markdown(f"""
                         **Hesaplamalar ve Strateji (Buy Limit & Hedefler):**
-                        * 📌 **Güncel EMA (13):** {ema_today:.2f} | **Yarınki Tahmini EMA:** {ema_est_tmrw:.2f}
+                        * 📌 **Güncel EMA (13):** {ema_today:.2f} | **Bir Sonraki Tahmini EMA:** {ema_est_tmrw:.2f}
                         * 🟢 **Önerilen Alış Seviyesi (Buy Limit): {buy_level:.2f}** *(Ortalama {avg_pen:.2f} düşüş penetrasyonu ile)*
                         * 🔴 **Zarar Kes (Stop-Loss): {stop_loss:.2f}** *(Alışın 1.5 ATR altı. Risk: {risk:.2f})*
                         * 🎯 **Hedef 1 (Kısa Vade): {target_1:.2f}** *(Simetrik Yükseliş Penetrasyonu)*
@@ -3672,11 +3712,11 @@ with tab_triple:
                         """)
                         
                         fig3 = go.Figure()
-                        fig3.add_trace(go.Candlestick(x=df_4h.index, open=df_4h["Open"], high=df_4h["High"], low=df_4h["Low"], close=df_4h["Close"], name="Price"))
-                        fig3.add_trace(go.Scatter(x=df_4h.index, y=ema_4h, name="EMA 13", line=dict(color='blue')))
+                        fig3.add_trace(go.Candlestick(x=df_1h.index, open=df_1h["Open"], high=df_1h["High"], low=df_1h["Low"], close=df_1h["Close"], name="Price"))
+                        fig3.add_trace(go.Scatter(x=df_1h.index, y=ema_1h, name="EMA 13", line=dict(color='blue')))
                         
-                        last_time = df_4h.index[-1]
-                        next_time = last_time + pd.Timedelta(hours=4)
+                        last_time = df_1h.index[-1]
+                        next_time = last_time + pd.Timedelta(hours=1)
                         fig3.add_trace(go.Scatter(x=[next_time], y=[ema_est_tmrw], mode='markers', marker=dict(size=10, color='orange'), name="Tahmini EMA"))
                         
                         fig3.add_hline(y=target_2, line_dash="dash", line_color="darkgreen", annotation_text="Hedef 2 (1:2 RR)", annotation_position="top left")
@@ -3684,18 +3724,18 @@ with tab_triple:
                         fig3.add_hline(y=buy_level, line_dash="dash", line_color="lime", annotation_text="Limit Alış Seviyesi", annotation_position="bottom left")
                         fig3.add_hline(y=stop_loss, line_dash="dot", line_color="red", annotation_text="Stop-Loss (1.5 ATR)", annotation_position="bottom left")
                         
-                        fig3.update_layout(title="4 Saatlik Giriş/Çıkış Stratejisi (Alış, Hedef ve Stop)", height=450, xaxis_rangeslider_visible=False)
+                        fig3.update_layout(title="1 Saatlik Giriş/Çıkış Stratejisi (Alış, Hedef ve Stop)", height=450, xaxis_rangeslider_visible=False)
                         st.plotly_chart(fig3, use_container_width=True)
 
                         fig3_adx = go.Figure()
-                        fig3_adx.add_trace(go.Scatter(x=df_4h.index, y=adx_4h, name="ADX", line=dict(color='black', width=2.5)))
-                        fig3_adx.add_trace(go.Scatter(x=df_4h.index, y=pdi_4h, name="+DI", line=dict(color='green')))
-                        fig3_adx.add_trace(go.Scatter(x=df_4h.index, y=mdi_4h, name="-DI", line=dict(color='red')))
+                        fig3_adx.add_trace(go.Scatter(x=df_1h.index, y=adx_1h, name="ADX", line=dict(color='black', width=2.5)))
+                        fig3_adx.add_trace(go.Scatter(x=df_1h.index, y=pdi_1h, name="+DI", line=dict(color='green')))
+                        fig3_adx.add_trace(go.Scatter(x=df_1h.index, y=mdi_1h, name="-DI", line=dict(color='red')))
                         
                         fig3_adx.add_hline(y=25, line_dash="dash", line_color="gray", annotation_text="Trend Başlangıcı (25)")
                         fig3_adx.add_hline(y=50, line_dash="dot", line_color="purple", annotation_text="Aşırı Güçlü Trend (50)")
                         fig3_adx.add_hrect(y0=25, y1=100, fillcolor="rgba(0, 255, 0, 0.05)", layer="below", line_width=0)
                         fig3_adx.add_hrect(y0=0, y1=25, fillcolor="rgba(255, 0, 0, 0.05)", layer="below", line_width=0)
                         
-                        fig3_adx.update_layout(title="4 Saatlik ADX ve Yön Göstergeleri (+DI / -DI)", height=250)
+                        fig3_adx.update_layout(title="1 Saatlik ADX ve Yön Göstergeleri (+DI / -DI)", height=250)
                         st.plotly_chart(fig3_adx, use_container_width=True)
