@@ -848,16 +848,21 @@ def backtest_long_only(
 
 
 # =============================
-# Fundamentals
+# Fundamentals (GÜNCELLENDİ: Thread-Safe Global Cache)
 # =============================
 def _fix_debt_to_equity(x: float) -> float:
     if pd.notna(x) and x > 10:
         return x / 100.0
     return x
 
+# Özel Global Önbellek (Streamlit'in ThreadPool çökmesini önlemek için)
+_FA_CACHE = {}
 
-@st.cache_data(ttl=12 * 3600, show_spinner=False)
 def fetch_fundamentals_generic(ticker: str, market: str) -> dict:
+    cache_key = f"{ticker}_{market}"
+    if cache_key in _FA_CACHE:
+        return _FA_CACHE[cache_key]
+
     t = yf.Ticker(ticker)
     try:
         info = t.info or {}
@@ -871,15 +876,25 @@ def fetch_fundamentals_generic(ticker: str, market: str) -> dict:
         "revenueGrowth", "earningsGrowth", "freeCashflow", "currentPrice"
     ]
     
-    out = {k: safe_float(info.get(k)) for k in FUND_KEYS}
+    try:
+        out = {k: safe_float(info.get(k)) for k in FUND_KEYS}
+        out["ticker"] = ticker
+        out["market"] = market
+        out["sector"] = info.get("sector", "")
+        out["industry"] = info.get("industry", "")
+        out["longName"] = info.get("longName", "") or info.get("shortName", "")
+        out["debtToEquity"] = _fix_debt_to_equity(out["debtToEquity"])
+    except Exception:
+        # Herhangi bir veri bozukluğunda patlamaması için güvenli geri dönüş
+        out = {k: np.nan for k in FUND_KEYS}
+        out["ticker"] = ticker
+        out["market"] = market
+        out["sector"] = ""
+        out["industry"] = ""
+        out["longName"] = ""
+        out["debtToEquity"] = np.nan
 
-    out["ticker"] = ticker
-    out["market"] = market
-    out["sector"] = info.get("sector", "")
-    out["industry"] = info.get("industry", "")
-    out["longName"] = info.get("longName", "") or info.get("shortName", "")
-    
-    out["debtToEquity"] = _fix_debt_to_equity(out["debtToEquity"])
+    _FA_CACHE[cache_key] = out
     return out
 
 
@@ -3228,14 +3243,17 @@ with tab_dash:
                 fa_row_local = None
                 if use_fa and not st.session_state.screener_df.empty:
                     screener_row = find_screener_row(st.session_state.screener_df, ticker)
-                    f_single = fetch_fundamentals_generic(ticker, market=market)
-                    f_score, f_breakdown, f_pass = fundamental_score_row(f_single, fa_mode, thresholds)
-                    fa_eval = {
-                        "mode": fa_mode, "score": f_score, "passed": f_pass,
-                        "ok_cnt": sum(1 for v in f_breakdown.values() if v.get("available") and v.get("ok")),
-                        "coverage": sum(1 for v in f_breakdown.values() if v.get("available")),
-                    }
-                    fa_row_local = merge_fa_row(screener_row, f_single, fa_eval)
+                    try:
+                        f_single = fetch_fundamentals_generic(ticker, market=market)
+                        f_score, f_breakdown, f_pass = fundamental_score_row(f_single, fa_mode, thresholds)
+                        fa_eval = {
+                            "mode": fa_mode, "score": f_score, "passed": f_pass,
+                            "ok_cnt": sum(1 for v in f_breakdown.values() if v.get("available") and v.get("ok")),
+                            "coverage": sum(1 for v in f_breakdown.values() if v.get("available")),
+                        }
+                        fa_row_local = merge_fa_row(screener_row, f_single, fa_eval)
+                    except Exception:
+                        pass
 
                 sector_comp = ""
                 if fa_row_local and fa_row_local.get("trailingPE") and fa_row_local.get("sector"):
@@ -3570,172 +3588,4 @@ with tab_triple:
                         elif ema_1d_11.iloc[-1] < ema_1d_22.iloc[-1] and last_close_1d < ema_1d_11.iloc[-1]:
                             ema1d_sig = "SAT"
                         else:
-                            ema1d_sig = "BEKLE"
-                        
-                        st.metric("Günlük EMA (11-22)", ema1d_sig, f"EMA11: {ema_1d_11.iloc[-1]:.2f} | EMA22: {ema_1d_22.iloc[-1]:.2f}")
-
-                        fi = force_index(df_1d["Close"], df_1d["Volume"])
-                        fi_ema13 = ema(fi, 13)
-                        fi_ema2 = ema(fi, 2)
-                        
-                        rsi13 = rsi(df_1d["Close"], 13)
-                        
-                        stoch_k, stoch_d = stochastic(df_1d["High"], df_1d["Low"], df_1d["Close"], k_period=5, d_period=3)
-                        
-                        er_ema, bull_p, bear_p = elder_ray(df_1d["High"], df_1d["Low"], df_1d["Close"], 13)
-                        
-                        fi_al = (fi_ema2.iloc[-1] < 0) and (fi_ema2.iloc[-1] > fi_ema2.iloc[-2])
-                        rsi_al = (rsi13.iloc[-1] < 30)
-                        stoch_al = (stoch_k.iloc[-1] < 20)
-                        
-                        er_ema_up = (er_ema.iloc[-1] > er_ema.iloc[-2])
-                        bp_neg_but_rising = (bear_p.iloc[-1] < 0) and (bear_p.iloc[-1] > bear_p.iloc[-2])
-                        er_al = er_ema_up and bp_neg_but_rising
-                        
-                        div_rsi, rsi_ago = check_bullish_divergence(df_1d["Close"], rsi13)
-                        div_stoch, stoch_ago = check_bullish_divergence(df_1d["Close"], stoch_k)
-                        div_er, er_ago = check_bullish_divergence(df_1d["Close"], bear_p)
-                        div_er_bear, er_bear_ago = check_bearish_divergence(df_1d["Close"], bull_p)
-                        
-                        adx_1d, pdi_1d, mdi_1d = adx_indicator(df_1d["High"], df_1d["Low"], df_1d["Close"])
-                        adx_val_1d = adx_1d.iloc[-1]
-                        pdi_val_1d = pdi_1d.iloc[-1]
-                        mdi_val_1d = mdi_1d.iloc[-1]
-                        
-                        if adx_val_1d >= 25 and pdi_val_1d > mdi_val_1d:
-                            adx_sig_1d = "AL (Güçlü Trend)"
-                        elif adx_val_1d >= 25 and mdi_val_1d > pdi_val_1d:
-                            adx_sig_1d = "SAT (Güçlü Trend)"
-                        else:
-                            adx_sig_1d = "BEKLE (Zayıf Trend)"
-
-                        c1, c2, c3, c4, c5 = st.columns(5)
-                        c1.metric("Kuvvet Endeksi (FI)", "AL" if fi_al else "BEKLE", "2 EMA Negatif & Yukarı Dönüş" if fi_al else "")
-                        c2.metric("RSI (13)", "AL" if rsi_al else "BEKLE", f"{rsi13.iloc[-1]:.1f}")
-                        c3.metric("Stokastik (5)", "AL" if stoch_al else "BEKLE", f"{stoch_k.iloc[-1]:.1f}")
-                        c4.metric("Elder-Ray", "AL" if er_al else "BEKLE")
-                        c5.metric("ADX (14)", adx_sig_1d, f"ADX: {adx_val_1d:.1f} | +DI: {pdi_val_1d:.1f}")
-                        
-                        if div_rsi:
-                            st.success(f"🚀 RSI(13)'te **Pozitif Uyumsuzluk** tespit edildi! ({rsi_ago} bar önce)")
-                        if div_stoch:
-                            st.success(f"🚀 Stokastik(5)'te **Pozitif Uyumsuzluk** tespit edildi! ({stoch_ago} bar önce)")
-                        if div_er:
-                            st.success(f"🚀 Elder-Ray Bear Power'da **Pozitif Uyumsuzluk (Boğa Uyumsuzluğu)** tespit edildi! ({er_ago} bar önce)")
-                        if div_er_bear:
-                            st.warning(f"⚠️ Elder-Ray Bull Power'da **Negatif Uyumsuzluk (Ayı Uyumsuzluğu)** tespit edildi! ({er_bear_ago} bar önce)")
-                        
-                        if st.session_state.sentiment_summary:
-                            st.info(f"**Haber Etkisi Modülü:** {st.session_state.sentiment_summary}")
-                            
-                        fig2_price = go.Figure()
-                        fig2_price.add_trace(go.Candlestick(x=df_1d.index, open=df_1d["Open"], high=df_1d["High"], low=df_1d["Low"], close=df_1d["Close"], name="Fiyat"))
-                        fig2_price.add_trace(go.Scatter(x=df_1d.index, y=ema_1d_11, name="EMA 11", line=dict(color='blue')))
-                        fig2_price.add_trace(go.Scatter(x=df_1d.index, y=ema_1d_22, name="EMA 22", line=dict(color='red')))
-                        fig2_price.update_layout(title="Günlük Fiyat ve EMA (11 & 22)", height=350, xaxis_rangeslider_visible=False)
-                        st.plotly_chart(fig2_price, use_container_width=True)
-                        
-                        fig2_fi = go.Figure()
-                        fig2_fi.add_trace(go.Scatter(x=df_1d.index, y=fi_ema13, name="FI 13 EMA", line=dict(color='orange')))
-                        fig2_fi.add_trace(go.Bar(x=df_1d.index, y=fi_ema2, name="FI 2 EMA", marker_color='gray'))
-                        fig2_fi.update_layout(title="Kuvvet Endeksi (Force Index)", height=250)
-                        st.plotly_chart(fig2_fi, use_container_width=True)
-                        
-                        fig2_er = go.Figure()
-                        fig2_er.add_trace(go.Bar(x=df_1d.index, y=bull_p, name="Bull Power", marker_color='green'))
-                        fig2_er.add_trace(go.Bar(x=df_1d.index, y=bear_p, name="Bear Power", marker_color='red'))
-                        fig2_er.update_layout(title="Elder-Ray (Bull & Bear Power)", height=250)
-                        st.plotly_chart(fig2_er, use_container_width=True)
-
-                        fig2_adx = go.Figure()
-                        fig2_adx.add_trace(go.Scatter(x=df_1d.index, y=adx_1d, name="ADX", line=dict(color='black', width=2.5)))
-                        fig2_adx.add_trace(go.Scatter(x=df_1d.index, y=pdi_1d, name="+DI", line=dict(color='green')))
-                        fig2_adx.add_trace(go.Scatter(x=df_1d.index, y=mdi_1d, name="-DI", line=dict(color='red')))
-                        
-                        fig2_adx.add_hline(y=25, line_dash="dash", line_color="gray", annotation_text="Trend Başlangıcı (25)")
-                        fig2_adx.add_hline(y=50, line_dash="dot", line_color="purple", annotation_text="Aşırı Güçlü Trend (50)")
-                        fig2_adx.add_hrect(y0=25, y1=100, fillcolor="rgba(0, 255, 0, 0.05)", layer="below", line_width=0)
-                        fig2_adx.add_hrect(y0=0, y1=25, fillcolor="rgba(255, 0, 0, 0.05)", layer="below", line_width=0)
-                        
-                        fig2_adx.update_layout(title="Günlük ADX ve Yön Göstergeleri (+DI / -DI)", height=250)
-                        st.plotly_chart(fig2_adx, use_container_width=True)
-
-                    with t_screen3:
-                        st.subheader("3. Ekran: 1 Saatlik (Giriş / Çıkış ve Hedefler)")
-                        
-                        adx_1h, pdi_1h, mdi_1h = adx_indicator(df_1h["High"], df_1h["Low"], df_1h["Close"])
-                        adx_val_1h = adx_1h.iloc[-1]
-                        pdi_val_1h = pdi_1h.iloc[-1]
-                        mdi_val_1h = mdi_1h.iloc[-1]
-                        
-                        if adx_val_1h >= 25 and pdi_val_1h > mdi_val_1h:
-                            adx_sig_1h = "AL (Güçlü Trend)"
-                        elif adx_val_1h >= 25 and mdi_val_1h > pdi_val_1h:
-                            adx_sig_1h = "SAT (Güçlü Trend)"
-                        else:
-                            adx_sig_1h = "BEKLE (Zayıf Trend)"
-                        
-                        st.metric("1 Saatlik ADX (14)", adx_sig_1h, f"ADX: {adx_val_1h:.1f} | +DI: {pdi_val_1h:.1f} | -DI: {mdi_val_1h:.1f}")
-
-                        ema_1h = ema(df_1h["Close"], 13)
-                        atr_1h = atr(df_1h["High"], df_1h["Low"], df_1h["Close"], 14)
-                        last_atr_1h = float(atr_1h.iloc[-1]) if not pd.isna(atr_1h.iloc[-1]) else 0.0
-                        
-                        pens = ema_1h - df_1h["Low"]
-                        pens_positive = pens[pens > 0]
-                        avg_pen = float(pens_positive.mean()) if not pens_positive.empty else 0.0
-                        
-                        up_pens = df_1h["High"] - ema_1h
-                        up_pens_positive = up_pens[up_pens > 0]
-                        avg_up_pen = float(up_pens_positive.mean()) if not up_pens_positive.empty else 0.0
-                        
-                        ema_today = float(ema_1h.iloc[-1])
-                        ema_yest = float(ema_1h.iloc[-2])
-                        ema_delta = ema_today - ema_yest
-                        ema_est_tmrw = ema_today + ema_delta
-                        
-                        buy_level = ema_est_tmrw - avg_pen
-                        
-                        stop_loss = buy_level - (1.5 * last_atr_1h) if last_atr_1h > 0 else buy_level * 0.98
-                        risk = buy_level - stop_loss
-                        
-                        target_1 = ema_est_tmrw + avg_up_pen
-                        target_2 = buy_level + (risk * 2)
-                        
-                        st.markdown(f"""
-                        **Hesaplamalar ve Strateji (Buy Limit & Hedefler):**
-                        * 📌 **Güncel EMA (13):** {ema_today:.2f} | **Bir Sonraki Tahmini EMA:** {ema_est_tmrw:.2f}
-                        * 🟢 **Önerilen Alış Seviyesi (Buy Limit): {buy_level:.2f}** *(Ortalama {avg_pen:.2f} düşüş penetrasyonu ile)*
-                        * 🔴 **Zarar Kes (Stop-Loss): {stop_loss:.2f}** *(Alışın 1.5 ATR altı. Risk: {risk:.2f})*
-                        * 🎯 **Hedef 1 (Kısa Vade): {target_1:.2f}** *(Simetrik Yükseliş Penetrasyonu)*
-                        * 🚀 **Hedef 2 (Trend - 1:2 RR): {target_2:.2f}** *(Riske edilen tutarın 2 katı kazanç)*
-                        """)
-                        
-                        fig3 = go.Figure()
-                        fig3.add_trace(go.Candlestick(x=df_1h.index, open=df_1h["Open"], high=df_1h["High"], low=df_1h["Low"], close=df_1h["Close"], name="Price"))
-                        fig3.add_trace(go.Scatter(x=df_1h.index, y=ema_1h, name="EMA 13", line=dict(color='blue')))
-                        
-                        last_time = df_1h.index[-1]
-                        next_time = last_time + pd.Timedelta(hours=1)
-                        fig3.add_trace(go.Scatter(x=[next_time], y=[ema_est_tmrw], mode='markers', marker=dict(size=10, color='orange'), name="Tahmini EMA"))
-                        
-                        fig3.add_hline(y=target_2, line_dash="dash", line_color="darkgreen", annotation_text="Hedef 2 (1:2 RR)", annotation_position="top left")
-                        fig3.add_hline(y=target_1, line_dash="dashdot", line_color="cyan", annotation_text="Hedef 1 (Simetrik)", annotation_position="top left")
-                        fig3.add_hline(y=buy_level, line_dash="dash", line_color="lime", annotation_text="Limit Alış Seviyesi", annotation_position="bottom left")
-                        fig3.add_hline(y=stop_loss, line_dash="dot", line_color="red", annotation_text="Stop-Loss (1.5 ATR)", annotation_position="bottom left")
-                        
-                        fig3.update_layout(title="1 Saatlik Giriş/Çıkış Stratejisi (Alış, Hedef ve Stop)", height=450, xaxis_rangeslider_visible=False)
-                        st.plotly_chart(fig3, use_container_width=True)
-
-                        fig3_adx = go.Figure()
-                        fig3_adx.add_trace(go.Scatter(x=df_1h.index, y=adx_1h, name="ADX", line=dict(color='black', width=2.5)))
-                        fig3_adx.add_trace(go.Scatter(x=df_1h.index, y=pdi_1h, name="+DI", line=dict(color='green')))
-                        fig3_adx.add_trace(go.Scatter(x=df_1h.index, y=mdi_1h, name="-DI", line=dict(color='red')))
-                        
-                        fig3_adx.add_hline(y=25, line_dash="dash", line_color="gray", annotation_text="Trend Başlangıcı (25)")
-                        fig3_adx.add_hline(y=50, line_dash="dot", line_color="purple", annotation_text="Aşırı Güçlü Trend (50)")
-                        fig3_adx.add_hrect(y0=25, y1=100, fillcolor="rgba(0, 255, 0, 0.05)", layer="below", line_width=0)
-                        fig3_adx.add_hrect(y0=0, y1=25, fillcolor="rgba(255, 0, 0, 0.05)", layer="below", line_width=0)
-                        
-                        fig3_adx.update_layout(title="1 Saatlik ADX ve Yön Göstergeleri (+DI / -DI)", height=250)
-                        st.plotly_chart(fig3_adx, use_container_width=True)
+                            ema1d_sig = "BEKLE
