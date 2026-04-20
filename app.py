@@ -2205,6 +2205,10 @@ if "sentiment_items" not in st.session_state:
 if "show_ema13_channel" not in st.session_state:
     st.session_state.show_ema13_channel = False
 
+if "divergence_scan_results" not in st.session_state:
+    st.session_state.divergence_scan_results = pd.DataFrame()
+
+
 if "ai_messages" in st.session_state:
     del st.session_state.ai_messages
 
@@ -2988,10 +2992,111 @@ figs_for_report = {
     "Equity Curve": fig_eq,
 }
 
+
+# =============================
+# DIVERGENCE SCAN HELPERS
+# =============================
+@st.cache_data(ttl=30 * 60, show_spinner=False)
+def scan_divergences_for_symbol(ticker: str, timeframe_name: str, force_latest_daily: bool = False) -> pd.DataFrame:
+    timeframe_map = {
+        "Aylık": ("10y", "1mo"),
+        "Haftalık": ("5y", "1wk"),
+        "Günlük": ("2y", "1d"),
+        "Saatlik": ("60d", "1h"),
+    }
+
+    period, interval = timeframe_map[timeframe_name]
+    df_scan = load_data_cached(
+        ticker,
+        period,
+        interval,
+        end_date=None,
+        force_latest=(force_latest_daily and interval == "1d"),
+    )
+
+    if df_scan is None or df_scan.empty or len(df_scan) < 35:
+        return pd.DataFrame()
+
+    required_cols = {"Open", "High", "Low", "Close", "Volume"}
+    if not required_cols.issubset(set(df_scan.columns)):
+        return pd.DataFrame()
+
+    close = df_scan["Close"]
+    high = df_scan["High"]
+    low = df_scan["Low"]
+    volume = df_scan["Volume"]
+
+    _, _, macd_hist = macd(close)
+    ema13 = ema(close, 13)
+    adx_line, _, _ = adx_indicator(high, low, close)
+    fi_line = ema(force_index(close, volume), 2)
+    rsi13_line = rsi(close, 13)
+    stoch_k, _ = stochastic(high, low, close, k_period=5, d_period=3)
+    _, bull_power, bear_power = elder_ray(high, low, close, 13)
+
+    results = []
+
+    def add_result(indicator_name: str, bull_tuple: Tuple[bool, int], bear_tuple: Tuple[bool, int]):
+        bull_found, bull_bars_ago = bull_tuple
+        bear_found, bear_bars_ago = bear_tuple
+
+        if bull_found:
+            results.append({
+                "Sembol": ticker,
+                "Zaman Dilimi": timeframe_name,
+                "Gösterge": indicator_name,
+                "Uyumsuzluk": "Pozitif",
+                "Kaç Bar Önce": int(bull_bars_ago),
+                "Son Kapanış": round(float(close.iloc[-1]), 4),
+            })
+
+        if bear_found:
+            results.append({
+                "Sembol": ticker,
+                "Zaman Dilimi": timeframe_name,
+                "Gösterge": indicator_name,
+                "Uyumsuzluk": "Negatif",
+                "Kaç Bar Önce": int(bear_bars_ago),
+                "Son Kapanış": round(float(close.iloc[-1]), 4),
+            })
+
+    add_result("MACD Histogram", check_bullish_divergence(close, macd_hist), check_bearish_divergence(close, macd_hist))
+    add_result("EMA", check_bullish_divergence(close, ema13), check_bearish_divergence(close, ema13))
+    add_result("ADX", check_bullish_divergence(close, adx_line), check_bearish_divergence(close, adx_line))
+    add_result("Kuvvet Endeksi (FI)", check_bullish_divergence(close, fi_line), check_bearish_divergence(close, fi_line))
+    add_result("RSI (13)", check_bullish_divergence(close, rsi13_line), check_bearish_divergence(close, rsi13_line))
+    add_result("Stokastik (5)", check_bullish_divergence(close, stoch_k), check_bearish_divergence(close, stoch_k))
+
+    elder_bull, elder_bull_ago = check_bullish_divergence(close, bear_power)
+    elder_bear, elder_bear_ago = check_bearish_divergence(close, bull_power)
+
+    if elder_bull:
+        results.append({
+            "Sembol": ticker,
+            "Zaman Dilimi": timeframe_name,
+            "Gösterge": "Elder-Ray",
+            "Uyumsuzluk": "Pozitif",
+            "Kaç Bar Önce": int(elder_bull_ago),
+            "Son Kapanış": round(float(close.iloc[-1]), 4),
+        })
+
+    if elder_bear:
+        results.append({
+            "Sembol": ticker,
+            "Zaman Dilimi": timeframe_name,
+            "Gösterge": "Elder-Ray",
+            "Uyumsuzluk": "Negatif",
+            "Kaç Bar Önce": int(elder_bear_ago),
+            "Son Kapanış": round(float(close.iloc[-1]), 4),
+        })
+
+    return pd.DataFrame(results)
+
+
 # =============================
 # Tabs
 # =============================
-tab_dash, tab_export, tab_heatmap, tab_triple = st.tabs(["📊 Dashboard", "📄 Rapor (PDF/HTML)", "🔥 Sektörel Heatmap", "📺 3 Ekranlı Sistem"])
+tab_dash, tab_export, tab_heatmap, tab_scan, tab_triple = st.tabs(["📊 Dashboard", "📄 Rapor (PDF/HTML)", "🔥 Sektörel Heatmap", "🔍 Tarama", "📺 3 Ekranlı Sistem"])
 
 with tab_dash:
     if "app_errors" in st.session_state and st.session_state.app_errors:
@@ -3471,6 +3576,116 @@ with tab_export:
 # =============================
 # TRIPLE SCREEN TAB
 # =============================
+
+with tab_scan:
+    st.header("🔍 Uyumsuzluk Tarama Sekmesi")
+    st.caption("Seçilen hisselerde aylık, haftalık, günlük ve saatlik bazda MACD Histogram, EMA, ADX, Kuvvet Endeksi (FI), RSI (13), Stokastik (5) ve Elder-Ray uyumsuzluklarını listeler.")
+
+    if not st.session_state.ta_ran:
+        st.info("Sol menüden 'Teknik Analizi Çalıştır' butonuna basarak sistemi aktifleştirmelisin.")
+    else:
+        if not st.session_state.screener_df.empty and "ticker" in st.session_state.screener_df.columns:
+            scan_symbol_options_raw = st.session_state.screener_df["ticker"].astype(str).str.upper().tolist()
+        else:
+            scan_symbol_options_raw = [str(x).upper() for x in universe]
+
+        if ticker:
+            scan_symbol_options_raw = [ticker] + scan_symbol_options_raw
+
+        scan_symbol_options = []
+        seen_scan_symbols = set()
+        for opt in scan_symbol_options_raw:
+            naked_opt = naked_ticker(opt)
+            if naked_opt not in seen_scan_symbols:
+                seen_scan_symbols.add(naked_opt)
+                scan_symbol_options.append(opt)
+
+        default_scan_symbols = [ticker] if ticker else (scan_symbol_options[:1] if scan_symbol_options else [])
+        selected_scan_symbols = st.multiselect(
+            "Taranacak Hisseler",
+            options=scan_symbol_options,
+            default=default_scan_symbols,
+            help="Uyumsuzluk taraması yapılacak hisseleri seçin.",
+        )
+
+        timeframe_options = ["Aylık", "Haftalık", "Günlük", "Saatlik"]
+        selected_scan_timeframes = st.multiselect(
+            "Zaman Dilimleri",
+            options=timeframe_options,
+            default=timeframe_options,
+            help="Uyumsuzlukların hangi zaman dilimlerinde taranacağını seçin.",
+        )
+
+        scan_btn_col1, scan_btn_col2 = st.columns(2)
+
+        if scan_btn_col1.button("🔎 Uyumsuzluk Taramasını Çalıştır", key="run_divergence_scan", use_container_width=True):
+            if not selected_scan_symbols:
+                st.warning("Lütfen en az bir hisse seçin.")
+            elif not selected_scan_timeframes:
+                st.warning("Lütfen en az bir zaman dilimi seçin.")
+            else:
+                scan_frames = []
+                with st.spinner("Uyumsuzluk taraması yapılıyor..."):
+                    for scan_symbol in selected_scan_symbols:
+                        scan_symbol_norm = normalize_ticker(scan_symbol, market)
+                        for timeframe_name in selected_scan_timeframes:
+                            scan_df = scan_divergences_for_symbol(
+                                scan_symbol_norm,
+                                timeframe_name,
+                                force_latest_daily=force_latest_candle,
+                            )
+                            if not scan_df.empty:
+                                scan_frames.append(scan_df)
+
+                if scan_frames:
+                    scan_results_df = pd.concat(scan_frames, ignore_index=True)
+                    scan_results_df = scan_results_df.sort_values(
+                        ["Zaman Dilimi", "Sembol", "Uyumsuzluk", "Gösterge", "Kaç Bar Önce"],
+                        ascending=[True, True, True, True, True],
+                    ).reset_index(drop=True)
+                    st.session_state.divergence_scan_results = scan_results_df
+                else:
+                    st.session_state.divergence_scan_results = pd.DataFrame(
+                        columns=["Sembol", "Zaman Dilimi", "Gösterge", "Uyumsuzluk", "Kaç Bar Önce", "Son Kapanış"]
+                    )
+
+        if scan_btn_col2.button("Sonuçları Temizle", key="clear_divergence_scan", use_container_width=True):
+            st.session_state.divergence_scan_results = pd.DataFrame()
+
+        scan_results = st.session_state.divergence_scan_results.copy()
+
+        if scan_results.empty:
+            st.info("Henüz sonuç yok. Hisse ve zaman dilimlerini seçip taramayı başlatın.")
+        else:
+            st.success(f"Toplam {len(scan_results)} uyumsuzluk bulundu.")
+            st.dataframe(scan_results, use_container_width=True, height=260)
+
+            display_timeframes = [tf for tf in timeframe_options if tf in scan_results["Zaman Dilimi"].unique().tolist()]
+            if display_timeframes:
+                tf_tabs = st.tabs(display_timeframes)
+                for tf_name, tf_tab in zip(display_timeframes, tf_tabs):
+                    with tf_tab:
+                        tf_df = scan_results[scan_results["Zaman Dilimi"] == tf_name].copy()
+
+                        pos_df = tf_df[tf_df["Uyumsuzluk"] == "Pozitif"].copy()
+                        neg_df = tf_df[tf_df["Uyumsuzluk"] == "Negatif"].copy()
+
+                        scan_res_col1, scan_res_col2 = st.columns(2)
+
+                        with scan_res_col1:
+                            st.subheader("Pozitif Uyumsuzluklar")
+                            if pos_df.empty:
+                                st.info("Pozitif uyumsuzluk bulunmadı.")
+                            else:
+                                st.dataframe(pos_df, use_container_width=True, height=320)
+
+                        with scan_res_col2:
+                            st.subheader("Negatif Uyumsuzluklar")
+                            if neg_df.empty:
+                                st.info("Negatif uyumsuzluk bulunmadı.")
+                            else:
+                                st.dataframe(neg_df, use_container_width=True, height=320)
+
 with tab_triple:
     st.header("📺 Üçlü Ekran Trading Sistemi (Triple Screen)")
     st.caption("Dr. Alexander Elder'in 3 Ekranlı sistemine dayanan, trend, osilatör ve giriş seviyesi analizleri.")
