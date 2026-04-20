@@ -3118,9 +3118,128 @@ def scan_divergences_for_symbol(ticker: str, timeframe_name: str, force_latest_d
 
 
 # =============================
+# FUTURE PRICE HELPERS
+# =============================
+def build_future_price_features(df: pd.DataFrame) -> pd.DataFrame:
+    feat = pd.DataFrame(index=df.index)
+
+    base_cols = [
+        "Open", "High", "Low", "Close", "Volume", "EMA50", "EMA200", "RSI",
+        "MACD", "MACD_signal", "MACD_hist", "BB_mid", "BB_upper", "BB_lower",
+        "ATR", "ATR_PCT", "OBV", "OBV_EMA", "VOL_RATIO", "BB_WIDTH"
+    ]
+    for col in base_cols:
+        if col in df.columns:
+            feat[col] = pd.to_numeric(df[col], errors="coerce")
+
+    feat["RET_1"] = pd.to_numeric(df["Close"].pct_change(1), errors="coerce")
+    feat["RET_3"] = pd.to_numeric(df["Close"].pct_change(3), errors="coerce")
+    feat["RET_5"] = pd.to_numeric(df["Close"].pct_change(5), errors="coerce")
+    feat["VOL_CHG_1"] = pd.to_numeric(df["Volume"].pct_change(1), errors="coerce")
+    feat["CLOSE_OPEN_PCT"] = pd.to_numeric((df["Close"] / df["Open"] - 1.0).replace([np.inf, -np.inf], np.nan), errors="coerce")
+    feat["HIGH_LOW_PCT"] = pd.to_numeric((df["High"] / df["Low"] - 1.0).replace([np.inf, -np.inf], np.nan), errors="coerce")
+
+    lag_cols = ["Close", "Volume", "RSI", "MACD_hist", "ATR", "OBV"]
+    for lag in [1, 2, 3, 5]:
+        for col in lag_cols:
+            if col in df.columns:
+                feat[f"{col}_lag_{lag}"] = pd.to_numeric(df[col].shift(lag), errors="coerce")
+
+    feat = feat.replace([np.inf, -np.inf], np.nan)
+    return feat
+
+
+def future_price_ml_forecast(df: pd.DataFrame, horizon_bars: int) -> Dict[str, Any]:
+    if df is None or df.empty:
+        return {"error": "Tahmin için veri yok."}
+
+    if horizon_bars < 1:
+        return {"error": "Tahmin ufku en az 1 bar olmalıdır."}
+
+    features = build_future_price_features(df)
+    target = pd.to_numeric(df["Close"].shift(-horizon_bars), errors="coerce").rename("TARGET")
+
+    dataset = pd.concat([features, target], axis=1).replace([np.inf, -np.inf], np.nan).dropna()
+    if dataset.empty:
+        return {"error": "Model veri seti oluşturulamadı."}
+
+    min_rows_needed = max(80, horizon_bars * 8)
+    if len(dataset) < min_rows_needed:
+        return {"error": f"Yeterli eğitim verisi yok. En az yaklaşık {min_rows_needed} satır gerekli, mevcut: {len(dataset)}."}
+
+    feature_cols = [c for c in dataset.columns if c != "TARGET"]
+    X_all = dataset[feature_cols].astype(float).values
+    y_all = dataset["TARGET"].astype(float).values
+
+    test_size = min(max(20, len(dataset) // 5), 60)
+    split_idx = len(dataset) - test_size
+    if split_idx < 40:
+        return {"error": "Eğitim/test ayrımı için yeterli veri yok."}
+
+    X_train = X_all[:split_idx]
+    y_train = y_all[:split_idx]
+    X_test = X_all[split_idx:]
+    y_test = y_all[split_idx:]
+
+    mu = np.nanmean(X_train, axis=0)
+    sigma = np.nanstd(X_train, axis=0)
+    sigma = np.where((sigma == 0) | (~np.isfinite(sigma)), 1.0, sigma)
+
+    X_train_s = (X_train - mu) / sigma
+    X_test_s = (X_test - mu) / sigma
+
+    X_train_i = np.column_stack([np.ones(len(X_train_s)), X_train_s])
+    X_test_i = np.column_stack([np.ones(len(X_test_s)), X_test_s])
+
+    alpha = 1.0
+    reg = np.eye(X_train_i.shape[1])
+    reg[0, 0] = 0.0
+    beta = np.linalg.pinv(X_train_i.T @ X_train_i + alpha * reg) @ (X_train_i.T @ y_train)
+
+    y_pred_test = X_test_i @ beta
+    mae = float(np.mean(np.abs(y_pred_test - y_test))) if len(y_test) > 0 else np.nan
+    rmse = float(np.sqrt(np.mean((y_pred_test - y_test) ** 2))) if len(y_test) > 0 else np.nan
+    mape = float(np.mean(np.abs((y_pred_test - y_test) / np.where(y_test == 0, np.nan, y_test))) * 100) if len(y_test) > 0 else np.nan
+
+    current_close_test = df.loc[dataset.index[split_idx:], "Close"].astype(float).values
+    actual_dir = np.sign(y_test - current_close_test)
+    pred_dir = np.sign(y_pred_test - current_close_test)
+    direction_acc = float(np.mean(actual_dir == pred_dir) * 100) if len(actual_dir) > 0 else np.nan
+
+    latest_features = features.replace([np.inf, -np.inf], np.nan).dropna()
+    if latest_features.empty:
+        return {"error": "Son bar için özellikler oluşturulamadı."}
+
+    latest_row = latest_features.iloc[[-1]][feature_cols].astype(float).values
+    latest_row_s = (latest_row - mu) / sigma
+    latest_row_i = np.column_stack([np.ones(len(latest_row_s)), latest_row_s])
+    predicted_price = float((latest_row_i @ beta)[0])
+
+    last_index = latest_features.index[-1]
+    current_price = float(df.loc[last_index, "Close"])
+    delta_pct = float((predicted_price / current_price - 1.0) * 100.0) if current_price != 0 else np.nan
+
+    recent_actual = df["Close"].tail(120).copy()
+    return {
+        "error": None,
+        "predicted_price": predicted_price,
+        "current_price": current_price,
+        "delta_pct": delta_pct,
+        "horizon_bars": int(horizon_bars),
+        "train_rows": int(len(X_train)),
+        "test_rows": int(len(X_test)),
+        "mae": mae,
+        "rmse": rmse,
+        "mape": mape,
+        "direction_acc": direction_acc,
+        "last_feature_index": str(last_index),
+        "recent_actual": recent_actual,
+    }
+
+# =============================
 # Tabs
 # =============================
-tab_dash, tab_export, tab_heatmap, tab_triple, tab_scan = st.tabs(["📊 Dashboard", "📄 Rapor (PDF/HTML)", "🔥 Sektörel Heatmap", "📺 3 Ekranlı Sistem", "🔍 Tarama"])
+tab_dash, tab_export, tab_heatmap, tab_triple, tab_scan, tab_future = st.tabs(["📊 Dashboard", "📄 Rapor (PDF/HTML)", "🔥 Sektörel Heatmap", "📺 3 Ekranlı Sistem", "🔍 Tarama", "🔮 Future Price"])
 
 with tab_dash:
     if "app_errors" in st.session_state and st.session_state.app_errors:
@@ -3994,3 +4113,65 @@ with tab_triple:
                         
                         fig3_adx.update_layout(title="1 Saatlik ADX ve Yön Göstergeleri (+DI / -DI)", height=250)
                         st.plotly_chart(fig3_adx, use_container_width=True)
+
+
+with tab_future:
+    st.header("🔮 Future Price")
+    st.caption("Makine öğrenmesi tabanlı regresyon ile seçili sembolün mevcut zaman diliminde ileri bar kapanış fiyat tahmini üretir.")
+
+    if not st.session_state.ta_ran:
+        st.info("Sol menüden 'Teknik Analizi Çalıştır' butonuna basarak sistemi aktifleştirmelisin.")
+    else:
+        st.markdown(f"**Aktif sembol:** `{ticker}`  |  **Aktif zaman dilimi:** `{interval}`  |  **Aktif periyot:** `{period}`")
+        future_horizon = st.number_input(
+            "Kaç bar/gün sonrası tahmin yapılsın?",
+            min_value=1,
+            max_value=250,
+            value=5,
+            step=1,
+            help="Mevcut seçili zaman dilimine göre çalışır. Örn. interval 1d ise 5 = 5 gün/bar sonrası kapanış tahmini.",
+            key="future_horizon_input",
+        )
+
+        run_future_price = st.button("🤖 Future Price Tahmini Yap", key="run_future_price", use_container_width=True)
+
+        if run_future_price:
+            with st.spinner("Makine öğrenmesi modeli eğitiliyor ve tahmin üretiliyor..."):
+                fp_result = future_price_ml_forecast(df, int(future_horizon))
+
+            if fp_result.get("error"):
+                st.warning(fp_result["error"])
+            else:
+                fp_c1, fp_c2, fp_c3, fp_c4 = st.columns(4)
+                fp_c1.metric("Mevcut Kapanış", f"{fp_result['current_price']:.2f}")
+                fp_c2.metric(f"{int(future_horizon)} Bar Sonrası Tahmin", f"{fp_result['predicted_price']:.2f}")
+                fp_c3.metric("Tahmini Değişim", f"{fp_result['delta_pct']:+.2f}%")
+                fp_c4.metric("Yön Doğruluğu", f"{fp_result['direction_acc']:.1f}%" if pd.notna(fp_result['direction_acc']) else "N/A")
+
+                fp_m1, fp_m2, fp_m3, fp_m4 = st.columns(4)
+                fp_m1.metric("MAE", f"{fp_result['mae']:.4f}" if pd.notna(fp_result['mae']) else "N/A")
+                fp_m2.metric("RMSE", f"{fp_result['rmse']:.4f}" if pd.notna(fp_result['rmse']) else "N/A")
+                fp_m3.metric("MAPE", f"%{fp_result['mape']:.2f}" if pd.notna(fp_result['mape']) else "N/A")
+                fp_m4.metric("Eğitim/Test Satırı", f"{fp_result['train_rows']}/{fp_result['test_rows']}")
+
+                future_fig = go.Figure()
+                recent_actual = fp_result.get("recent_actual")
+                if recent_actual is not None and not recent_actual.empty:
+                    future_fig.add_trace(go.Scatter(x=recent_actual.index, y=recent_actual.values, name="Geçmiş Kapanış", line=dict(color="royalblue", width=2)))
+                    last_x = recent_actual.index[-1]
+                    future_fig.add_trace(go.Scatter(
+                        x=[last_x],
+                        y=[fp_result['predicted_price']],
+                        mode="markers",
+                        name="Tahmini Gelecek Fiyat",
+                        marker=dict(size=14, color="darkorange", symbol="diamond"),
+                    ))
+                    future_fig.add_hline(y=fp_result['predicted_price'], line_dash="dash", line_color="darkorange", annotation_text=f"Tahmin: {fp_result['predicted_price']:.2f}")
+                    future_fig.update_layout(height=420, title=f"Future Price Tahmini ({int(future_horizon)} bar sonrası)", xaxis_title="Tarih", yaxis_title="Fiyat")
+                    st.plotly_chart(future_fig, use_container_width=True)
+
+                st.info(
+                    f"Model son kullanılabilir barı `{fp_result['last_feature_index']}` üzerinden tahmin üretti. "
+                    "Bu çıktı eğitim amaçlıdır; kesin fiyat bilgisi değildir."
+                )
+
