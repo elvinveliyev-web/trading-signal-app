@@ -2131,6 +2131,10 @@ def load_data_cached(ticker: str, period: str, interval: str, end_date=None, for
             baslangic_obj = end_date - datetime.timedelta(days=365)
         elif period == "2y":
             baslangic_obj = end_date - datetime.timedelta(days=730)
+        elif period == "5y":
+            baslangic_obj = end_date - datetime.timedelta(days=365 * 5)
+        elif period == "10y":
+            baslangic_obj = end_date - datetime.timedelta(days=365 * 10)
         else:
             baslangic_obj = end_date - datetime.timedelta(days=730)
             
@@ -2996,6 +3000,24 @@ figs_for_report = {
 # =============================
 # DIVERGENCE SCAN HELPERS
 # =============================
+def get_scan_reference_end_date(timeframe_name: str):
+    today = datetime.date.today()
+
+    if timeframe_name == "Aylık":
+        first_day_of_current_month = today.replace(day=1)
+        return first_day_of_current_month - datetime.timedelta(days=1)
+
+    if timeframe_name == "Haftalık":
+        days_since_friday = (today.weekday() - 4) % 7
+        if days_since_friday == 0:
+            days_since_friday = 7
+        return today - datetime.timedelta(days=days_since_friday)
+
+    if timeframe_name == "Günlük":
+        return today - datetime.timedelta(days=1)
+
+    return None
+
 @st.cache_data(ttl=30 * 60, show_spinner=False)
 def scan_divergences_for_symbol(ticker: str, timeframe_name: str, force_latest_daily: bool = False) -> pd.DataFrame:
     timeframe_map = {
@@ -3006,12 +3028,14 @@ def scan_divergences_for_symbol(ticker: str, timeframe_name: str, force_latest_d
     }
 
     period, interval = timeframe_map[timeframe_name]
+    scan_end_date = get_scan_reference_end_date(timeframe_name)
+
     df_scan = load_data_cached(
         ticker,
         period,
         interval,
-        end_date=None,
-        force_latest=(force_latest_daily and interval == "1d"),
+        end_date=scan_end_date,
+        force_latest=False,
     )
 
     if df_scan is None or df_scan.empty or len(df_scan) < 35:
@@ -3096,7 +3120,7 @@ def scan_divergences_for_symbol(ticker: str, timeframe_name: str, force_latest_d
 # =============================
 # Tabs
 # =============================
-tab_dash, tab_export, tab_heatmap, tab_scan, tab_triple = st.tabs(["📊 Dashboard", "📄 Rapor (PDF/HTML)", "🔥 Sektörel Heatmap", "🔍 Tarama", "📺 3 Ekranlı Sistem"])
+tab_dash, tab_export, tab_heatmap, tab_triple, tab_scan = st.tabs(["📊 Dashboard", "📄 Rapor (PDF/HTML)", "🔥 Sektörel Heatmap", "📺 3 Ekranlı Sistem", "🔍 Tarama"])
 
 with tab_dash:
     if "app_errors" in st.session_state and st.session_state.app_errors:
@@ -3579,7 +3603,9 @@ with tab_export:
 
 with tab_scan:
     st.header("🔍 Uyumsuzluk Tarama Sekmesi")
-    st.caption("Seçilen hisselerde aylık, haftalık, günlük ve saatlik bazda MACD Histogram, EMA, ADX, Kuvvet Endeksi (FI), RSI (13), Stokastik (5) ve Elder-Ray uyumsuzluklarını listeler.")
+    st.caption("Seçilen hisselerde aylık, haftalık, günlük ve saatlik bazda MACD Histogram, EMA, ADX, Kuvvet Endeksi (FI), RSI (13), Stokastik (5) ve Elder-Ray uyumsuzluklarını listeler. Aylık, haftalık ve günlük tarama kapanmış barlara göre çalışır.")
+
+    timeframe_options = ["Aylık", "Haftalık", "Günlük", "Saatlik"]
 
     if not st.session_state.ta_ran:
         st.info("Sol menüden 'Teknik Analizi Çalıştır' butonuna basarak sistemi aktifleştirmelisin.")
@@ -3601,24 +3627,41 @@ with tab_scan:
                 scan_symbol_options.append(opt)
 
         default_scan_symbols = [ticker] if ticker else (scan_symbol_options[:1] if scan_symbol_options else [])
-        selected_scan_symbols = st.multiselect(
-            "Taranacak Hisseler",
-            options=scan_symbol_options,
-            default=default_scan_symbols,
-            help="Uyumsuzluk taraması yapılacak hisseleri seçin.",
-        )
 
-        timeframe_options = ["Aylık", "Haftalık", "Günlük", "Saatlik"]
-        selected_scan_timeframes = st.multiselect(
-            "Zaman Dilimleri",
-            options=timeframe_options,
-            default=timeframe_options,
-            help="Uyumsuzlukların hangi zaman dilimlerinde taranacağını seçin.",
-        )
+        with st.form("divergence_scan_form"):
+            st.markdown("**Zaman Dilimleri**")
+            tf_select_all = st.checkbox("Tüm zaman dilimlerini seç", value=True)
+            tf_cols = st.columns(4)
+            tf_checks = {}
+            for i, tf_name in enumerate(timeframe_options):
+                with tf_cols[i % 4]:
+                    tf_checks[tf_name] = st.checkbox(tf_name, value=True, key=f"scan_tf_{tf_name}")
 
-        scan_btn_col1, scan_btn_col2 = st.columns(2)
+            st.markdown("**Taranacak Hisseler**")
+            sym_select_all = st.checkbox("Tüm hisseleri seç", value=False)
+            sym_cols = st.columns(4)
+            sym_checks = {}
+            default_symbol_set = set(default_scan_symbols)
 
-        if scan_btn_col1.button("🔎 Uyumsuzluk Taramasını Çalıştır", key="run_divergence_scan", use_container_width=True):
+            for i, sym in enumerate(scan_symbol_options):
+                with sym_cols[i % 4]:
+                    sym_checks[sym] = st.checkbox(
+                        sym,
+                        value=(sym in default_symbol_set),
+                        key=f"scan_sym_{sym}",
+                    )
+
+            run_scan_submitted = st.form_submit_button("🔎 Uyumsuzluk Taramasını Çalıştır", use_container_width=True)
+
+        clear_scan_results = st.button("Sonuçları Temizle", key="clear_divergence_scan", use_container_width=True)
+
+        if clear_scan_results:
+            st.session_state.divergence_scan_results = pd.DataFrame()
+
+        if run_scan_submitted:
+            selected_scan_timeframes = timeframe_options.copy() if tf_select_all else [tf for tf, is_checked in tf_checks.items() if is_checked]
+            selected_scan_symbols = scan_symbol_options.copy() if sym_select_all else [sym for sym, is_checked in sym_checks.items() if is_checked]
+
             if not selected_scan_symbols:
                 st.warning("Lütfen en az bir hisse seçin.")
             elif not selected_scan_timeframes:
@@ -3632,7 +3675,7 @@ with tab_scan:
                             scan_df = scan_divergences_for_symbol(
                                 scan_symbol_norm,
                                 timeframe_name,
-                                force_latest_daily=force_latest_candle,
+                                force_latest_daily=False,
                             )
                             if not scan_df.empty:
                                 scan_frames.append(scan_df)
@@ -3648,9 +3691,6 @@ with tab_scan:
                     st.session_state.divergence_scan_results = pd.DataFrame(
                         columns=["Sembol", "Zaman Dilimi", "Gösterge", "Uyumsuzluk", "Kaç Bar Önce", "Son Kapanış"]
                     )
-
-        if scan_btn_col2.button("Sonuçları Temizle", key="clear_divergence_scan", use_container_width=True):
-            st.session_state.divergence_scan_results = pd.DataFrame()
 
         scan_results = st.session_state.divergence_scan_results.copy()
 
