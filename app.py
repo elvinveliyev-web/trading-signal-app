@@ -17,6 +17,8 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 import requests
+from sklearn.linear_model import Ridge, LinearRegression
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 
 # =============================
 # OPTIONAL PDF SUPPORT (ReportLab)
@@ -3120,6 +3122,14 @@ def scan_divergences_for_symbol(ticker: str, timeframe_name: str, force_latest_d
 # =============================
 # FUTURE PRICE HELPERS
 # =============================
+FUTURE_PRICE_MODEL_NAMES = [
+    "Ridge",
+    "Linear Regression",
+    "Random Forest",
+    "Gradient Boosting",
+]
+
+
 def build_future_price_features(df: pd.DataFrame) -> pd.DataFrame:
     feat = pd.DataFrame(index=df.index)
 
@@ -3139,8 +3149,15 @@ def build_future_price_features(df: pd.DataFrame) -> pd.DataFrame:
     feat["CLOSE_OPEN_PCT"] = pd.to_numeric((df["Close"] / df["Open"] - 1.0).replace([np.inf, -np.inf], np.nan), errors="coerce")
     feat["HIGH_LOW_PCT"] = pd.to_numeric((df["High"] / df["Low"] - 1.0).replace([np.inf, -np.inf], np.nan), errors="coerce")
 
+    if "RSI" in df.columns:
+        feat["RSI_CHG_1"] = pd.to_numeric(df["RSI"].diff(1), errors="coerce")
+    if "MACD_hist" in df.columns:
+        feat["MACD_HIST_CHG_1"] = pd.to_numeric(df["MACD_hist"].diff(1), errors="coerce")
+    if "ATR" in df.columns:
+        feat["ATR_CHG_1"] = pd.to_numeric(df["ATR"].pct_change(1), errors="coerce")
+
     lag_cols = ["Close", "Volume", "RSI", "MACD_hist", "ATR", "OBV"]
-    for lag in [1, 2, 3, 5]:
+    for lag in [1, 2, 3, 5, 8]:
         for col in lag_cols:
             if col in df.columns:
                 feat[f"{col}_lag_{lag}"] = pd.to_numeric(df[col].shift(lag), errors="coerce")
@@ -3149,17 +3166,129 @@ def build_future_price_features(df: pd.DataFrame) -> pd.DataFrame:
     return feat
 
 
-def future_price_ml_forecast(df: pd.DataFrame, horizon_bars: int) -> Dict[str, Any]:
-    if df is None or df.empty:
-        return {"error": "Tahmin için veri yok."}
+def _future_make_model(model_name: str):
+    if model_name == "Ridge":
+        return Ridge(alpha=1.0)
+    if model_name == "Linear Regression":
+        return LinearRegression()
+    if model_name == "Random Forest":
+        return RandomForestRegressor(
+            n_estimators=140,
+            max_depth=6,
+            min_samples_leaf=2,
+            random_state=42,
+            n_jobs=-1,
+        )
+    if model_name == "Gradient Boosting":
+        return GradientBoostingRegressor(
+            n_estimators=180,
+            learning_rate=0.05,
+            max_depth=3,
+            random_state=42,
+        )
+    raise ValueError(f"Bilinmeyen model: {model_name}")
 
-    if horizon_bars < 1:
-        return {"error": "Tahmin ufku en az 1 bar olmalıdır."}
 
+def _future_fit_predict(model_name: str, X_train_df: pd.DataFrame, y_train: pd.Series, X_pred_df: pd.DataFrame):
+    model = _future_make_model(model_name)
+
+    if model_name in ["Ridge", "Linear Regression"]:
+        mu = X_train_df.mean(axis=0)
+        sigma = X_train_df.std(axis=0).replace(0, 1.0).fillna(1.0)
+        X_train_use = ((X_train_df - mu) / sigma).fillna(0.0)
+        X_pred_use = ((X_pred_df - mu) / sigma).fillna(0.0)
+        model.fit(X_train_use.values, y_train.values)
+        preds = model.predict(X_pred_use.values)
+        return preds, model, {"mu": mu, "sigma": sigma}
+
+    X_train_use = X_train_df.fillna(0.0)
+    X_pred_use = X_pred_df.fillna(0.0)
+    model.fit(X_train_use.values, y_train.values)
+    preds = model.predict(X_pred_use.values)
+    return preds, model, {}
+
+
+def _future_metrics(y_true: np.ndarray, y_pred: np.ndarray, current_close_arr: np.ndarray) -> Dict[str, float]:
+    mae = float(np.mean(np.abs(y_pred - y_true))) if len(y_true) > 0 else np.nan
+    rmse = float(np.sqrt(np.mean((y_pred - y_true) ** 2))) if len(y_true) > 0 else np.nan
+
+    safe_y = np.where(y_true == 0, np.nan, y_true)
+    mape = float(np.nanmean(np.abs((y_pred - y_true) / safe_y)) * 100) if len(y_true) > 0 else np.nan
+
+    actual_dir = np.sign(y_true - current_close_arr)
+    pred_dir = np.sign(y_pred - current_close_arr)
+    direction_acc = float(np.mean(actual_dir == pred_dir) * 100) if len(actual_dir) > 0 else np.nan
+
+    return {
+        "mae": mae,
+        "rmse": rmse,
+        "mape": mape,
+        "direction_acc": direction_acc,
+    }
+
+
+def _future_feature_importance(model_name: str, fitted_model, feature_cols: List[str], aux: Dict[str, Any]) -> pd.DataFrame:
+    vals = None
+
+    if hasattr(fitted_model, "feature_importances_"):
+        vals = np.asarray(fitted_model.feature_importances_, dtype=float)
+    elif hasattr(fitted_model, "coef_"):
+        vals = np.asarray(np.abs(fitted_model.coef_), dtype=float)
+        sigma = aux.get("sigma")
+        if sigma is not None:
+            sigma_vals = np.asarray(sigma.values, dtype=float)
+            sigma_vals = np.where(sigma_vals == 0, 1.0, sigma_vals)
+            vals = vals / sigma_vals
+
+    if vals is None:
+        return pd.DataFrame(columns=["Feature", "Importance"])
+
+    out = pd.DataFrame({"Feature": feature_cols, "Importance": vals})
+    out["Importance"] = pd.to_numeric(out["Importance"], errors="coerce").abs()
+    out = out.replace([np.inf, -np.inf], np.nan).dropna().sort_values("Importance", ascending=False)
+    return out.head(15).reset_index(drop=True)
+
+
+def _future_prepare_dataset(df: pd.DataFrame, horizon_bars: int):
     features = build_future_price_features(df)
     target = pd.to_numeric(df["Close"].shift(-horizon_bars), errors="coerce").rename("TARGET")
-
     dataset = pd.concat([features, target], axis=1).replace([np.inf, -np.inf], np.nan).dropna()
+    feature_cols = [c for c in dataset.columns if c != "TARGET"]
+    latest_features = features[feature_cols].replace([np.inf, -np.inf], np.nan).dropna()
+    return dataset, feature_cols, latest_features
+
+
+def _future_direction_probabilities(current_price: float, predicted_price: float, residuals: np.ndarray):
+    if residuals is None or len(residuals) == 0:
+        return np.nan, np.nan, np.nan
+
+    simulated_prices = predicted_price + residuals
+    flat_band = max(abs(current_price) * 0.0025, 1e-9)
+
+    up_prob = float(np.mean(simulated_prices > (current_price + flat_band)) * 100)
+    down_prob = float(np.mean(simulated_prices < (current_price - flat_band)) * 100)
+    flat_prob = max(0.0, 100.0 - up_prob - down_prob)
+    return up_prob, down_prob, flat_prob
+
+
+def _future_confidence_score(mape: float, direction_acc: float, band_width_pct: float) -> float:
+    score = 100.0
+    if pd.notna(mape):
+        score -= mape * 8.0
+    else:
+        score -= 35.0
+
+    if pd.notna(direction_acc):
+        score += (direction_acc - 50.0) * 0.6
+
+    if pd.notna(band_width_pct):
+        score -= band_width_pct * 1.5
+
+    return float(max(0.0, min(100.0, score)))
+
+
+def future_price_single_model_eval(df: pd.DataFrame, horizon_bars: int, model_name: str, use_walkforward: bool = False) -> Dict[str, Any]:
+    dataset, feature_cols, latest_features = _future_prepare_dataset(df, horizon_bars)
     if dataset.empty:
         return {"error": "Model veri seti oluşturulamadı."}
 
@@ -3167,73 +3296,175 @@ def future_price_ml_forecast(df: pd.DataFrame, horizon_bars: int) -> Dict[str, A
     if len(dataset) < min_rows_needed:
         return {"error": f"Yeterli eğitim verisi yok. En az yaklaşık {min_rows_needed} satır gerekli, mevcut: {len(dataset)}."}
 
-    feature_cols = [c for c in dataset.columns if c != "TARGET"]
-    X_all = dataset[feature_cols].astype(float).values
-    y_all = dataset["TARGET"].astype(float).values
-
     test_size = min(max(20, len(dataset) // 5), 60)
     split_idx = len(dataset) - test_size
     if split_idx < 40:
         return {"error": "Eğitim/test ayrımı için yeterli veri yok."}
 
-    X_train = X_all[:split_idx]
-    y_train = y_all[:split_idx]
-    X_test = X_all[split_idx:]
-    y_test = y_all[split_idx:]
+    y_test = dataset.iloc[split_idx:]["TARGET"].astype(float).values
+    test_index = dataset.index[split_idx:]
+    current_close_test = df.loc[test_index, "Close"].astype(float).values
 
-    mu = np.nanmean(X_train, axis=0)
-    sigma = np.nanstd(X_train, axis=0)
-    sigma = np.where((sigma == 0) | (~np.isfinite(sigma)), 1.0, sigma)
+    if use_walkforward:
+        wf_preds = []
+        for ds_idx in range(split_idx, len(dataset)):
+            X_hist = dataset.iloc[:ds_idx][feature_cols].astype(float)
+            y_hist = dataset.iloc[:ds_idx]["TARGET"].astype(float)
+            X_one = dataset.iloc[[ds_idx]][feature_cols].astype(float)
+            pred_one, _, _ = _future_fit_predict(model_name, X_hist, y_hist, X_one)
+            wf_preds.append(float(pred_one[0]))
+        y_pred_test = np.asarray(wf_preds, dtype=float)
+    else:
+        X_train = dataset.iloc[:split_idx][feature_cols].astype(float)
+        y_train = dataset.iloc[:split_idx]["TARGET"].astype(float)
+        X_test = dataset.iloc[split_idx:][feature_cols].astype(float)
+        y_pred_test, _, _ = _future_fit_predict(model_name, X_train, y_train, X_test)
+        y_pred_test = np.asarray(y_pred_test, dtype=float)
 
-    X_train_s = (X_train - mu) / sigma
-    X_test_s = (X_test - mu) / sigma
+    metrics = _future_metrics(y_test, y_pred_test, current_close_test)
 
-    X_train_i = np.column_stack([np.ones(len(X_train_s)), X_train_s])
-    X_test_i = np.column_stack([np.ones(len(X_test_s)), X_test_s])
-
-    alpha = 1.0
-    reg = np.eye(X_train_i.shape[1])
-    reg[0, 0] = 0.0
-    beta = np.linalg.pinv(X_train_i.T @ X_train_i + alpha * reg) @ (X_train_i.T @ y_train)
-
-    y_pred_test = X_test_i @ beta
-    mae = float(np.mean(np.abs(y_pred_test - y_test))) if len(y_test) > 0 else np.nan
-    rmse = float(np.sqrt(np.mean((y_pred_test - y_test) ** 2))) if len(y_test) > 0 else np.nan
-    mape = float(np.mean(np.abs((y_pred_test - y_test) / np.where(y_test == 0, np.nan, y_test))) * 100) if len(y_test) > 0 else np.nan
-
-    current_close_test = df.loc[dataset.index[split_idx:], "Close"].astype(float).values
-    actual_dir = np.sign(y_test - current_close_test)
-    pred_dir = np.sign(y_pred_test - current_close_test)
-    direction_acc = float(np.mean(actual_dir == pred_dir) * 100) if len(actual_dir) > 0 else np.nan
-
-    latest_features = features.replace([np.inf, -np.inf], np.nan).dropna()
+    X_full = dataset[feature_cols].astype(float)
+    y_full = dataset["TARGET"].astype(float)
     if latest_features.empty:
         return {"error": "Son bar için özellikler oluşturulamadı."}
 
-    latest_row = latest_features.iloc[[-1]][feature_cols].astype(float).values
-    latest_row_s = (latest_row - mu) / sigma
-    latest_row_i = np.column_stack([np.ones(len(latest_row_s)), latest_row_s])
-    predicted_price = float((latest_row_i @ beta)[0])
-
-    last_index = latest_features.index[-1]
-    current_price = float(df.loc[last_index, "Close"])
+    latest_row = latest_features.iloc[[-1]][feature_cols].astype(float)
+    latest_pred, fitted_full_model, aux_full = _future_fit_predict(model_name, X_full, y_full, latest_row)
+    predicted_price = float(np.asarray(latest_pred)[0])
+    last_feature_index = latest_features.index[-1]
+    current_price = float(df.loc[last_feature_index, "Close"])
     delta_pct = float((predicted_price / current_price - 1.0) * 100.0) if current_price != 0 else np.nan
 
+    residuals = (y_test - y_pred_test).astype(float) if len(y_test) > 0 else np.array([], dtype=float)
+    if len(residuals) > 0:
+        q10 = float(np.quantile(residuals, 0.10))
+        q90 = float(np.quantile(residuals, 0.90))
+        predicted_low = float(predicted_price + q10)
+        predicted_high = float(predicted_price + q90)
+        residual_std = float(np.std(residuals))
+    else:
+        predicted_low = np.nan
+        predicted_high = np.nan
+        residual_std = np.nan
+
+    band_width_pct = float(((predicted_high - predicted_low) / current_price) * 100.0) if pd.notna(predicted_low) and pd.notna(predicted_high) and current_price != 0 else np.nan
+    up_prob, down_prob, flat_prob = _future_direction_probabilities(current_price, predicted_price, residuals)
+    confidence_score = _future_confidence_score(metrics["mape"], metrics["direction_acc"], band_width_pct)
+    feature_importance_df = _future_feature_importance(model_name, fitted_full_model, feature_cols, aux_full)
+
     recent_actual = df["Close"].tail(120).copy()
+    test_actual_series = pd.Series(y_test, index=test_index, name="Actual")
+    test_pred_series = pd.Series(y_pred_test, index=test_index, name="Predicted")
+
     return {
         "error": None,
+        "model_name": model_name,
         "predicted_price": predicted_price,
+        "predicted_low": predicted_low,
+        "predicted_high": predicted_high,
         "current_price": current_price,
         "delta_pct": delta_pct,
         "horizon_bars": int(horizon_bars),
-        "train_rows": int(len(X_train)),
-        "test_rows": int(len(X_test)),
-        "mae": mae,
-        "rmse": rmse,
-        "mape": mape,
-        "direction_acc": direction_acc,
-        "last_feature_index": str(last_index),
+        "train_rows": int(split_idx),
+        "test_rows": int(len(dataset) - split_idx),
+        "mae": metrics["mae"],
+        "rmse": metrics["rmse"],
+        "mape": metrics["mape"],
+        "direction_acc": metrics["direction_acc"],
+        "up_prob": up_prob,
+        "down_prob": down_prob,
+        "flat_prob": flat_prob,
+        "band_width_pct": band_width_pct,
+        "confidence_score": confidence_score,
+        "last_feature_index": str(last_feature_index),
         "recent_actual": recent_actual,
+        "test_actual_series": test_actual_series,
+        "test_pred_series": test_pred_series,
+        "feature_importance_df": feature_importance_df,
+        "residual_std": residual_std,
+    }
+
+
+def future_price_horizon_benchmark(df: pd.DataFrame, model_name: str, requested_horizon: int) -> pd.DataFrame:
+    candidate_horizons = sorted({1, 3, 5, 10, 20, int(requested_horizon)})
+    rows = []
+    for hz in candidate_horizons:
+        if hz < 1:
+            continue
+        quick = future_price_single_model_eval(df, hz, model_name, use_walkforward=False)
+        if quick.get("error"):
+            rows.append({
+                "Horizon": hz,
+                "MAPE %": np.nan,
+                "MAE": np.nan,
+                "Yön %": np.nan,
+                "Durum": "Veri yetersiz",
+            })
+        else:
+            rows.append({
+                "Horizon": hz,
+                "MAPE %": quick.get("mape", np.nan),
+                "MAE": quick.get("mae", np.nan),
+                "Yön %": quick.get("direction_acc", np.nan),
+                "Durum": "Hazır",
+            })
+    return pd.DataFrame(rows)
+
+
+def future_price_ml_forecast(df: pd.DataFrame, horizon_bars: int) -> Dict[str, Any]:
+    if df is None or df.empty:
+        return {"error": "Tahmin için veri yok."}
+    if horizon_bars < 1:
+        return {"error": "Tahmin ufku en az 1 bar olmalıdır."}
+
+    model_results = {}
+    compare_rows = []
+
+    for model_name in FUTURE_PRICE_MODEL_NAMES:
+        model_result = future_price_single_model_eval(df, horizon_bars, model_name, use_walkforward=True)
+        if model_result.get("error"):
+            return model_result
+        model_results[model_name] = model_result
+        compare_rows.append({
+            "Model": model_name,
+            "MAPE %": model_result.get("mape", np.nan),
+            "MAE": model_result.get("mae", np.nan),
+            "RMSE": model_result.get("rmse", np.nan),
+            "Yön %": model_result.get("direction_acc", np.nan),
+            "Güven %": model_result.get("confidence_score", np.nan),
+            "Tahmin": model_result.get("predicted_price", np.nan),
+            "Değişim %": model_result.get("delta_pct", np.nan),
+        })
+
+    compare_df = pd.DataFrame(compare_rows)
+    compare_df["_rank_mape"] = compare_df["MAPE %"].fillna(np.inf)
+    compare_df["_rank_rmse"] = compare_df["RMSE"].fillna(np.inf)
+    compare_df = compare_df.sort_values(["_rank_mape", "_rank_rmse", "Güven %"], ascending=[True, True, False]).reset_index(drop=True)
+    best_model_name = str(compare_df.iloc[0]["Model"])
+    compare_df["En İyi"] = np.where(compare_df["Model"] == best_model_name, "⭐ En İyi", "")
+    compare_df = compare_df.drop(columns=["_rank_mape", "_rank_rmse"])
+
+    best_model_result = model_results[best_model_name]
+    horizon_quality_df = future_price_horizon_benchmark(df, best_model_name, horizon_bars)
+
+    trend_regime = "Yükseliş" if ("EMA50" in df.columns and "EMA200" in df.columns and df["EMA50"].iloc[-1] > df["EMA200"].iloc[-1]) else "Düşüş / Nötr"
+    atr_pct_last = float(df["ATR_PCT"].iloc[-1]) if "ATR_PCT" in df.columns and pd.notna(df["ATR_PCT"].iloc[-1]) else np.nan
+    atr_pct_med = float(df["ATR_PCT"].dropna().median()) if "ATR_PCT" in df.columns and not df["ATR_PCT"].dropna().empty else np.nan
+    if pd.notna(atr_pct_last) and pd.notna(atr_pct_med):
+        vol_regime = "Yüksek Volatilite" if atr_pct_last > atr_pct_med * 1.25 else "Normal / Düşük Volatilite"
+    else:
+        vol_regime = "Bilinmiyor"
+
+    return {
+        "error": None,
+        "models": model_results,
+        "compare_df": compare_df,
+        "best_model_name": best_model_name,
+        "current_price": best_model_result.get("current_price", np.nan),
+        "horizon_bars": int(horizon_bars),
+        "horizon_quality_df": horizon_quality_df,
+        "trend_regime": trend_regime,
+        "vol_regime": vol_regime,
     }
 
 # =============================
@@ -4117,7 +4348,7 @@ with tab_triple:
 
 with tab_future:
     st.header("🔮 Future Price")
-    st.caption("Makine öğrenmesi tabanlı regresyon ile seçili sembolün mevcut zaman diliminde ileri bar kapanış fiyat tahmini üretir.")
+    st.caption("Makine öğrenmesi tabanlı çoklu model karşılaştırması ile seçili sembolün mevcut zaman diliminde ileri bar kapanış fiyat tahmini üretir.")
 
     if not st.session_state.ta_ran:
         st.info("Sol menüden 'Teknik Analizi Çalıştır' butonuna basarak sistemi aktifleştirmelisin.")
@@ -4136,42 +4367,115 @@ with tab_future:
         run_future_price = st.button("🤖 Future Price Tahmini Yap", key="run_future_price", use_container_width=True)
 
         if run_future_price:
-            with st.spinner("Makine öğrenmesi modeli eğitiliyor ve tahmin üretiliyor..."):
-                fp_result = future_price_ml_forecast(df, int(future_horizon))
+            with st.spinner("Makine öğrenmesi modelleri eğitiliyor, walk-forward test yapılıyor ve tahmin üretiliyor..."):
+                st.session_state.future_price_result = future_price_ml_forecast(df, int(future_horizon))
+                st.session_state.future_price_horizon = int(future_horizon)
 
-            if fp_result.get("error"):
-                st.warning(fp_result["error"])
-            else:
-                fp_c1, fp_c2, fp_c3, fp_c4 = st.columns(4)
-                fp_c1.metric("Mevcut Kapanış", f"{fp_result['current_price']:.2f}")
-                fp_c2.metric(f"{int(future_horizon)} Bar Sonrası Tahmin", f"{fp_result['predicted_price']:.2f}")
-                fp_c3.metric("Tahmini Değişim", f"{fp_result['delta_pct']:+.2f}%")
-                fp_c4.metric("Yön Doğruluğu", f"{fp_result['direction_acc']:.1f}%" if pd.notna(fp_result['direction_acc']) else "N/A")
+        fp_result = st.session_state.get("future_price_result")
+        if fp_result and not fp_result.get("error"):
+            compare_df = fp_result["compare_df"].copy()
+            best_model_name = fp_result["best_model_name"]
 
-                fp_m1, fp_m2, fp_m3, fp_m4 = st.columns(4)
-                fp_m1.metric("MAE", f"{fp_result['mae']:.4f}" if pd.notna(fp_result['mae']) else "N/A")
-                fp_m2.metric("RMSE", f"{fp_result['rmse']:.4f}" if pd.notna(fp_result['rmse']) else "N/A")
-                fp_m3.metric("MAPE", f"%{fp_result['mape']:.2f}" if pd.notna(fp_result['mape']) else "N/A")
-                fp_m4.metric("Eğitim/Test Satırı", f"{fp_result['train_rows']}/{fp_result['test_rows']}")
+            st.subheader("🏁 Model Karşılaştırma Panosu")
+            st.dataframe(compare_df, use_container_width=True, height=220)
 
-                future_fig = go.Figure()
-                recent_actual = fp_result.get("recent_actual")
-                if recent_actual is not None and not recent_actual.empty:
-                    future_fig.add_trace(go.Scatter(x=recent_actual.index, y=recent_actual.values, name="Geçmiş Kapanış", line=dict(color="royalblue", width=2)))
-                    last_x = recent_actual.index[-1]
-                    future_fig.add_trace(go.Scatter(
-                        x=[last_x],
-                        y=[fp_result['predicted_price']],
-                        mode="markers",
-                        name="Tahmini Gelecek Fiyat",
-                        marker=dict(size=14, color="darkorange", symbol="diamond"),
-                    ))
-                    future_fig.add_hline(y=fp_result['predicted_price'], line_dash="dash", line_color="darkorange", annotation_text=f"Tahmin: {fp_result['predicted_price']:.2f}")
-                    future_fig.update_layout(height=420, title=f"Future Price Tahmini ({int(future_horizon)} bar sonrası)", xaxis_title="Tarih", yaxis_title="Fiyat")
-                    st.plotly_chart(future_fig, use_container_width=True)
+            model_options = compare_df["Model"].tolist()
+            best_idx = model_options.index(best_model_name) if best_model_name in model_options else 0
+            selected_model_name = st.selectbox(
+                "Grafik ve detay için model seç",
+                options=model_options,
+                index=best_idx,
+                key="future_price_selected_model",
+                help="Sayfadaki tüm modeller görünür. Buradan seçtiğin modele göre grafik, olasılıklar ve önem sıralaması güncellenir.",
+            )
+            selected_model = fp_result["models"][selected_model_name]
 
-                st.info(
-                    f"Model son kullanılabilir barı `{fp_result['last_feature_index']}` üzerinden tahmin üretti. "
-                    "Bu çıktı eğitim amaçlıdır; kesin fiyat bilgisi değildir."
+            fp_c1, fp_c2, fp_c3, fp_c4, fp_c5 = st.columns(5)
+            fp_c1.metric("Mevcut Kapanış", f"{selected_model['current_price']:.2f}")
+            fp_c2.metric(f"{int(fp_result['horizon_bars'])} Bar Sonrası Tahmin", f"{selected_model['predicted_price']:.2f}")
+            fp_c3.metric("Tahmini Değişim", f"{selected_model['delta_pct']:+.2f}%")
+            fp_c4.metric("Tahmin Bandı", f"{selected_model['predicted_low']:.2f} - {selected_model['predicted_high']:.2f}" if pd.notna(selected_model['predicted_low']) and pd.notna(selected_model['predicted_high']) else "N/A")
+            fp_c5.metric("Güven Skoru", f"{selected_model['confidence_score']:.1f}%" if pd.notna(selected_model['confidence_score']) else "N/A")
+
+            fp_m1, fp_m2, fp_m3, fp_m4 = st.columns(4)
+            fp_m1.metric("MAE", f"{selected_model['mae']:.4f}" if pd.notna(selected_model['mae']) else "N/A")
+            fp_m2.metric("RMSE", f"{selected_model['rmse']:.4f}" if pd.notna(selected_model['rmse']) else "N/A")
+            fp_m3.metric("MAPE", f"%{selected_model['mape']:.2f}" if pd.notna(selected_model['mape']) else "N/A")
+            fp_m4.metric("Eğitim/Test Satırı", f"{selected_model['train_rows']}/{selected_model['test_rows']}")
+
+            fp_p1, fp_p2, fp_p3, fp_p4 = st.columns(4)
+            fp_p1.metric("Yükseliş Olasılığı", f"%{selected_model['up_prob']:.1f}" if pd.notna(selected_model['up_prob']) else "N/A")
+            fp_p2.metric("Düşüş Olasılığı", f"%{selected_model['down_prob']:.1f}" if pd.notna(selected_model['down_prob']) else "N/A")
+            fp_p3.metric("Yatay Olasılığı", f"%{selected_model['flat_prob']:.1f}" if pd.notna(selected_model['flat_prob']) else "N/A")
+            fp_p4.metric("Yön Doğruluğu", f"%{selected_model['direction_acc']:.1f}" if pd.notna(selected_model['direction_acc']) else "N/A")
+
+            st.subheader("🌡️ Rejim Özeti")
+            rg1, rg2 = st.columns(2)
+            rg1.metric("Trend Rejimi", fp_result.get("trend_regime", "N/A"))
+            rg2.metric("Volatilite Rejimi", fp_result.get("vol_regime", "N/A"))
+            if st.session_state.get("sentiment_summary"):
+                st.info(f"Haber Duyarlılığı Özeti: {st.session_state.get('sentiment_summary')[:300]}")
+
+            st.subheader("📈 Seçili Modele Göre Grafik")
+            future_fig = go.Figure()
+            recent_actual = selected_model.get("recent_actual")
+            test_actual_series = selected_model.get("test_actual_series")
+            test_pred_series = selected_model.get("test_pred_series")
+            if recent_actual is not None and not recent_actual.empty:
+                future_fig.add_trace(go.Scatter(x=recent_actual.index, y=recent_actual.values, name="Geçmiş Kapanış", line=dict(color="royalblue", width=2)))
+            if test_actual_series is not None and not test_actual_series.empty:
+                future_fig.add_trace(go.Scatter(x=test_actual_series.index, y=test_actual_series.values, name="Test Gerçek", line=dict(color="seagreen", width=2)))
+            if test_pred_series is not None and not test_pred_series.empty:
+                future_fig.add_trace(go.Scatter(x=test_pred_series.index, y=test_pred_series.values, name=f"{selected_model_name} Test Tahmini", line=dict(color="darkorange", width=2, dash="dot")))
+
+            future_x = recent_actual.index[-1] if recent_actual is not None and not recent_actual.empty else pd.Timestamp.now()
+            future_fig.add_trace(go.Scatter(
+                x=[future_x],
+                y=[selected_model['predicted_price']],
+                mode="markers",
+                name="Tahmini Gelecek Fiyat",
+                marker=dict(size=14, color="darkorange", symbol="diamond"),
+            ))
+            if pd.notna(selected_model['predicted_low']) and pd.notna(selected_model['predicted_high']):
+                future_fig.add_trace(go.Scatter(
+                    x=[future_x, future_x],
+                    y=[selected_model['predicted_low'], selected_model['predicted_high']],
+                    mode="lines",
+                    name="Tahmin Bandı",
+                    line=dict(width=8, color="rgba(255,140,0,0.35)"),
+                ))
+                future_fig.add_hrect(
+                    y0=selected_model['predicted_low'],
+                    y1=selected_model['predicted_high'],
+                    fillcolor="rgba(255,165,0,0.08)",
+                    line_width=0,
+                    annotation_text="Olası Fiyat Bandı",
+                    annotation_position="top left",
                 )
+            future_fig.add_hline(y=selected_model['predicted_price'], line_dash="dash", line_color="darkorange", annotation_text=f"Tahmin: {selected_model['predicted_price']:.2f}")
+            future_fig.update_layout(height=460, title=f"Future Price Tahmini - {selected_model_name} ({int(fp_result['horizon_bars'])} bar sonrası)", xaxis_title="Tarih", yaxis_title="Fiyat")
+            st.plotly_chart(future_fig, use_container_width=True)
 
+            st.subheader("🧠 Feature Importance / Etki Sıralaması")
+            fi_df = selected_model.get("feature_importance_df")
+            if fi_df is not None and not fi_df.empty:
+                fi_fig = go.Figure()
+                fi_top = fi_df.head(12).iloc[::-1]
+                fi_fig.add_trace(go.Bar(x=fi_top["Importance"], y=fi_top["Feature"], orientation="h", name="Önem"))
+                fi_fig.update_layout(height=420, title=f"{selected_model_name} - En Etkili Özellikler", xaxis_title="Önem", yaxis_title="Feature")
+                st.plotly_chart(fi_fig, use_container_width=True)
+                st.dataframe(fi_df, use_container_width=True, height=260)
+            else:
+                st.info("Bu model için yorumlanabilir feature importance bilgisi üretilemedi.")
+
+            st.subheader("📏 Horizon Kalite Özeti")
+            horizon_quality_df = fp_result.get("horizon_quality_df")
+            if horizon_quality_df is not None and not horizon_quality_df.empty:
+                st.dataframe(horizon_quality_df, use_container_width=True, height=220)
+
+            st.info(
+                f"Seçili model `{selected_model_name}` son kullanılabilir barı `{selected_model['last_feature_index']}` üzerinden tahmin üretti. "
+                "Bu çıktı eğitim amaçlıdır; kesin fiyat bilgisi değildir. Sayfadaki ⭐ işaretli model, mevcut karşılaştırmada en düşük hata ile öne çıkmıştır."
+            )
+        elif fp_result and fp_result.get("error"):
+            st.warning(fp_result["error"])
