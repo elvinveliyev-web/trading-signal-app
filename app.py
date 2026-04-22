@@ -3468,9 +3468,108 @@ def future_price_ml_forecast(df: pd.DataFrame, horizon_bars: int) -> Dict[str, A
     }
 
 # =============================
+# VIOP HELPERS
+# =============================
+def align_spot_future_series(spot_df: pd.DataFrame, fut_df: pd.DataFrame) -> pd.DataFrame:
+    if spot_df is None or spot_df.empty or fut_df is None or fut_df.empty:
+        return pd.DataFrame()
+
+    spot_close = spot_df[["Close"]].copy().rename(columns={"Close": "Spot_Close"})
+    fut_close = fut_df[["Close"]].copy().rename(columns={"Close": "Future_Close"})
+
+    merged = spot_close.join(fut_close, how="inner")
+    merged = merged.dropna()
+    if merged.empty:
+        return pd.DataFrame()
+
+    merged["Basis"] = merged["Future_Close"] - merged["Spot_Close"]
+    merged["Basis_%"] = np.where(
+        merged["Spot_Close"] != 0,
+        (merged["Future_Close"] / merged["Spot_Close"] - 1.0) * 100.0,
+        np.nan,
+    )
+
+    merged["Spot_Return"] = merged["Spot_Close"].pct_change()
+    merged["Future_Return"] = merged["Future_Close"].pct_change()
+
+    return merged.dropna(how="all")
+
+
+def build_viop_analysis(
+    spot_df: pd.DataFrame,
+    fut_df: pd.DataFrame,
+    annual_rate_pct: float = 0.0,
+    days_to_expiry: int = 30,
+    rolling_window: int = 20,
+):
+    merged = align_spot_future_series(spot_df, fut_df)
+    if merged.empty or len(merged) < max(10, rolling_window):
+        return {"error": "Spot ve VİOP verileri birlikte analiz için yeterli değil."}
+
+    merged = merged.copy()
+    merged["Basis_MA"] = merged["Basis"].rolling(rolling_window).mean()
+    merged["Basis_STD"] = merged["Basis"].rolling(rolling_window).std()
+    merged["Basis_Z"] = np.where(
+        merged["Basis_STD"] > 0,
+        (merged["Basis"] - merged["Basis_MA"]) / merged["Basis_STD"],
+        np.nan,
+    )
+
+    merged["Spot_Norm"] = merged["Spot_Close"] / merged["Spot_Close"].iloc[0] * 100.0
+    merged["Future_Norm"] = merged["Future_Close"] / merged["Future_Close"].iloc[0] * 100.0
+
+    cov = merged["Spot_Return"].rolling(rolling_window).cov(merged["Future_Return"])
+    var = merged["Future_Return"].rolling(rolling_window).var()
+    merged["Beta_Hedge_Ratio"] = np.where(var > 0, cov / var, np.nan)
+
+    last = merged.iloc[-1]
+    spot_price = float(last["Spot_Close"])
+    future_price = float(last["Future_Close"])
+    basis = float(last["Basis"])
+    basis_pct = float(last["Basis_%"]) if pd.notna(last["Basis_%"]) else np.nan
+    basis_z = float(last["Basis_Z"]) if pd.notna(last["Basis_Z"]) else np.nan
+    beta_hr = float(last["Beta_Hedge_Ratio"]) if pd.notna(last["Beta_Hedge_Ratio"]) else np.nan
+
+    carry_rate = float(annual_rate_pct) / 100.0
+    dte = max(int(days_to_expiry), 1)
+    fair_future = spot_price * (1.0 + carry_rate * dte / 365.0)
+    mispricing = future_price - fair_future
+    mispricing_pct = ((future_price / fair_future) - 1.0) * 100.0 if fair_future > 0 else np.nan
+    annualized_basis_pct = ((future_price / spot_price) - 1.0) * (365.0 / dte) * 100.0 if spot_price > 0 else np.nan
+
+    regime = "Contango" if basis > 0 else ("Backwardation" if basis < 0 else "Flat")
+
+    if pd.notna(basis_z):
+        if basis_z >= 2:
+            signal = "Vadeli fiyat spota göre anlamlı pahalı görünüyor; short future + long spot arbitrajı incelenebilir."
+        elif basis_z <= -2:
+            signal = "Vadeli fiyat spota göre anlamlı ucuz görünüyor; long future + short/hedge spot senaryosu incelenebilir."
+        else:
+            signal = "Spread tarihi ortalamaya yakın; güçlü arbitraj sapması görünmüyor."
+    else:
+        signal = "Z-score hesaplanamadı; daha fazla ortak veri gerekebilir."
+
+    return {
+        "error": None,
+        "merged": merged,
+        "spot_price": spot_price,
+        "future_price": future_price,
+        "basis": basis,
+        "basis_pct": basis_pct,
+        "basis_z": basis_z,
+        "fair_future": fair_future,
+        "mispricing": mispricing,
+        "mispricing_pct": mispricing_pct,
+        "annualized_basis_pct": annualized_basis_pct,
+        "regime": regime,
+        "signal": signal,
+        "beta_hedge_ratio": beta_hr,
+    }
+
+# =============================
 # Tabs
 # =============================
-tab_dash, tab_export, tab_heatmap, tab_triple, tab_scan, tab_future = st.tabs(["📊 Dashboard", "📄 Rapor (PDF/HTML)", "🔥 Sektörel Heatmap", "📺 3 Ekranlı Sistem", "🔍 Tarama", "🔮 Future Price"])
+tab_dash, tab_export, tab_heatmap, tab_triple, tab_scan, tab_future, tab_viop = st.tabs(["📊 Dashboard", "📄 Rapor (PDF/HTML)", "🔥 Sektörel Heatmap", "📺 3 Ekranlı Sistem", "🔍 Tarama", "🔮 Future Price", "📌 VIOP"])
 
 with tab_dash:
     if "app_errors" in st.session_state and st.session_state.app_errors:
@@ -4479,3 +4578,165 @@ with tab_future:
             )
         elif fp_result and fp_result.get("error"):
             st.warning(fp_result["error"])
+
+with tab_viop:
+    st.header("📌 VIOP")
+    st.caption("Arbitraj ve hedging amaçlı spot hisse ile VİOP sözleşmesini birlikte izler. Spot veri otomatik gelir; VİOP sözleşme sembolü veri sağlayıcıda bulunan formata göre manuel girilir.")
+
+    viop_spot_universe = load_universe_file(pjoin("universes", "bist100.txt"))
+    viop_default_spot = naked_ticker(ticker) if naked_ticker(ticker) in [str(x).upper() for x in viop_spot_universe] else (viop_spot_universe[0] if viop_spot_universe else "THYAO")
+
+    viop_spot_symbol_raw = st.selectbox(
+        "Spot Hisse (BIST)",
+        options=viop_spot_universe if viop_spot_universe else [viop_default_spot],
+        index=(viop_spot_universe.index(viop_default_spot) if viop_spot_universe and viop_default_spot in viop_spot_universe else 0),
+        key="viop_spot_symbol_raw",
+    )
+    viop_spot_symbol = normalize_ticker(viop_spot_symbol_raw, "BIST")
+
+    viop_contract_symbol = st.text_input(
+        "VIOP Sözleşme Sembolü (veri sağlayıcı/Yahoo formatı)",
+        value=st.session_state.get("viop_contract_symbol", ""),
+        key="viop_contract_symbol",
+        help="VİOP sözleşme sembolünü veri sağlayıcının desteklediği formatta girin. Spot hisse verisi otomatik gelir; vadeli veri bu sembolden çekilir.",
+    )
+
+    viop_col1, viop_col2, viop_col3, viop_col4 = st.columns(4)
+    with viop_col1:
+        viop_period = st.selectbox("VIOP Periyot", ["45d", "3mo", "6mo", "1y", "2y"], index=2, key="viop_period")
+    with viop_col2:
+        viop_interval = st.selectbox("VIOP Interval", ["1d", "1h", "1wk"], index=0, key="viop_interval")
+    with viop_col3:
+        viop_days_to_expiry = st.number_input("Vadeye Kalan Gün", min_value=1, max_value=365, value=30, step=1, key="viop_days_to_expiry")
+    with viop_col4:
+        viop_annual_rate = st.number_input("Yıllık Taşıma Faizi %", min_value=0.0, max_value=200.0, value=45.0, step=0.5, key="viop_annual_rate")
+
+    viop_h1, viop_h2, viop_h3 = st.columns(3)
+    with viop_h1:
+        viop_position_value = st.number_input("Hedge Edilecek Spot Pozisyon Tutarı", min_value=0.0, value=100000.0, step=1000.0, key="viop_position_value")
+    with viop_h2:
+        viop_contract_multiplier = st.number_input("Kontrat Çarpanı", min_value=1.0, value=1.0, step=1.0, key="viop_contract_multiplier")
+    with viop_h3:
+        viop_rolling_window = st.number_input("Spread Rolling Window", min_value=5, max_value=120, value=20, step=1, key="viop_rolling_window")
+
+    run_viop = st.button("📌 VIOP Analizini Çalıştır", key="run_viop_analysis", use_container_width=True)
+
+    if run_viop:
+        st.session_state.viop_result = None
+        st.session_state.viop_spot_df = pd.DataFrame()
+        st.session_state.viop_fut_df = pd.DataFrame()
+
+        spot_df_viop = load_data_cached(viop_spot_symbol, viop_period, viop_interval, end_date=None, force_latest=False)
+        st.session_state.viop_spot_df = spot_df_viop.copy()
+
+        fut_df_viop = pd.DataFrame()
+        if viop_contract_symbol.strip():
+            fut_df_viop = load_data_cached(viop_contract_symbol.strip().upper(), viop_period, viop_interval, end_date=None, force_latest=False)
+        st.session_state.viop_fut_df = fut_df_viop.copy()
+
+        if fut_df_viop.empty:
+            st.session_state.viop_result = {
+                "error": "VİOP sözleşme verisi çekilemedi. Spot hisse verisi geldi; lütfen veri sağlayıcıda çalışan VİOP sözleşme sembolünü girin."
+            }
+        else:
+            st.session_state.viop_result = build_viop_analysis(
+                spot_df_viop,
+                fut_df_viop,
+                annual_rate_pct=float(viop_annual_rate),
+                days_to_expiry=int(viop_days_to_expiry),
+                rolling_window=int(viop_rolling_window),
+            )
+
+    viop_result = st.session_state.get("viop_result")
+
+    if viop_result:
+        if viop_result.get("error"):
+            st.warning(viop_result["error"])
+            spot_df_fallback = st.session_state.get("viop_spot_df", pd.DataFrame())
+            if spot_df_fallback is not None and not spot_df_fallback.empty:
+                st.subheader("Spot Hisse Verisi")
+                st.metric("Spot Son Kapanış", f"{float(spot_df_fallback['Close'].iloc[-1]):.2f}")
+                fallback_fig = go.Figure()
+                fallback_fig.add_trace(go.Candlestick(
+                    x=spot_df_fallback.index,
+                    open=spot_df_fallback["Open"],
+                    high=spot_df_fallback["High"],
+                    low=spot_df_fallback["Low"],
+                    close=spot_df_fallback["Close"],
+                    name="Spot"
+                ))
+                fallback_fig.update_layout(height=420, title=f"Spot Hisse Grafiği - {viop_spot_symbol}", xaxis_rangeslider_visible=False)
+                st.plotly_chart(fallback_fig, use_container_width=True)
+        else:
+            merged_viop = viop_result["merged"].copy()
+
+            m1, m2, m3, m4, m5, m6 = st.columns(6)
+            m1.metric("Spot", f"{viop_result['spot_price']:.2f}")
+            m2.metric("VİOP", f"{viop_result['future_price']:.2f}")
+            m3.metric("Basis", f"{viop_result['basis']:+.2f}")
+            m4.metric("Basis %", f"{viop_result['basis_pct']:+.2f}%")
+            m5.metric("Basis Z-Score", f"{viop_result['basis_z']:.2f}" if pd.notna(viop_result['basis_z']) else "N/A")
+            m6.metric("Rejim", viop_result["regime"])
+
+            h1, h2, h3, h4, h5 = st.columns(5)
+            h1.metric("Teorik Fair Value", f"{viop_result['fair_future']:.2f}")
+            h2.metric("Mispricing", f"{viop_result['mispricing']:+.2f}")
+            h3.metric("Mispricing %", f"{viop_result['mispricing_pct']:+.2f}%")
+            h4.metric("Yıllıklandırılmış Basis", f"{viop_result['annualized_basis_pct']:+.2f}%" if pd.notna(viop_result['annualized_basis_pct']) else "N/A")
+            h5.metric("Beta Hedge Ratio", f"{viop_result['beta_hedge_ratio']:.3f}" if pd.notna(viop_result['beta_hedge_ratio']) else "N/A")
+
+            st.info(viop_result["signal"])
+
+            contract_notional = float(viop_result["future_price"]) * float(viop_contract_multiplier)
+            contracts_1to1 = (float(viop_position_value) / contract_notional) if contract_notional > 0 else np.nan
+            contracts_beta = (float(viop_position_value) * float(viop_result["beta_hedge_ratio"]) / contract_notional) if contract_notional > 0 and pd.notna(viop_result["beta_hedge_ratio"]) else np.nan
+
+            hc1, hc2, hc3, hc4 = st.columns(4)
+            hc1.metric("Spot Pozisyon Tutarı", f"{float(viop_position_value):,.2f}")
+            hc2.metric("Kontrat Notional", f"{contract_notional:,.2f}" if np.isfinite(contract_notional) else "N/A")
+            hc3.metric("1:1 Hedge Kontrat", f"{contracts_1to1:.2f}" if pd.notna(contracts_1to1) else "N/A")
+            hc4.metric("Beta Bazlı Hedge Kontrat", f"{contracts_beta:.2f}" if pd.notna(contracts_beta) else "N/A")
+
+            st.subheader("📈 Spot vs VİOP (Normalize)")
+            viop_fig_norm = go.Figure()
+            viop_fig_norm.add_trace(go.Scatter(x=merged_viop.index, y=merged_viop["Spot_Norm"], name="Spot (100 Bazlı)", line=dict(width=2)))
+            viop_fig_norm.add_trace(go.Scatter(x=merged_viop.index, y=merged_viop["Future_Norm"], name="VİOP (100 Bazlı)", line=dict(width=2, dash="dot")))
+            viop_fig_norm.update_layout(height=420, title="Spot ve VİOP Göreli Performans", xaxis_title="Tarih", yaxis_title="Normalize Değer")
+            st.plotly_chart(viop_fig_norm, use_container_width=True)
+
+            st.subheader("📉 Basis / Spread Analizi")
+            viop_fig_basis = go.Figure()
+            viop_fig_basis.add_trace(go.Scatter(x=merged_viop.index, y=merged_viop["Basis"], name="Basis", line=dict(width=2)))
+            viop_fig_basis.add_trace(go.Scatter(x=merged_viop.index, y=merged_viop["Basis_MA"], name="Basis Ortalama", line=dict(width=2, dash="dash")))
+            viop_fig_basis.update_layout(height=360, title="Basis ve Ortalama", xaxis_title="Tarih", yaxis_title="Fark")
+            st.plotly_chart(viop_fig_basis, use_container_width=True)
+
+            viop_fig_z = go.Figure()
+            viop_fig_z.add_trace(go.Scatter(x=merged_viop.index, y=merged_viop["Basis_Z"], name="Basis Z-Score", line=dict(width=2)))
+            viop_fig_z.add_hline(y=2, line_dash="dash", annotation_text="Üst Sapma")
+            viop_fig_z.add_hline(y=-2, line_dash="dash", annotation_text="Alt Sapma")
+            viop_fig_z.add_hline(y=0, line_dash="dot")
+            viop_fig_z.update_layout(height=320, title="Basis Z-Score", xaxis_title="Tarih", yaxis_title="Z-Score")
+            st.plotly_chart(viop_fig_z, use_container_width=True)
+
+            st.subheader("🧾 Arbitraj ve Hedging Özeti")
+            viop_summary_df = pd.DataFrame([
+                {"Kalem": "Spot Sembol", "Değer": viop_spot_symbol},
+                {"Kalem": "VİOP Sembol", "Değer": viop_contract_symbol.strip().upper()},
+                {"Kalem": "Rejim", "Değer": viop_result["regime"]},
+                {"Kalem": "Basis", "Değer": f"{viop_result['basis']:+.4f}"},
+                {"Kalem": "Basis %", "Değer": f"{viop_result['basis_pct']:+.4f}%"},
+                {"Kalem": "Teorik Fair Value", "Değer": f"{viop_result['fair_future']:.4f}"},
+                {"Kalem": "Mispricing", "Değer": f"{viop_result['mispricing']:+.4f}"},
+                {"Kalem": "Mispricing %", "Değer": f"{viop_result['mispricing_pct']:+.4f}%"},
+                {"Kalem": "Annualized Basis", "Değer": f"{viop_result['annualized_basis_pct']:+.4f}%" if pd.notna(viop_result['annualized_basis_pct']) else "N/A"},
+                {"Kalem": "Beta Hedge Ratio", "Değer": f"{viop_result['beta_hedge_ratio']:.4f}" if pd.notna(viop_result['beta_hedge_ratio']) else "N/A"},
+                {"Kalem": "1:1 Hedge Kontrat", "Değer": f"{contracts_1to1:.4f}" if pd.notna(contracts_1to1) else "N/A"},
+                {"Kalem": "Beta Bazlı Hedge Kontrat", "Değer": f"{contracts_beta:.4f}" if pd.notna(contracts_beta) else "N/A"},
+                {"Kalem": "Yorum", "Değer": viop_result["signal"]},
+            ])
+            st.dataframe(viop_summary_df, use_container_width=True, height=420)
+
+            with st.expander("Ham eşleşmiş Spot/VİOP veri tablosu", expanded=False):
+                st.dataframe(merged_viop.reset_index(), use_container_width=True, height=320)
+
