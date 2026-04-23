@@ -5523,55 +5523,54 @@ with tab_calendar:
     st.caption("Ülkeler bazlı önemli makro verileri getirir. İstediğin veri bloğunu sadece ilgili çalıştır tuşuna basınca çağırır; böylece uygulama her hisse seçiminde gereksiz yüklenmez.")
 
 
-st.subheader("0) Şirket Takvimi")
-corporate_symbol_options = [naked_ticker(x) for x in universe] if universe else [naked_ticker(ticker)]
-default_corporate_symbol = naked_ticker(ticker) if naked_ticker(ticker) in corporate_symbol_options else corporate_symbol_options[0]
+    st.subheader("0) Şirket Takvimi")
+    corporate_symbol_options = [naked_ticker(x) for x in universe] if universe else [naked_ticker(ticker)]
+    default_corporate_symbol = naked_ticker(ticker) if naked_ticker(ticker) in corporate_symbol_options else corporate_symbol_options[0]
 
-cc1, cc2 = st.columns([3, 1])
-with cc1:
-    corporate_symbol_raw = st.selectbox(
-        "Hisse Seç",
-        options=corporate_symbol_options,
-        index=corporate_symbol_options.index(default_corporate_symbol),
-        key="corporate_symbol_raw_calendar",
-    )
-with cc2:
-    run_corporate_dates = st.button("Şirket Takvimini Getir", key="run_corporate_dates", use_container_width=True)
+    cc1, cc2 = st.columns([3, 1])
+    with cc1:
+        corporate_symbol_raw = st.selectbox(
+            "Hisse Seç",
+            options=corporate_symbol_options,
+            index=corporate_symbol_options.index(default_corporate_symbol),
+            key="corporate_symbol_raw_calendar",
+        )
+    with cc2:
+        run_corporate_dates = st.button("Şirket Takvimini Getir", key="run_corporate_dates", use_container_width=True)
 
-if run_corporate_dates:
-    st.session_state.corporate_dates_result = fetch_next_corporate_dates(corporate_symbol_raw, market)
+    if run_corporate_dates:
+        st.session_state.corporate_dates_result = fetch_next_corporate_dates(corporate_symbol_raw, market)
 
-corporate_dates_result = st.session_state.get("corporate_dates_result")
-if corporate_dates_result:
-    def _fmt_dt_local(dt):
-        if dt is None or pd.isna(dt):
-            return "Açıklanmadı / Veri Yok"
-        try:
-            return pd.to_datetime(dt).strftime("%Y-%m-%d")
-        except Exception:
-            return str(dt)
+    corporate_dates_result = st.session_state.get("corporate_dates_result")
+    if corporate_dates_result:
+        def _fmt_dt_local(dt):
+            if dt is None or pd.isna(dt):
+                return "Açıklanmadı / Veri Yok"
+            try:
+                return pd.to_datetime(dt).strftime("%Y-%m-%d")
+            except Exception:
+                return str(dt)
 
-    next_earnings = corporate_dates_result.get("next_earnings_date")
-    next_dividend = corporate_dates_result.get("next_dividend_date")
-    last_dividend = corporate_dates_result.get("last_dividend_date")
+        next_earnings = corporate_dates_result.get("next_earnings_date")
+        next_dividend = corporate_dates_result.get("next_dividend_date")
+        last_dividend = corporate_dates_result.get("last_dividend_date")
 
-    cdm1, cdm2, cdm3 = st.columns(3)
-    cdm1.metric("Sonraki Bilanço Tarihi", _fmt_dt_local(next_earnings))
-    cdm2.metric("Sonraki Temettü Tarihi", _fmt_dt_local(next_dividend))
-    cdm3.metric("Son Bilinen Temettü Tarihi", _fmt_dt_local(last_dividend))
+        cdm1, cdm2, cdm3 = st.columns(3)
+        cdm1.metric("Sonraki Bilanço Tarihi", _fmt_dt_local(next_earnings))
+        cdm2.metric("Sonraki Temettü Tarihi", _fmt_dt_local(next_dividend))
+        cdm3.metric("Son Bilinen Temettü Tarihi", _fmt_dt_local(last_dividend))
 
-    source_parts = []
-    if corporate_dates_result.get("earnings_source"):
-        source_parts.append(f"Bilanço kaynağı: {corporate_dates_result.get('earnings_source')}")
-    if corporate_dates_result.get("dividend_source"):
-        source_parts.append(f"Temettü kaynağı: {corporate_dates_result.get('dividend_source')}")
-    if source_parts:
-        st.caption(" | ".join(source_parts))
-    else:
-        st.caption("Veri sağlayıcı ilgili tarihleri yayınlamadıysa alanlar boş görünebilir.")
+        source_parts = []
+        if corporate_dates_result.get("earnings_source"):
+            source_parts.append(f"Bilanço kaynağı: {corporate_dates_result.get('earnings_source')}")
+        if corporate_dates_result.get("dividend_source"):
+            source_parts.append(f"Temettü kaynağı: {corporate_dates_result.get('dividend_source')}")
+        if source_parts:
+            st.caption(" | ".join(source_parts))
+        else:
+            st.caption("Veri sağlayıcı ilgili tarihleri yayınlamadıysa alanlar boş görünebilir.")
 
-st.divider()
-
+    st.divider()
 
     country_options = ["united states", "euro area", "united kingdom", "turkey", "china", "japan", "germany", "france", "canada", "australia", "india", "brazil"]
 
