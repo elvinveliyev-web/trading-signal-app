@@ -4326,10 +4326,575 @@ def fetch_next_corporate_dates(symbol: str, selected_market: str = "USA") -> Dic
 
     return out
 
+
+# =============================
+# CHART PATTERN SCAN HELPERS
+# =============================
+CHART_PATTERN_GROUPS = [
+    "OBO / TOBO",
+    "İkili Tepe / İkili Dip",
+    "Yükselen / Alçalan Takoz",
+    "Üçlü Tepe / Üçlü Dip",
+    "Yuvarlak Dip (Çanak)",
+    "Bayrak",
+    "Flama",
+    "Fincan Kulp",
+    "Yükselen / Alçalan Üçgen",
+    "Dikdörtgen",
+]
+
+def _pattern_match(group: str, subtype: str, start_pos: int, end_pos: int, points: List[dict], note: str = "") -> Dict[str, Any]:
+    return {
+        "group": group,
+        "subtype": subtype,
+        "start_pos": int(start_pos),
+        "end_pos": int(end_pos),
+        "points": points,
+        "note": note,
+    }
+
+def _safe_rel_diff(a: float, b: float) -> float:
+    denom = max((abs(float(a)) + abs(float(b))) / 2.0, 1e-9)
+    return abs(float(a) - float(b)) / denom
+
+def _get_pivots_with_pos(df: pd.DataFrame, left: int = 3, right: int = 3):
+    highs, lows = [], []
+    if df is None or df.empty or len(df) < left + right + 5:
+        return highs, lows
+
+    H = df["High"].astype(float).values
+    L = df["Low"].astype(float).values
+    C = df["Close"].astype(float).values
+    idx = df.index
+
+    for i in range(left, len(df) - right):
+        hwin = H[i-left:i+right+1]
+        lwin = L[i-left:i+right+1]
+        if H[i] >= np.max(hwin):
+            highs.append({"pos": i, "time": idx[i], "price": float(H[i]), "close": float(C[i])})
+        if L[i] <= np.min(lwin):
+            lows.append({"pos": i, "time": idx[i], "price": float(L[i]), "close": float(C[i])})
+    return highs, lows
+
+def _find_between(points: List[dict], left_pos: int, right_pos: int):
+    return [p for p in points if left_pos < p["pos"] < right_pos]
+
+def _fit_line(y_vals: np.ndarray):
+    x = np.arange(len(y_vals), dtype=float)
+    if len(y_vals) < 2:
+        return 0.0, float(y_vals[-1]) if len(y_vals) else 0.0
+    slope, intercept = np.polyfit(x, y_vals.astype(float), 1)
+    return float(slope), float(intercept)
+
+def _detect_head_shoulders(df: pd.DataFrame):
+    highs, lows = _get_pivots_with_pos(df)
+    if len(highs) < 3 or len(lows) < 2:
+        return None
+
+    recent_highs = highs[-10:]
+    for i in range(len(recent_highs) - 3, -1, -1):
+        h1, h2, h3 = recent_highs[i:i+3]
+        if not (h1["pos"] < h2["pos"] < h3["pos"]):
+            continue
+        l1_list = _find_between(lows, h1["pos"], h2["pos"])
+        l2_list = _find_between(lows, h2["pos"], h3["pos"])
+        if not l1_list or not l2_list:
+            continue
+        l1 = min(l1_list, key=lambda x: x["price"])
+        l2 = min(l2_list, key=lambda x: x["price"])
+
+        shoulders_close = _safe_rel_diff(h1["price"], h3["price"]) <= 0.08
+        head_higher = h2["price"] > max(h1["price"], h3["price"]) * 1.03
+        neckline_ok = _safe_rel_diff(l1["price"], l2["price"]) <= 0.08
+        spacing_ok = 4 <= (h2["pos"] - h1["pos"]) <= 60 and 4 <= (h3["pos"] - h2["pos"]) <= 60
+
+        if shoulders_close and head_higher and neckline_ok and spacing_ok:
+            return _pattern_match(
+                "OBO / TOBO",
+                "Omuz Baş Omuz (OBO)",
+                h1["pos"],
+                h3["pos"],
+                [h1, l1, h2, l2, h3],
+                "Baş, iki omuzdan belirgin yüksek; omuzlar birbirine yakın.",
+            )
+
+    if len(lows) < 3 or len(highs) < 2:
+        return None
+
+    recent_lows = lows[-10:]
+    for i in range(len(recent_lows) - 3, -1, -1):
+        l1, l2, l3 = recent_lows[i:i+3]
+        if not (l1["pos"] < l2["pos"] < l3["pos"]):
+            continue
+        h1_list = _find_between(highs, l1["pos"], l2["pos"])
+        h2_list = _find_between(highs, l2["pos"], l3["pos"])
+        if not h1_list or not h2_list:
+            continue
+        h1 = max(h1_list, key=lambda x: x["price"])
+        h2 = max(h2_list, key=lambda x: x["price"])
+
+        shoulders_close = _safe_rel_diff(l1["price"], l3["price"]) <= 0.08
+        head_lower = l2["price"] < min(l1["price"], l3["price"]) * 0.97
+        neckline_ok = _safe_rel_diff(h1["price"], h2["price"]) <= 0.08
+        spacing_ok = 4 <= (l2["pos"] - l1["pos"]) <= 60 and 4 <= (l3["pos"] - l2["pos"]) <= 60
+
+        if shoulders_close and head_lower and neckline_ok and spacing_ok:
+            return _pattern_match(
+                "OBO / TOBO",
+                "Ters Omuz Baş Omuz (TOBO)",
+                l1["pos"],
+                l3["pos"],
+                [l1, h1, l2, h2, l3],
+                "Baş, iki omuzdan belirgin düşük; omuzlar birbirine yakın.",
+            )
+    return None
+
+def _detect_double_top_bottom(df: pd.DataFrame):
+    highs, lows = _get_pivots_with_pos(df)
+    if len(highs) >= 2:
+        recent_highs = highs[-8:]
+        for i in range(len(recent_highs) - 2, -1, -1):
+            h1, h2 = recent_highs[i:i+2]
+            mids = _find_between(lows, h1["pos"], h2["pos"])
+            if not mids:
+                continue
+            mid = min(mids, key=lambda x: x["price"])
+            if 4 <= (h2["pos"] - h1["pos"]) <= 80 and _safe_rel_diff(h1["price"], h2["price"]) <= 0.04:
+                trough_depth = (min(h1["price"], h2["price"]) - mid["price"]) / max(min(h1["price"], h2["price"]), 1e-9)
+                if trough_depth >= 0.03:
+                    return _pattern_match(
+                        "İkili Tepe / İkili Dip",
+                        "İkili Tepe",
+                        h1["pos"],
+                        h2["pos"],
+                        [h1, mid, h2],
+                        "İki tepe benzer seviyede, aradaki dip anlamlı.",
+                    )
+    if len(lows) >= 2:
+        recent_lows = lows[-8:]
+        for i in range(len(recent_lows) - 2, -1, -1):
+            l1, l2 = recent_lows[i:i+2]
+            mids = _find_between(highs, l1["pos"], l2["pos"])
+            if not mids:
+                continue
+            mid = max(mids, key=lambda x: x["price"])
+            if 4 <= (l2["pos"] - l1["pos"]) <= 80 and _safe_rel_diff(l1["price"], l2["price"]) <= 0.04:
+                peak_height = (mid["price"] - max(l1["price"], l2["price"])) / max(mid["price"], 1e-9)
+                if peak_height >= 0.03:
+                    return _pattern_match(
+                        "İkili Tepe / İkili Dip",
+                        "İkili Dip",
+                        l1["pos"],
+                        l2["pos"],
+                        [l1, mid, l2],
+                        "İki dip benzer seviyede, aradaki tepe anlamlı.",
+                    )
+    return None
+
+def _detect_triple_top_bottom(df: pd.DataFrame):
+    highs, lows = _get_pivots_with_pos(df)
+    if len(highs) >= 3:
+        recent_highs = highs[-10:]
+        for i in range(len(recent_highs) - 3, -1, -1):
+            trio = recent_highs[i:i+3]
+            prices = [x["price"] for x in trio]
+            if trio[0]["pos"] < trio[1]["pos"] < trio[2]["pos"] and max(prices) > 0 and (max(prices)-min(prices))/max(prices) <= 0.05:
+                return _pattern_match(
+                    "Üçlü Tepe / Üçlü Dip",
+                    "Üçlü Tepe",
+                    trio[0]["pos"],
+                    trio[2]["pos"],
+                    trio,
+                    "Üç tepe yakın seviyede.",
+                )
+    if len(lows) >= 3:
+        recent_lows = lows[-10:]
+        for i in range(len(recent_lows) - 3, -1, -1):
+            trio = recent_lows[i:i+3]
+            prices = [x["price"] for x in trio]
+            if trio[0]["pos"] < trio[1]["pos"] < trio[2]["pos"] and max(prices) > 0 and (max(prices)-min(prices))/max(prices) <= 0.05:
+                return _pattern_match(
+                    "Üçlü Tepe / Üçlü Dip",
+                    "Üçlü Dip",
+                    trio[0]["pos"],
+                    trio[2]["pos"],
+                    trio,
+                    "Üç dip yakın seviyede.",
+                )
+    return None
+
+def _detect_wedge(df: pd.DataFrame):
+    lookback = min(40, len(df))
+    if lookback < 18:
+        return None
+    use = df.tail(lookback).copy()
+    slope_high, intercept_high = _fit_line(use["High"].values)
+    slope_low, intercept_low = _fit_line(use["Low"].values)
+
+    start_width = (intercept_high - intercept_low)
+    end_width = ((slope_high * (lookback - 1) + intercept_high) - (slope_low * (lookback - 1) + intercept_low))
+    narrowing = end_width < start_width * 0.9 if start_width > 0 else False
+
+    if narrowing and slope_high > 0 and slope_low > 0 and slope_low > slope_high * 1.15:
+        return _pattern_match(
+            "Yükselen / Alçalan Takoz",
+            "Yükselen Takoz",
+            len(df) - lookback,
+            len(df) - 1,
+            [{"pos": len(df) - lookback, "time": use.index[0], "price": float(use["Low"].iloc[0])},
+             {"pos": len(df) - 1, "time": use.index[-1], "price": float(use["High"].iloc[-1])}],
+            "Her iki trend çizgisi de yukarı eğimli, bant daralıyor.",
+        )
+
+    if narrowing and slope_high < 0 and slope_low < 0 and abs(slope_high) > abs(slope_low) * 1.15:
+        return _pattern_match(
+            "Yükselen / Alçalan Takoz",
+            "Alçalan Takoz",
+            len(df) - lookback,
+            len(df) - 1,
+            [{"pos": len(df) - lookback, "time": use.index[0], "price": float(use["High"].iloc[0])},
+             {"pos": len(df) - 1, "time": use.index[-1], "price": float(use["Low"].iloc[-1])}],
+            "Her iki trend çizgisi de aşağı eğimli, bant daralıyor.",
+        )
+    return None
+
+def _detect_rounding_bottom(df: pd.DataFrame):
+    lookback = min(80, len(df))
+    if lookback < 30:
+        return None
+    use = df.tail(lookback).copy()
+    close = use["Close"].astype(float).values
+    min_idx = int(np.argmin(close))
+    if not (lookback * 0.2 <= min_idx <= lookback * 0.8):
+        return None
+
+    start_p = float(close[0]); end_p = float(close[-1]); low_p = float(close[min_idx])
+    if low_p <= 0:
+        return None
+    depth_ok = start_p > low_p * 1.08 and end_p > low_p * 1.08
+    end_recovery_ok = end_p >= start_p * 0.9
+
+    x = np.arange(lookback, dtype=float)
+    a, b, c = np.polyfit(x, close, 2)
+    curve_ok = a > 0
+
+    if depth_ok and end_recovery_ok and curve_ok:
+        return _pattern_match(
+            "Yuvarlak Dip (Çanak)",
+            "Yuvarlak Dip (Çanak)",
+            len(df) - lookback,
+            len(df) - 1,
+            [
+                {"pos": len(df) - lookback, "time": use.index[0], "price": start_p},
+                {"pos": len(df) - lookback + min_idx, "time": use.index[min_idx], "price": low_p},
+                {"pos": len(df) - 1, "time": use.index[-1], "price": end_p},
+            ],
+            "Dip orta bölümde, fiyat soldan sağa kademeli toparlanıyor.",
+        )
+    return None
+
+def _detect_flag(df: pd.DataFrame):
+    if len(df) < 30:
+        return None
+    close = df["Close"].astype(float)
+    for pole in [8, 10, 12]:
+        for cons in [6, 8, 10]:
+            if len(df) < pole + cons + 2:
+                continue
+            seg_pole = close.iloc[-(pole+cons):-cons]
+            seg_cons = close.iloc[-cons:]
+            pole_ret = (seg_pole.iloc[-1] / max(seg_pole.iloc[0], 1e-9)) - 1.0
+            cons_ret = (seg_cons.iloc[-1] / max(seg_cons.iloc[0], 1e-9)) - 1.0
+            cons_width = (df["High"].iloc[-cons:].max() - df["Low"].iloc[-cons:].min()) / max(seg_cons.mean(), 1e-9)
+            if pole_ret > 0.08 and cons_ret < 0 and abs(cons_ret) < abs(pole_ret) * 0.5 and cons_width < 0.12:
+                return _pattern_match(
+                    "Bayrak",
+                    "Boğa Bayrağı",
+                    len(df) - (pole + cons),
+                    len(df) - 1,
+                    [
+                        {"pos": len(df) - (pole + cons), "time": df.index[-(pole+cons)], "price": float(seg_pole.iloc[0])},
+                        {"pos": len(df) - cons - 1, "time": df.index[-cons-1], "price": float(seg_pole.iloc[-1])},
+                        {"pos": len(df) - 1, "time": df.index[-1], "price": float(seg_cons.iloc[-1])},
+                    ],
+                    "Güçlü yükseliş sonrası küçük aşağı eğimli/dar konsolidasyon.",
+                )
+            if pole_ret < -0.08 and cons_ret > 0 and abs(cons_ret) < abs(pole_ret) * 0.5 and cons_width < 0.12:
+                return _pattern_match(
+                    "Bayrak",
+                    "Ayı Bayrağı",
+                    len(df) - (pole + cons),
+                    len(df) - 1,
+                    [
+                        {"pos": len(df) - (pole + cons), "time": df.index[-(pole+cons)], "price": float(seg_pole.iloc[0])},
+                        {"pos": len(df) - cons - 1, "time": df.index[-cons-1], "price": float(seg_pole.iloc[-1])},
+                        {"pos": len(df) - 1, "time": df.index[-1], "price": float(seg_cons.iloc[-1])},
+                    ],
+                    "Güçlü düşüş sonrası küçük yukarı eğimli/dar konsolidasyon.",
+                )
+    return None
+
+def _detect_pennant(df: pd.DataFrame):
+    if len(df) < 28:
+        return None
+    pole = 10
+    cons = 10
+    close = df["Close"].astype(float)
+    seg_pole = close.iloc[-(pole+cons):-cons]
+    seg_cons = df.iloc[-cons:].copy()
+    pole_ret = (seg_pole.iloc[-1] / max(seg_pole.iloc[0], 1e-9)) - 1.0
+    high_slope, _ = _fit_line(seg_cons["High"].values)
+    low_slope, _ = _fit_line(seg_cons["Low"].values)
+    width_start = float(seg_cons["High"].iloc[0] - seg_cons["Low"].iloc[0])
+    width_end = float(seg_cons["High"].iloc[-1] - seg_cons["Low"].iloc[-1])
+    converging = width_end < width_start * 0.85 if width_start > 0 else False
+
+    if pole_ret > 0.08 and high_slope < 0 and low_slope > 0 and converging:
+        return _pattern_match(
+            "Flama",
+            "Boğa Flaması",
+            len(df) - (pole + cons),
+            len(df) - 1,
+            [
+                {"pos": len(df) - (pole + cons), "time": df.index[-(pole+cons)], "price": float(seg_pole.iloc[0])},
+                {"pos": len(df) - cons - 1, "time": df.index[-cons-1], "price": float(seg_pole.iloc[-1])},
+                {"pos": len(df) - 1, "time": df.index[-1], "price": float(seg_cons["Close"].iloc[-1])},
+            ],
+            "Güçlü hareket sonrası daralan kısa üçgen.",
+        )
+    if pole_ret < -0.08 and high_slope < 0 and low_slope > 0 and converging:
+        return _pattern_match(
+            "Flama",
+            "Ayı Flaması",
+            len(df) - (pole + cons),
+            len(df) - 1,
+            [
+                {"pos": len(df) - (pole + cons), "time": df.index[-(pole+cons)], "price": float(seg_pole.iloc[0])},
+                {"pos": len(df) - cons - 1, "time": df.index[-cons-1], "price": float(seg_pole.iloc[-1])},
+                {"pos": len(df) - 1, "time": df.index[-1], "price": float(seg_cons["Close"].iloc[-1])},
+            ],
+            "Güçlü düşüş sonrası daralan kısa üçgen.",
+        )
+    return None
+
+def _detect_cup_handle(df: pd.DataFrame):
+    if len(df) < 60:
+        return None
+    lookback = min(90, len(df))
+    use = df.tail(lookback).copy()
+    close = use["Close"].astype(float).values
+    min_idx = int(np.argmin(close))
+    if not (lookback * 0.2 <= min_idx <= lookback * 0.75):
+        return None
+    left_rim = float(np.max(close[:max(min_idx,1)]))
+    right_rim = float(np.max(close[min_idx:])) 
+    low_p = float(np.min(close))
+    rims_close = _safe_rel_diff(left_rim, right_rim) <= 0.08
+    depth_ok = min(left_rim, right_rim) > low_p * 1.12
+    if not (rims_close and depth_ok):
+        return None
+
+    right_rim_pos = int(np.argmax(close[min_idx:]) + min_idx)
+    handle_part = close[right_rim_pos:]
+    if len(handle_part) < 4:
+        return None
+    handle_drop = (np.max(handle_part) - handle_part[-1]) / max(np.max(handle_part), 1e-9)
+    if handle_drop <= 0.12:
+        return _pattern_match(
+            "Fincan Kulp",
+            "Fincan Kulp",
+            len(df) - lookback,
+            len(df) - 1,
+            [
+                {"pos": len(df) - lookback, "time": use.index[0], "price": float(close[0])},
+                {"pos": len(df) - lookback + min_idx, "time": use.index[min_idx], "price": low_p},
+                {"pos": len(df) - lookback + right_rim_pos, "time": use.index[right_rim_pos], "price": float(close[right_rim_pos])},
+                {"pos": len(df) - 1, "time": use.index[-1], "price": float(close[-1])},
+            ],
+            "Yuvarlak dip sonrası kısa ve sığ kulp geri çekilmesi.",
+        )
+    return None
+
+def _detect_triangle(df: pd.DataFrame):
+    lookback = min(40, len(df))
+    if lookback < 18:
+        return None
+    use = df.tail(lookback).copy()
+    highs, lows = _get_pivots_with_pos(use, left=2, right=2)
+    recent_highs = highs[-4:]
+    recent_lows = lows[-4:]
+
+    if len(recent_highs) >= 2 and len(recent_lows) >= 2:
+        high_prices = [x["price"] for x in recent_highs]
+        low_prices = [x["price"] for x in recent_lows]
+        highs_flat = (max(high_prices) - min(high_prices)) / max(max(high_prices), 1e-9) <= 0.03
+        lows_rising = recent_lows[-1]["price"] > recent_lows[0]["price"] * 1.02
+        if highs_flat and lows_rising:
+            pts = recent_highs[:2] + recent_lows[:2]
+            return _pattern_match(
+                "Yükselen / Alçalan Üçgen",
+                "Yükselen Üçgen",
+                len(df) - lookback,
+                len(df) - 1,
+                pts,
+                "Direnç yatay, dipler yükseliyor.",
+            )
+
+        lows_flat = (max(low_prices) - min(low_prices)) / max(max(low_prices), 1e-9) <= 0.03
+        highs_falling = recent_highs[-1]["price"] < recent_highs[0]["price"] * 0.98
+        if lows_flat and highs_falling:
+            pts = recent_highs[:2] + recent_lows[:2]
+            return _pattern_match(
+                "Yükselen / Alçalan Üçgen",
+                "Alçalan Üçgen",
+                len(df) - lookback,
+                len(df) - 1,
+                pts,
+                "Destek yatay, tepeler alçalıyor.",
+            )
+    return None
+
+def _detect_rectangle(df: pd.DataFrame):
+    lookback = min(35, len(df))
+    if lookback < 15:
+        return None
+    use = df.tail(lookback).copy()
+    high_band = float(use["High"].quantile(0.9))
+    low_band = float(use["Low"].quantile(0.1))
+    width = (high_band - low_band) / max(use["Close"].mean(), 1e-9)
+    upper_touches = int((use["High"] >= high_band * 0.995).sum())
+    lower_touches = int((use["Low"] <= low_band * 1.005).sum())
+    if width <= 0.15 and upper_touches >= 2 and lower_touches >= 2:
+        return _pattern_match(
+            "Dikdörtgen",
+            "Dikdörtgen",
+            len(df) - lookback,
+            len(df) - 1,
+            [
+                {"pos": len(df) - lookback, "time": use.index[0], "price": low_band},
+                {"pos": len(df) - 1, "time": use.index[-1], "price": high_band},
+            ],
+            "Yatay destek/direnç aralığında sıkışma.",
+        )
+    return None
+
+def detect_chart_patterns(df: pd.DataFrame) -> Dict[str, Optional[Dict[str, Any]]]:
+    if df is None or df.empty or len(df) < 25:
+        return {name: None for name in CHART_PATTERN_GROUPS}
+
+    use = df[["Open", "High", "Low", "Close", "Volume"]].dropna().copy()
+    if len(use) < 25:
+        return {name: None for name in CHART_PATTERN_GROUPS}
+
+    detectors = [
+        _detect_head_shoulders,
+        _detect_double_top_bottom,
+        _detect_wedge,
+        _detect_triple_top_bottom,
+        _detect_rounding_bottom,
+        _detect_flag,
+        _detect_pennant,
+        _detect_cup_handle,
+        _detect_triangle,
+        _detect_rectangle,
+    ]
+
+    out = {name: None for name in CHART_PATTERN_GROUPS}
+    for fn in detectors:
+        try:
+            match = fn(use)
+            if match and out.get(match["group"]) is None:
+                out[match["group"]] = match
+        except Exception:
+            continue
+    return out
+
+@st.cache_data(ttl=30 * 60, show_spinner=False)
+def scan_chart_patterns_for_symbol(selected_ticker: str, timeframe: str) -> Dict[str, Any]:
+    tf = str(timeframe)
+    period_map = {"1d": "2y", "1wk": "5y"}
+    period_used = period_map.get(tf, "2y")
+    try:
+        sdf = load_data_cached(selected_ticker, period_used, tf, end_date=None, force_latest=False)
+    except Exception as e:
+        return {"error": f"Veri alınamadı: {e}", "matches": {}, "df": pd.DataFrame(), "timeframe": tf}
+
+    sdf = _flatten_yf(sdf)
+    if sdf is None or sdf.empty:
+        return {"error": "Veri gelmedi.", "matches": {}, "df": pd.DataFrame(), "timeframe": tf}
+
+    matches = detect_chart_patterns(sdf)
+    return {"error": None, "matches": matches, "df": sdf, "timeframe": tf}
+
+def build_chart_pattern_figure(df: pd.DataFrame, match: Dict[str, Any], ticker_label: str, timeframe_label: str) -> go.Figure:
+    fig = go.Figure()
+    fig.add_trace(go.Candlestick(
+        x=df.index,
+        open=df["Open"],
+        high=df["High"],
+        low=df["Low"],
+        close=df["Close"],
+        name=ticker_label,
+    ))
+
+    start_pos = max(int(match["start_pos"]), 0)
+    end_pos = min(int(match["end_pos"]), len(df) - 1)
+    start_time = df.index[start_pos]
+    end_time = df.index[end_pos]
+
+    fig.add_vrect(
+        x0=start_time,
+        x1=end_time,
+        fillcolor="rgba(30, 144, 255, 0.15)",
+        line_width=1,
+        line_color="dodgerblue",
+        annotation_text=match["subtype"],
+        annotation_position="top left",
+    )
+
+    point_x, point_y, point_text = [], [], []
+    for p in match.get("points", []):
+        pos = int(p.get("pos", 0))
+        if 0 <= pos < len(df):
+            point_x.append(df.index[pos])
+            point_y.append(float(p.get("price", df["Close"].iloc[pos])))
+            point_text.append(f'{match["subtype"]}<br>{df.index[pos]}<br>{float(p.get("price", 0)):.2f}')
+
+    if point_x:
+        fig.add_trace(go.Scatter(
+            x=point_x,
+            y=point_y,
+            mode="markers+text",
+            text=["●"] * len(point_x),
+            textposition="top center",
+            marker=dict(size=11, color="dodgerblue"),
+            hovertext=point_text,
+            hoverinfo="text",
+            name="Formasyon Noktaları",
+        ))
+
+    low_band = float(df["Low"].iloc[start_pos:end_pos+1].min())
+    high_band = float(df["High"].iloc[start_pos:end_pos+1].max())
+    fig.add_hrect(
+        y0=low_band,
+        y1=high_band,
+        fillcolor="rgba(30, 144, 255, 0.05)",
+        line_width=0,
+    )
+
+    fig.update_layout(
+        height=520,
+        title=f'{ticker_label} — {match["subtype"]} ({timeframe_label})',
+        xaxis_rangeslider_visible=False,
+        yaxis_title="Fiyat",
+        xaxis_title="Tarih",
+    )
+    return fig
+
 # =============================
 # Tabs
 # =============================
-tab_dash, tab_export, tab_heatmap, tab_triple, tab_scan, tab_future, tab_x, tab_youtube, tab_calendar = st.tabs(["📊 Dashboard", "📄 Rapor (PDF/HTML)", "🔥 Sektörel Heatmap", "📺 3 Ekranlı Sistem", "🔍 Tarama", "🔮 Future Price", "𝕏 X Trends", "▶️ YouTube Trends", "🗓️ Ekonomik Takvim"])
+tab_dash, tab_export, tab_heatmap, tab_triple, tab_scan, tab_future, tab_chart_patterns, tab_x, tab_youtube, tab_calendar = st.tabs(["📊 Dashboard", "📄 Rapor (PDF/HTML)", "🔥 Sektörel Heatmap", "📺 3 Ekranlı Sistem", "🔍 Tarama", "🔮 Future Price", "📐 Grafik Formasyonları", "𝕏 X Trends", "▶️ YouTube Trends", "🗓️ Ekonomik Takvim"])
 
 with tab_dash:
     if "app_errors" in st.session_state and st.session_state.app_errors:
@@ -5338,6 +5903,98 @@ with tab_future:
             )
         elif fp_result and fp_result.get("error"):
             st.warning(fp_result["error"])
+
+
+
+with tab_chart_patterns:
+    st.header("📐 Grafik Formasyonları")
+    st.caption("Seçtiğin zaman dilimlerinde seçili hisseyi klasik grafik formasyonları için tarar. Tespit edilen formasyonlar yeşil işaretlenir; tıkladığında grafikte mavi alan ile gösterilir.")
+
+    if not st.session_state.ta_ran:
+        st.info("Sol menüden 'Teknik Analizi Çalıştır' butonuna basarak sistemi aktifleştirmelisin.")
+    else:
+        st.markdown(f"**Aktif sembol:** `{ticker}`")
+
+        cp_timeframe_labels = {"1d": "1 Günlük", "1wk": "1 Haftalık"}
+        selected_pattern_timeframes = st.multiselect(
+            "Taranacak zaman dilimleri",
+            options=["1d", "1wk"],
+            default=["1d"],
+            format_func=lambda x: cp_timeframe_labels.get(x, x),
+            key="chart_pattern_timeframes",
+        )
+
+        run_chart_pattern_scan = st.button("📐 Grafik Formasyonlarını Tara", key="run_chart_pattern_scan", use_container_width=True)
+
+        if run_chart_pattern_scan:
+            scan_results = {}
+            with st.spinner("Grafik formasyonları taranıyor..."):
+                for tf in selected_pattern_timeframes:
+                    scan_results[tf] = scan_chart_patterns_for_symbol(ticker, tf)
+            st.session_state.chart_pattern_scan_results = scan_results
+            st.session_state.chart_pattern_selected = None
+
+        chart_scan_results = st.session_state.get("chart_pattern_scan_results", {})
+
+        if chart_scan_results:
+            st.subheader("Tespit Listesi")
+            detected_button_pressed = False
+
+            for tf in selected_pattern_timeframes:
+                tf_result = chart_scan_results.get(tf)
+                st.markdown(f"### {cp_timeframe_labels.get(tf, tf)}")
+
+                if not tf_result:
+                    st.info("Bu zaman dilimi için henüz tarama çalıştırılmadı.")
+                    continue
+                if tf_result.get("error"):
+                    st.warning(tf_result["error"])
+                    continue
+
+                matches = tf_result.get("matches", {})
+                found_any = False
+
+                for group_name in CHART_PATTERN_GROUPS:
+                    match = matches.get(group_name)
+                    left_col, right_col = st.columns([4, 1])
+                    with left_col:
+                        if match is not None:
+                            st.markdown(f"<span style='color:#16a34a; font-weight:700;'>🟢 {group_name}</span> <span style='color:#64748b;'>({match['subtype']})</span>", unsafe_allow_html=True)
+                        else:
+                            st.markdown(f"<span style='color:#94a3b8;'>⚪ {group_name}</span>", unsafe_allow_html=True)
+                    with right_col:
+                        if match is not None:
+                            found_any = True
+                            btn_key = f"show_chart_pattern_{tf}_{group_name}"
+                            if st.button("Göster", key=btn_key, use_container_width=True):
+                                st.session_state.chart_pattern_selected = {"timeframe": tf, "group": group_name}
+                                detected_button_pressed = True
+
+                if not found_any:
+                    st.info("Bu zaman diliminde tespit edilen formasyon bulunamadı.")
+
+            selected_info = st.session_state.get("chart_pattern_selected")
+            if selected_info:
+                selected_tf = selected_info.get("timeframe")
+                selected_group = selected_info.get("group")
+                selected_result = chart_scan_results.get(selected_tf, {})
+                selected_match = (selected_result.get("matches") or {}).get(selected_group)
+
+                if selected_match is not None and selected_result.get("df") is not None and not selected_result.get("df").empty:
+                    st.subheader("Grafikte Gösterim")
+                    chart_fig = build_chart_pattern_figure(
+                        selected_result["df"],
+                        selected_match,
+                        ticker,
+                        cp_timeframe_labels.get(selected_tf, selected_tf),
+                    )
+                    st.plotly_chart(chart_fig, use_container_width=True)
+
+                    st.info(
+                        f"Tespit edilen formasyon: **{selected_match['subtype']}**. "
+                        f"Mavi alan formasyonun kapsadığı bölgeyi, mavi noktalar ise formasyonu oluşturan ana salınım noktalarını gösterir. "
+                        f"{selected_match.get('note', '')}"
+                    )
 
 
 with tab_x:
