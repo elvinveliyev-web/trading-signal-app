@@ -3468,44 +3468,35 @@ def future_price_ml_forecast(df: pd.DataFrame, horizon_bars: int) -> Dict[str, A
     }
 
 
+
 # =============================
-# GOOGLE TRENDS HELPERS
+# X / YOUTUBE TRENDS HELPERS
 # =============================
-GOOGLE_TRENDS_POSITIVE_TERMS = [
+POSITIVE_SENTIMENT_TERMS = [
     "kar", "kâr", "temettu", "temettü", "geri alım", "buyback", "yatırım", "anlaşma", "anlasma",
     "ihale", "onay", "teşvik", "tesvik", "rekor", "büyüme", "buyume", "ortaklık", "ortaklik",
     "upgrade", "profit", "dividend", "deal", "investment", "partnership", "approval", "growth",
+    "strong", "bullish", "surprise", "beat", "pozitif", "olumlu", "başarı", "basari", "kazanç", "kazanc",
 ]
 
-GOOGLE_TRENDS_NEGATIVE_TERMS = [
+NEGATIVE_SENTIMENT_TERMS = [
     "zarar", "dava", "ceza", "soruşturma", "sorusturma", "iflas", "kriz", "downgrade", "borç", "borc",
     "bedelli", "satış", "satis", "iptal", "inceleme", "yasak", "loss", "lawsuit", "fine", "investigation",
-    "debt", "bankruptcy", "fraud", "sanction", "risk",
+    "debt", "bankruptcy", "fraud", "sanction", "risk", "bearish", "negative", "drop", "selloff", "negatif",
+    "olumsuz", "şok", "sok", "zayıf", "zayif",
 ]
 
-def _gt_parse_json_text(raw_text: str) -> dict:
-    txt = (raw_text or "").strip()
-    if txt.startswith(")]}',"):
-        txt = txt[5:]
-    elif txt.startswith(")]}'"):
-        txt = txt[4:]
-    return json.loads(txt)
-
-def classify_google_trends_query(query: str) -> str:
-    q = str(query or "").strip().lower()
-    if not q:
-        return "Nötr"
-
-    pos_hits = sum(1 for term in GOOGLE_TRENDS_POSITIVE_TERMS if term in q)
-    neg_hits = sum(1 for term in GOOGLE_TRENDS_NEGATIVE_TERMS if term in q)
-
+def classify_text_polarity(text_value: str) -> str:
+    txt = str(text_value or "").lower()
+    pos_hits = sum(1 for term in POSITIVE_SENTIMENT_TERMS if term in txt)
+    neg_hits = sum(1 for term in NEGATIVE_SENTIMENT_TERMS if term in txt)
     if pos_hits > neg_hits and pos_hits > 0:
         return "Pozitif"
     if neg_hits > pos_hits and neg_hits > 0:
         return "Negatif"
     return "Nötr"
 
-def get_company_name_for_trends(selected_ticker: str, selected_market: str, sdf: pd.DataFrame) -> str:
+def get_company_name_for_social(selected_ticker: str, selected_market: str, sdf: pd.DataFrame) -> str:
     try:
         if sdf is not None and not sdf.empty:
             row = find_screener_row(sdf, selected_ticker)
@@ -3513,7 +3504,6 @@ def get_company_name_for_trends(selected_ticker: str, selected_market: str, sdf:
                 return str(row.get("longName")).strip()
     except Exception:
         pass
-
     try:
         f = fetch_fundamentals_generic(selected_ticker, market=selected_market)
         long_name = str(f.get("longName") or "").strip()
@@ -3521,263 +3511,338 @@ def get_company_name_for_trends(selected_ticker: str, selected_market: str, sdf:
             return long_name
     except Exception:
         pass
-
     return naked_ticker(selected_ticker)
 
-@st.cache_data(ttl=30 * 60, show_spinner=False)
-def fetch_google_trends_bundle(keywords: Tuple[str, ...], geo: str = "", timeframe: str = "today 12-m") -> Dict[str, Any]:
-    kw_list = []
-    seen = set()
-    for kw in keywords:
-        kw_clean = str(kw or "").strip()
-        if kw_clean and kw_clean.lower() not in seen:
-            kw_list.append(kw_clean)
-            seen.add(kw_clean.lower())
+def _x_bearer_token(override: str = "") -> str:
+    if override and str(override).strip():
+        return str(override).strip()
+    try:
+        return str(st.secrets.get("X_BEARER_TOKEN", "")).strip()
+    except Exception:
+        return ""
 
-    if not kw_list:
-        return {"error": "Google Trends için geçerli anahtar kelime bulunamadı."}
+def _youtube_api_key(override: str = "") -> str:
+    if override and str(override).strip():
+        return str(override).strip()
+    try:
+        return str(st.secrets.get("YOUTUBE_API_KEY", "")).strip()
+    except Exception:
+        return ""
 
-    session = requests.Session()
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-        "Referer": "https://trends.google.com/trends/explore",
-    }
+@st.cache_data(ttl=15 * 60, show_spinner=False)
+def fetch_x_trends_bundle(
+    ticker_keyword: str,
+    company_keyword: str,
+    bearer_token_override: str = "",
+    max_results: int = 50,
+) -> Dict[str, Any]:
+    bearer = _x_bearer_token(bearer_token_override)
+    if not bearer:
+        return {"error": "X API için X_BEARER_TOKEN gerekli. secrets veya giriş kutusundan token verin."}
 
-    explore_req = {
-        "comparisonItem": [{"keyword": kw, "geo": geo, "time": timeframe} for kw in kw_list],
-        "category": 0,
-        "property": "",
+    ticker_kw = str(ticker_keyword or "").strip()
+    company_kw = str(company_keyword or "").strip()
+
+    query_parts = []
+    if ticker_kw:
+        query_parts.append(f'"{ticker_kw}"')
+    if company_kw and company_kw.lower() != ticker_kw.lower():
+        query_parts.append(f'"{company_kw}"')
+
+    if not query_parts:
+        return {"error": "X araması için anahtar kelime bulunamadı."}
+
+    query = "(" + " OR ".join(query_parts) + ") -is:retweet lang:tr"
+    headers = {"Authorization": f"Bearer {bearer}"}
+    params = {
+        "query": query,
+        "max_results": min(max(int(max_results), 10), 100),
+        "tweet.fields": "created_at,public_metrics,lang",
+        "expansions": "author_id",
+        "user.fields": "name,username",
     }
 
     try:
-        explore_resp = session.get(
-            "https://trends.google.com/trends/api/explore",
-            params={"hl": "tr-TR", "tz": "-180", "req": json.dumps(explore_req, ensure_ascii=False)},
+        resp = requests.get(
+            "https://api.x.com/2/tweets/search/recent",
             headers=headers,
-            timeout=25,
+            params=params,
+            timeout=30,
         )
-        explore_resp.raise_for_status()
-        explore_json = _gt_parse_json_text(explore_resp.text)
+        resp.raise_for_status()
+        payload = resp.json()
     except Exception as e:
-        return {"error": f"Google Trends explore çağrısı başarısız: {e}"}
+        return {"error": f"X recent search başarısız: {e}"}
 
-    widgets = explore_json.get("widgets", []) or []
-    timeseries_widget = next((w for w in widgets if w.get("id") == "TIMESERIES"), None)
-    if not timeseries_widget:
-        return {"error": "Google Trends zaman serisi widget'ı bulunamadı."}
+    user_map = {}
+    for user in payload.get("includes", {}).get("users", []) or []:
+        user_map[str(user.get("id"))] = {
+            "username": user.get("username", ""),
+            "name": user.get("name", ""),
+        }
 
-    try:
-        ts_resp = session.get(
-            "https://trends.google.com/trends/api/widgetdata/multiline",
-            params={
-                "hl": "tr-TR",
-                "tz": "-180",
-                "req": json.dumps(timeseries_widget.get("request", {}), ensure_ascii=False),
-                "token": timeseries_widget.get("token", ""),
-            },
-            headers=headers,
-            timeout=25,
-        )
-        ts_resp.raise_for_status()
-        ts_json = _gt_parse_json_text(ts_resp.text)
-    except Exception as e:
-        return {"error": f"Google Trends zaman serisi verisi alınamadı: {e}"}
+    rows = []
+    for item in payload.get("data", []) or []:
+        metrics = item.get("public_metrics", {}) or {}
+        text_value = str(item.get("text") or "")
+        rows.append({
+            "ID": str(item.get("id", "")),
+            "Date": pd.to_datetime(item.get("created_at")),
+            "Text": text_value,
+            "Author": user_map.get(str(item.get("author_id")), {}).get("username", ""),
+            "Author Name": user_map.get(str(item.get("author_id")), {}).get("name", ""),
+            "Like Count": safe_float(metrics.get("like_count")),
+            "Retweet Count": safe_float(metrics.get("retweet_count")),
+            "Reply Count": safe_float(metrics.get("reply_count")),
+            "Quote Count": safe_float(metrics.get("quote_count")),
+            "Impression Count": safe_float(metrics.get("impression_count")),
+            "Polarity": classify_text_polarity(text_value),
+        })
 
-    timeline_rows = []
-    timeline_data = ts_json.get("default", {}).get("timelineData", []) or []
-    for item in timeline_data:
-        try:
-            row = {"Date": pd.to_datetime(int(item.get("time")), unit="s")}
-            values = item.get("value", []) or []
-            for i, kw in enumerate(kw_list):
-                row[kw] = float(values[i]) if i < len(values) else np.nan
-            timeline_rows.append(row)
-        except Exception:
-            continue
-
-    interest_df = pd.DataFrame(timeline_rows)
-    if not interest_df.empty and "Date" in interest_df.columns:
-        interest_df = interest_df.set_index("Date").sort_index()
+    posts_df = pd.DataFrame(rows)
+    if not posts_df.empty:
+        posts_df = posts_df.sort_values("Date").reset_index(drop=True)
+        posts_df["Engagement"] = posts_df[["Like Count", "Retweet Count", "Reply Count", "Quote Count"]].fillna(0).sum(axis=1)
+        posts_df["Day"] = posts_df["Date"].dt.floor("D")
     else:
-        interest_df = pd.DataFrame()
-
-    related_rows = []
-    related_widgets = [w for w in widgets if w.get("id") == "RELATED_QUERIES"]
-
-    for w in related_widgets:
-        try:
-            req_obj = w.get("request", {})
-            source_kw = ""
-            try:
-                source_kw = req_obj["restriction"]["complexKeywordsRestriction"]["keyword"][0]["value"]
-            except Exception:
-                source_kw = str(w.get("title", "")).strip() or "Keyword"
-
-            rq_resp = session.get(
-                "https://trends.google.com/trends/api/widgetdata/relatedsearches",
-                params={
-                    "hl": "tr-TR",
-                    "tz": "-180",
-                    "req": json.dumps(req_obj, ensure_ascii=False),
-                    "token": w.get("token", ""),
-                },
-                headers=headers,
-                timeout=25,
-            )
-            rq_resp.raise_for_status()
-            rq_json = _gt_parse_json_text(rq_resp.text)
-
-            ranked_lists = rq_json.get("default", {}).get("rankedList", []) or []
-            for idx, ranked in enumerate(ranked_lists):
-                list_type = "Top" if idx == 0 else "Rising"
-                for item in ranked.get("rankedKeyword", []) or []:
-                    query = str(item.get("query") or item.get("topic", {}).get("title") or "").strip()
-                    if not query:
-                        continue
-                    related_rows.append({
-                        "Source Keyword": source_kw,
-                        "List Type": list_type,
-                        "Query": query,
-                        "Value": item.get("value", np.nan),
-                        "Formatted": item.get("formattedValue", ""),
-                        "Polarity": classify_google_trends_query(query),
-                    })
-        except Exception:
-            continue
-
-    related_df = pd.DataFrame(related_rows)
+        posts_df = pd.DataFrame(columns=["ID", "Date", "Text", "Author", "Author Name", "Like Count", "Retweet Count", "Reply Count", "Quote Count", "Impression Count", "Polarity", "Engagement", "Day"])
 
     return {
         "error": None,
-        "keywords": kw_list,
-        "interest_df": interest_df,
-        "related_df": related_df,
+        "query": query,
+        "posts_df": posts_df,
+        "meta": payload.get("meta", {}),
     }
 
-def build_google_trends_indicators(interest_df: pd.DataFrame, related_df: pd.DataFrame) -> Dict[str, Any]:
-    if interest_df is None or interest_df.empty:
-        return {"error": "Google Trends zaman serisi boş döndü."}
+def build_x_indicators(posts_df: pd.DataFrame) -> Dict[str, Any]:
+    if posts_df is None or posts_df.empty:
+        return {"error": "X araması veri döndürmedi."}
 
-    numeric_cols = [c for c in interest_df.columns if pd.api.types.is_numeric_dtype(interest_df[c])]
-    if not numeric_cols:
-        return {"error": "Google Trends sayısal veri üretmedi."}
+    volume_df = posts_df.groupby("Day").size().reset_index(name="Post Count")
+    polarity_df = posts_df.groupby("Polarity").size().reset_index(name="Count")
 
-    work = interest_df[numeric_cols].copy()
-    work["Combined"] = work.mean(axis=1)
+    pos_count = int((posts_df["Polarity"] == "Pozitif").sum())
+    neg_count = int((posts_df["Polarity"] == "Negatif").sum())
+    neu_count = int((posts_df["Polarity"] == "Nötr").sum())
+    total_count = max(len(posts_df), 1)
 
-    latest_val = float(work["Combined"].iloc[-1])
-    momentum_4 = float(work["Combined"].iloc[-1] - work["Combined"].iloc[-5]) if len(work) >= 5 else np.nan
-    momentum_12 = float(work["Combined"].iloc[-1] - work["Combined"].iloc[-13]) if len(work) >= 13 else np.nan
+    positive_score = round(pos_count / total_count * 100.0, 1)
+    negative_score = round(neg_count / total_count * 100.0, 1)
 
-    ma_4 = float(work["Combined"].rolling(4).mean().iloc[-1]) if len(work) >= 4 else np.nan
-    ma_12 = float(work["Combined"].rolling(12).mean().iloc[-1]) if len(work) >= 12 else np.nan
-    ma_26 = float(work["Combined"].rolling(26).mean().iloc[-1]) if len(work) >= 26 else np.nan
+    daily_counts = volume_df["Post Count"].astype(float)
+    volume_momentum = float(daily_counts.iloc[-1] - daily_counts.iloc[0]) if len(daily_counts) >= 2 else np.nan
 
-    combined_std = float(work["Combined"].std()) if len(work["Combined"].dropna()) > 1 else np.nan
-    z_score = float((latest_val - float(work["Combined"].mean())) / combined_std) if pd.notna(combined_std) and combined_std > 0 else np.nan
+    avg_engagement = float(posts_df["Engagement"].fillna(0).mean()) if "Engagement" in posts_df else np.nan
+    pos_engagement = float(posts_df.loc[posts_df["Polarity"] == "Pozitif", "Engagement"].fillna(0).mean()) if pos_count > 0 else 0.0
+    neg_engagement = float(posts_df.loc[posts_df["Polarity"] == "Negatif", "Engagement"].fillna(0).mean()) if neg_count > 0 else 0.0
 
-    pos_flags = 0
-    neg_flags = 0
-    flag_rows = []
-
-    if pd.notna(ma_4):
-        if latest_val >= ma_4:
-            pos_flags += 1
-            flag_rows.append({"Bileşen": "Son İlgi ≥ 4-Bar Ortalama", "Durum": "Pozitif", "Değer": f"{latest_val:.1f} ≥ {ma_4:.1f}"})
-        else:
-            neg_flags += 1
-            flag_rows.append({"Bileşen": "Son İlgi ≥ 4-Bar Ortalama", "Durum": "Negatif", "Değer": f"{latest_val:.1f} < {ma_4:.1f}"})
-
-    if pd.notna(ma_12) and pd.notna(ma_26):
-        if ma_12 >= ma_26:
-            pos_flags += 1
-            flag_rows.append({"Bileşen": "12-Bar Ortalama ≥ 26-Bar Ortalama", "Durum": "Pozitif", "Değer": f"{ma_12:.1f} ≥ {ma_26:.1f}"})
-        else:
-            neg_flags += 1
-            flag_rows.append({"Bileşen": "12-Bar Ortalama ≥ 26-Bar Ortalama", "Durum": "Negatif", "Değer": f"{ma_12:.1f} < {ma_26:.1f}"})
-
-    if pd.notna(momentum_4):
-        if momentum_4 >= 0:
-            pos_flags += 1
-            flag_rows.append({"Bileşen": "4-Bar Momentum", "Durum": "Pozitif", "Değer": f"{momentum_4:+.1f}"})
-        else:
-            neg_flags += 1
-            flag_rows.append({"Bileşen": "4-Bar Momentum", "Durum": "Negatif", "Değer": f"{momentum_4:+.1f}"})
-
-    if pd.notna(momentum_12):
-        if momentum_12 >= 0:
-            pos_flags += 1
-            flag_rows.append({"Bileşen": "12-Bar Momentum", "Durum": "Pozitif", "Değer": f"{momentum_12:+.1f}"})
-        else:
-            neg_flags += 1
-            flag_rows.append({"Bileşen": "12-Bar Momentum", "Durum": "Negatif", "Değer": f"{momentum_12:+.1f}"})
-
-    if pd.notna(z_score):
-        if z_score >= 1:
-            pos_flags += 1
-            flag_rows.append({"Bileşen": "Trend Z-Score", "Durum": "Pozitif", "Değer": f"{z_score:+.2f}"})
-        elif z_score <= -1:
-            neg_flags += 1
-            flag_rows.append({"Bileşen": "Trend Z-Score", "Durum": "Negatif", "Değer": f"{z_score:+.2f}"})
-        else:
-            flag_rows.append({"Bileşen": "Trend Z-Score", "Durum": "Nötr", "Değer": f"{z_score:+.2f}"})
-
-    positive_query_count = 0
-    negative_query_count = 0
-    neutral_query_count = 0
-    if related_df is not None and not related_df.empty:
-        positive_query_count = int((related_df["Polarity"] == "Pozitif").sum())
-        negative_query_count = int((related_df["Polarity"] == "Negatif").sum())
-        neutral_query_count = int((related_df["Polarity"] == "Nötr").sum())
-        if positive_query_count > negative_query_count:
-            pos_flags += 1
-        elif negative_query_count > positive_query_count:
-            neg_flags += 1
-
-    positive_score = round((pos_flags / 6.0) * 100.0, 1)
-    negative_score = round((neg_flags / 6.0) * 100.0, 1)
-
-    if positive_score >= 60 and positive_score > negative_score:
-        verdict = "POZİTİF Google Trends görünümü"
-    elif negative_score >= 60 and negative_score > positive_score:
-        verdict = "NEGATİF Google Trends görünümü"
+    if positive_score >= 55 and positive_score > negative_score:
+        verdict = "POZİTİF X görünümü"
+    elif negative_score >= 55 and negative_score > positive_score:
+        verdict = "NEGATİF X görünümü"
     else:
-        verdict = "NÖTR / karışık Google Trends görünümü"
-
-    momentum_df = pd.DataFrame([
-        {"Metric": "4-Bar Momentum", "Value": momentum_4},
-        {"Metric": "12-Bar Momentum", "Value": momentum_12},
-        {"Metric": "Trend Z-Score", "Value": z_score},
-    ])
-
-    query_polarity_df = pd.DataFrame([
-        {"Polarity": "Pozitif", "Count": positive_query_count},
-        {"Polarity": "Negatif", "Count": negative_query_count},
-        {"Polarity": "Nötr", "Count": neutral_query_count},
-    ])
+        verdict = "NÖTR / karışık X görünümü"
 
     return {
         "error": None,
-        "work_df": work,
-        "latest_val": latest_val,
-        "momentum_4": momentum_4,
-        "momentum_12": momentum_12,
-        "z_score": z_score,
+        "volume_df": volume_df,
+        "polarity_df": polarity_df,
         "positive_score": positive_score,
         "negative_score": negative_score,
+        "positive_count": pos_count,
+        "negative_count": neg_count,
+        "neutral_count": neu_count,
+        "volume_momentum": volume_momentum,
+        "avg_engagement": avg_engagement,
+        "positive_engagement": pos_engagement,
+        "negative_engagement": neg_engagement,
         "verdict": verdict,
-        "positive_query_count": positive_query_count,
-        "negative_query_count": negative_query_count,
-        "neutral_query_count": neutral_query_count,
-        "flags_df": pd.DataFrame(flag_rows),
-        "momentum_df": momentum_df,
-        "query_polarity_df": query_polarity_df,
+    }
+
+@st.cache_data(ttl=30 * 60, show_spinner=False)
+def _fetch_youtube_search_items(api_key: str, query: str, published_after_iso: Optional[str], max_results: int) -> List[dict]:
+    params = {
+        "part": "snippet",
+        "type": "video",
+        "q": query,
+        "maxResults": min(max(int(max_results), 5), 50),
+        "order": "date",
+        "key": api_key,
+    }
+    if published_after_iso:
+        params["publishedAfter"] = published_after_iso
+
+    resp = requests.get(
+        "https://www.googleapis.com/youtube/v3/search",
+        params=params,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+    return payload.get("items", []) or []
+
+@st.cache_data(ttl=30 * 60, show_spinner=False)
+def _fetch_youtube_video_stats(api_key: str, video_ids: Tuple[str, ...]) -> Dict[str, dict]:
+    if not video_ids:
+        return {}
+    params = {
+        "part": "snippet,statistics",
+        "id": ",".join(video_ids),
+        "maxResults": len(video_ids),
+        "key": api_key,
+    }
+    resp = requests.get(
+        "https://www.googleapis.com/youtube/v3/videos",
+        params=params,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+
+    out = {}
+    for item in payload.get("items", []) or []:
+        out[str(item.get("id"))] = item
+    return out
+
+@st.cache_data(ttl=30 * 60, show_spinner=False)
+def fetch_youtube_trends_bundle(
+    ticker_keyword: str,
+    company_keyword: str,
+    api_key_override: str = "",
+    lookback_label: str = "Son 30 Gün",
+    max_results: int = 25,
+) -> Dict[str, Any]:
+    api_key = _youtube_api_key(api_key_override)
+    if not api_key:
+        return {"error": "YouTube için YOUTUBE_API_KEY gerekli. secrets veya giriş kutusundan API key verin."}
+
+    lookback_map = {
+        "Son 1 Gün": 1,
+        "Son 7 Gün": 7,
+        "Son 30 Gün": 30,
+        "Son 90 Gün": 90,
+        "Son 12 Ay": 365,
+    }
+    lookback_days = int(lookback_map.get(lookback_label, 30))
+    published_after_iso = (datetime.datetime.utcnow() - datetime.timedelta(days=lookback_days)).replace(microsecond=0).isoformat("T") + "Z"
+
+    ticker_kw = str(ticker_keyword or "").strip()
+    company_kw = str(company_keyword or "").strip()
+
+    queries = []
+    if ticker_kw:
+        queries.append(ticker_kw)
+    if company_kw and company_kw.lower() != ticker_kw.lower():
+        queries.append(company_kw)
+
+    if not queries:
+        return {"error": "YouTube araması için anahtar kelime bulunamadı."}
+
+    raw_items = []
+    for q in queries:
+        try:
+            raw_items.extend(_fetch_youtube_search_items(api_key, q, published_after_iso, max_results))
+        except Exception as e:
+            return {"error": f"YouTube search başarısız: {e}"}
+
+    seen_ids = set()
+    ordered_video_ids = []
+    for item in raw_items:
+        vid = str(item.get("id", {}).get("videoId") or "").strip()
+        if vid and vid not in seen_ids:
+            seen_ids.add(vid)
+            ordered_video_ids.append(vid)
+
+    try:
+        stats_map = _fetch_youtube_video_stats(api_key, tuple(ordered_video_ids[:50]))
+    except Exception as e:
+        return {"error": f"YouTube videos.list başarısız: {e}"}
+
+    rows = []
+    for vid in ordered_video_ids:
+        item = stats_map.get(vid)
+        if not item:
+            continue
+        snippet = item.get("snippet", {}) or {}
+        stats = item.get("statistics", {}) or {}
+        title = str(snippet.get("title") or "")
+        description = str(snippet.get("description") or "")
+        text_value = (title + " " + description).strip()
+        rows.append({
+            "Video ID": vid,
+            "Published At": pd.to_datetime(snippet.get("publishedAt")),
+            "Title": title,
+            "Channel": snippet.get("channelTitle", ""),
+            "Description": description,
+            "View Count": safe_float(stats.get("viewCount")),
+            "Like Count": safe_float(stats.get("likeCount")),
+            "Comment Count": safe_float(stats.get("commentCount")),
+            "Polarity": classify_text_polarity(text_value),
+            "Keyword Match": "Ticker" if ticker_kw and ticker_kw.lower() in text_value.lower() else ("Company" if company_kw and company_kw.lower() in text_value.lower() else "Other"),
+            "Video URL": f"https://www.youtube.com/watch?v={vid}",
+        })
+
+    videos_df = pd.DataFrame(rows)
+    if not videos_df.empty:
+        videos_df = videos_df.sort_values("Published At").reset_index(drop=True)
+        videos_df["Day"] = videos_df["Published At"].dt.floor("D")
+        videos_df["Engagement"] = videos_df[["Like Count", "Comment Count"]].fillna(0).sum(axis=1)
+    else:
+        videos_df = pd.DataFrame(columns=["Video ID", "Published At", "Title", "Channel", "Description", "View Count", "Like Count", "Comment Count", "Polarity", "Keyword Match", "Video URL", "Day", "Engagement"])
+
+    return {
+        "error": None,
+        "videos_df": videos_df,
+        "published_after_iso": published_after_iso,
+    }
+
+def build_youtube_indicators(videos_df: pd.DataFrame) -> Dict[str, Any]:
+    if videos_df is None or videos_df.empty:
+        return {"error": "YouTube araması veri döndürmedi."}
+
+    volume_df = videos_df.groupby("Day").size().reset_index(name="Video Count")
+    polarity_df = videos_df.groupby("Polarity").size().reset_index(name="Count")
+
+    pos_count = int((videos_df["Polarity"] == "Pozitif").sum())
+    neg_count = int((videos_df["Polarity"] == "Negatif").sum())
+    neu_count = int((videos_df["Polarity"] == "Nötr").sum())
+    total_count = max(len(videos_df), 1)
+
+    positive_score = round(pos_count / total_count * 100.0, 1)
+    negative_score = round(neg_count / total_count * 100.0, 1)
+
+    avg_views = float(videos_df["View Count"].fillna(0).mean())
+    avg_engagement = float(videos_df["Engagement"].fillna(0).mean())
+    pos_views = float(videos_df.loc[videos_df["Polarity"] == "Pozitif", "View Count"].fillna(0).mean()) if pos_count > 0 else 0.0
+    neg_views = float(videos_df.loc[videos_df["Polarity"] == "Negatif", "View Count"].fillna(0).mean()) if neg_count > 0 else 0.0
+
+    if positive_score >= 55 and positive_score > negative_score:
+        verdict = "POZİTİF YouTube görünümü"
+    elif negative_score >= 55 and negative_score > positive_score:
+        verdict = "NEGATİF YouTube görünümü"
+    else:
+        verdict = "NÖTR / karışık YouTube görünümü"
+
+    return {
+        "error": None,
+        "volume_df": volume_df,
+        "polarity_df": polarity_df,
+        "positive_score": positive_score,
+        "negative_score": negative_score,
+        "positive_count": pos_count,
+        "negative_count": neg_count,
+        "neutral_count": neu_count,
+        "avg_views": avg_views,
+        "avg_engagement": avg_engagement,
+        "positive_views": pos_views,
+        "negative_views": neg_views,
+        "verdict": verdict,
     }
 
 # =============================
 # Tabs
 # =============================
-tab_dash, tab_export, tab_heatmap, tab_triple, tab_scan, tab_future, tab_trends = st.tabs(["📊 Dashboard", "📄 Rapor (PDF/HTML)", "🔥 Sektörel Heatmap", "📺 3 Ekranlı Sistem", "🔍 Tarama", "🔮 Future Price", "📈 Google Trends"])
+tab_dash, tab_export, tab_heatmap, tab_triple, tab_scan, tab_future, tab_x, tab_youtube = st.tabs(["📊 Dashboard", "📄 Rapor (PDF/HTML)", "🔥 Sektörel Heatmap", "📺 3 Ekranlı Sistem", "🔍 Tarama", "🔮 Future Price", "𝕏 X Trends", "▶️ YouTube Trends"])
 
 with tab_dash:
     if "app_errors" in st.session_state and st.session_state.app_errors:
@@ -4788,166 +4853,178 @@ with tab_future:
             st.warning(fp_result["error"])
 
 
-with tab_trends:
-    st.header("📈 Google Trends")
-    st.caption("Seçili hisse için hem sembol hem de şirketin tam adıyla Google Trends verilerini çeker; pozitif/negatif trend göstergeleri ve grafikler üretir.")
+with tab_x:
+    st.header("𝕏 X Trends")
+    st.caption("Seçili hisse için hem sembol hem de şirketin tam adıyla X recent search yapar; pozitif/negatif post göstergeleri ve grafikler üretir.")
 
-    trends_symbol_options = [naked_ticker(x) for x in universe] if universe else [naked_ticker(ticker)]
-    default_trends_symbol = naked_ticker(ticker) if naked_ticker(ticker) in trends_symbol_options else trends_symbol_options[0]
+    x_symbol_options = [naked_ticker(x) for x in universe] if universe else [naked_ticker(ticker)]
+    default_x_symbol = naked_ticker(ticker) if naked_ticker(ticker) in x_symbol_options else x_symbol_options[0]
 
-    trends_symbol_raw = st.selectbox(
+    x_symbol_raw = st.selectbox(
         "Hisse Seç",
-        options=trends_symbol_options,
-        index=trends_symbol_options.index(default_trends_symbol),
-        key="trends_symbol_raw",
+        options=x_symbol_options,
+        index=x_symbol_options.index(default_x_symbol),
+        key="x_symbol_raw",
     )
-    trends_ticker = normalize_ticker(trends_symbol_raw, market)
+    x_ticker = normalize_ticker(x_symbol_raw, market)
 
-    auto_company_name = get_company_name_for_trends(trends_ticker, market, st.session_state.get("screener_df", pd.DataFrame()))
-    trends_company_name = st.text_input(
+    x_company_name_auto = get_company_name_for_social(x_ticker, market, st.session_state.get("screener_df", pd.DataFrame()))
+    x_company_name = st.text_input(
         "Şirketin Tam Adı",
-        value=auto_company_name,
-        key="trends_company_name",
-        help="Google Trends'te sembol ile birlikte şirketin tam adı da aranır.",
+        value=x_company_name_auto,
+        key="x_company_name",
+        help="X aramasında sembol ile birlikte şirketin tam adı da aranır.",
     )
 
-    tc1, tc2, tc3 = st.columns(3)
-    with tc1:
-        trends_timeframe_label = st.selectbox(
-            "Trends Timeframe",
-            options=["Son 1 Gün", "Son 7 Gün", "Son 30 Gün", "Son 90 Gün", "Son 12 Ay"],
-            index=4,
-            key="trends_timeframe",
-        )
-        trends_timeframe_map = {
-            "Son 1 Gün": "now 1-d",
-            "Son 7 Gün": "now 7-d",
-            "Son 30 Gün": "today 1-m",
-            "Son 90 Gün": "today 3-m",
-            "Son 12 Ay": "today 12-m",
-        }
-        trends_timeframe = trends_timeframe_map[trends_timeframe_label]
-    with tc2:
-        trends_geo = st.selectbox(
-            "Bölge",
-            options=["TR", "GLOBAL"],
-            index=0 if market == "BIST" else 1,
-            key="trends_geo",
-        )
-    with tc3:
-        run_trends = st.button("📈 Google Trends Analizini Çalıştır", key="run_google_trends", use_container_width=True)
+    xc1, xc2, xc3 = st.columns(3)
+    with xc1:
+        x_max_results = st.slider("Maksimum Post", min_value=10, max_value=100, value=50, step=10, key="x_max_results")
+    with xc2:
+        x_token_input = st.text_input("X Bearer Token (opsiyonel)", value="", type="password", key="x_token_input")
+    with xc3:
+        run_x = st.button("𝕏 X Analizini Çalıştır", key="run_x_analysis", use_container_width=True)
 
-    if run_trends:
-        search_terms = [naked_ticker(trends_ticker)]
-        if trends_company_name.strip() and trends_company_name.strip().lower() != naked_ticker(trends_ticker).lower():
-            search_terms.append(trends_company_name.strip())
-
-        trends_result = fetch_google_trends_bundle(
-            tuple(search_terms),
-            geo="" if trends_geo == "GLOBAL" else trends_geo,
-            timeframe=trends_timeframe,
+    if run_x:
+        x_result = fetch_x_trends_bundle(
+            naked_ticker(x_ticker),
+            x_company_name.strip(),
+            bearer_token_override=x_token_input,
+            max_results=int(x_max_results),
         )
-        st.session_state.google_trends_result = trends_result
-        if trends_result.get("error") is None:
-            st.session_state.google_trends_analysis = build_google_trends_indicators(
-                trends_result.get("interest_df"),
-                trends_result.get("related_df"),
-            )
+        st.session_state.x_trends_result = x_result
+        if x_result.get("error") is None:
+            st.session_state.x_trends_analysis = build_x_indicators(x_result.get("posts_df"))
         else:
-            st.session_state.google_trends_analysis = {"error": trends_result.get("error")}
+            st.session_state.x_trends_analysis = {"error": x_result.get("error")}
 
-    gt_result = st.session_state.get("google_trends_result")
-    gt_analysis = st.session_state.get("google_trends_analysis")
+    x_result = st.session_state.get("x_trends_result")
+    x_analysis = st.session_state.get("x_trends_analysis")
 
-    if gt_result and gt_result.get("error"):
-        st.warning(gt_result["error"])
-    elif gt_analysis and gt_analysis.get("error"):
-        st.warning(gt_analysis["error"])
-    elif gt_result and gt_analysis:
-        interest_df = gt_result.get("interest_df", pd.DataFrame())
-        related_df = gt_result.get("related_df", pd.DataFrame())
-        work_df = gt_analysis.get("work_df", pd.DataFrame())
+    if x_result and x_result.get("error"):
+        st.warning(x_result["error"])
+    elif x_analysis and x_analysis.get("error"):
+        st.warning(x_analysis["error"])
+    elif x_result and x_analysis:
+        x_posts_df = x_result.get("posts_df", pd.DataFrame())
 
-        g1, g2, g3, g4, g5, g6 = st.columns(6)
-        g1.metric("Son Trends Skoru", f"{gt_analysis['latest_val']:.1f}")
-        g2.metric("4-Bar Momentum", f"{gt_analysis['momentum_4']:+.1f}" if pd.notna(gt_analysis['momentum_4']) else "N/A")
-        g3.metric("12-Bar Momentum", f"{gt_analysis['momentum_12']:+.1f}" if pd.notna(gt_analysis['momentum_12']) else "N/A")
-        g4.metric("Pozitif Skor", f"%{gt_analysis['positive_score']:.1f}")
-        g5.metric("Negatif Skor", f"%{gt_analysis['negative_score']:.1f}")
-        g6.metric("Genel Karar", gt_analysis["verdict"])
+        xg1, xg2, xg3, xg4, xg5, xg6 = st.columns(6)
+        xg1.metric("Pozitif Skor", f"%{x_analysis['positive_score']:.1f}")
+        xg2.metric("Negatif Skor", f"%{x_analysis['negative_score']:.1f}")
+        xg3.metric("Pozitif Post", str(x_analysis["positive_count"]))
+        xg4.metric("Negatif Post", str(x_analysis["negative_count"]))
+        xg5.metric("Ortalama Etkileşim", f"{x_analysis['avg_engagement']:.1f}" if pd.notna(x_analysis['avg_engagement']) else "N/A")
+        xg6.metric("Genel Karar", x_analysis["verdict"])
 
-        q1, q2, q3 = st.columns(3)
-        q1.metric("Pozitif İlişkili Sorgu", str(gt_analysis["positive_query_count"]))
-        q2.metric("Negatif İlişkili Sorgu", str(gt_analysis["negative_query_count"]))
-        q3.metric("Nötr İlişkili Sorgu", str(gt_analysis["neutral_query_count"]))
+        xv1, xv2 = st.columns(2)
+        with xv1:
+            x_volume_df = x_analysis.get("volume_df", pd.DataFrame())
+            if not x_volume_df.empty:
+                x_vol_fig = go.Figure()
+                x_vol_fig.add_trace(go.Bar(x=x_volume_df["Day"], y=x_volume_df["Post Count"], name="Post Count"))
+                x_vol_fig.update_layout(height=340, title="Günlük X Post Sayısı", xaxis_title="Tarih", yaxis_title="Post")
+                st.plotly_chart(x_vol_fig, use_container_width=True)
 
-        st.subheader("📊 Google Trends Zaman Serisi")
-        trends_fig = go.Figure()
-        if interest_df is not None and not interest_df.empty:
-            for col in interest_df.columns:
-                trends_fig.add_trace(go.Scatter(x=interest_df.index, y=interest_df[col], name=col))
-        if work_df is not None and not work_df.empty and "Combined" in work_df.columns:
-            trends_fig.add_trace(go.Scatter(
-                x=work_df.index,
-                y=work_df["Combined"],
-                name="Combined Ortalama",
-                line=dict(width=3, dash="dash"),
-            ))
-        trends_fig.update_layout(height=460, title="Google Trends İlgi Grafiği", xaxis_title="Tarih", yaxis_title="İlgi Skoru (0-100)")
-        st.plotly_chart(trends_fig, use_container_width=True)
+        with xv2:
+            x_pol_df = x_analysis.get("polarity_df", pd.DataFrame())
+            if not x_pol_df.empty:
+                x_pol_fig = go.Figure()
+                x_pol_fig.add_trace(go.Bar(x=x_pol_df["Polarity"], y=x_pol_df["Count"], name="Count"))
+                x_pol_fig.update_layout(height=340, title="X Polarity Dağılımı", xaxis_title="Polarity", yaxis_title="Adet")
+                st.plotly_chart(x_pol_fig, use_container_width=True)
 
-        st.subheader("⚖️ Pozitif / Negatif İndikatörler")
-        ind_col1, ind_col2 = st.columns(2)
-
-        with ind_col1:
-            momentum_df = gt_analysis.get("momentum_df", pd.DataFrame()).copy()
-            if momentum_df is not None and not momentum_df.empty:
-                mom_fig = go.Figure()
-                mom_fig.add_trace(go.Bar(x=momentum_df["Metric"], y=momentum_df["Value"], name="Değer"))
-                mom_fig.update_layout(height=340, title="Momentum ve Z-Score")
-                st.plotly_chart(mom_fig, use_container_width=True)
-
-        with ind_col2:
-            qp_df = gt_analysis.get("query_polarity_df", pd.DataFrame()).copy()
-            if qp_df is not None and not qp_df.empty:
-                qp_fig = go.Figure()
-                qp_fig.add_trace(go.Bar(x=qp_df["Polarity"], y=qp_df["Count"], name="Sorgu Sayısı"))
-                qp_fig.update_layout(height=340, title="İlişkili Sorgu Polarity Dağılımı")
-                st.plotly_chart(qp_fig, use_container_width=True)
-
-        st.subheader("🧾 Pozitif / Negatif Bileşen Listesi")
-        flags_df = gt_analysis.get("flags_df", pd.DataFrame())
-        if flags_df is not None and not flags_df.empty:
-            st.dataframe(flags_df, use_container_width=True, height=220)
-
-        st.subheader("🔎 İlişkili Sorgular")
-        if related_df is not None and not related_df.empty:
-            related_df_show = related_df.copy()
-            st.dataframe(related_df_show, use_container_width=True, height=320)
-
-            pos_related = related_df_show[related_df_show["Polarity"] == "Pozitif"].copy()
-            neg_related = related_df_show[related_df_show["Polarity"] == "Negatif"].copy()
-
-            rel1, rel2 = st.columns(2)
-            with rel1:
-                st.markdown("**Pozitif Sorgular**")
-                if not pos_related.empty:
-                    st.dataframe(pos_related, use_container_width=True, height=220)
-                else:
-                    st.info("Pozitif sınıflanan sorgu bulunamadı.")
-
-            with rel2:
-                st.markdown("**Negatif Sorgular**")
-                if not neg_related.empty:
-                    st.dataframe(neg_related, use_container_width=True, height=220)
-                else:
-                    st.info("Negatif sınıflanan sorgu bulunamadı.")
+        st.subheader("🧾 X Sonuç Tablosu")
+        if not x_posts_df.empty:
+            x_show = x_posts_df[["Date", "Author", "Author Name", "Polarity", "Engagement", "Text"]].copy()
+            st.dataframe(x_show.sort_values("Date", ascending=False), use_container_width=True, height=360)
         else:
-            st.info("Google Trends ilişkili sorgu verisi gelmedi veya veri sağlayıcı bu aramada sonuç döndürmedi.")
+            st.info("X araması veri döndürmedi.")
 
-        st.info(
-            f"Bu sekme `{naked_ticker(trends_ticker)}` ve `{trends_company_name.strip() or naked_ticker(trends_ticker)}` anahtar kelimelerini birlikte izler. "
-            "Google Trends skoru fiyat tahmini değildir; yatırımcı ilgisi ve arama davranışındaki güçlenme/zayıflama için yardımcı sinyal olarak kullanılmalıdır."
+with tab_youtube:
+    st.header("▶️ YouTube Trends")
+    st.caption("Seçili hisse için hem sembol hem de şirketin tam adıyla YouTube araması yapar; pozitif/negatif video göstergeleri ve grafikler üretir.")
+
+    yt_symbol_options = [naked_ticker(x) for x in universe] if universe else [naked_ticker(ticker)]
+    default_yt_symbol = naked_ticker(ticker) if naked_ticker(ticker) in yt_symbol_options else yt_symbol_options[0]
+
+    yt_symbol_raw = st.selectbox(
+        "Hisse Seç",
+        options=yt_symbol_options,
+        index=yt_symbol_options.index(default_yt_symbol),
+        key="yt_symbol_raw",
+    )
+    yt_ticker = normalize_ticker(yt_symbol_raw, market)
+
+    yt_company_name_auto = get_company_name_for_social(yt_ticker, market, st.session_state.get("screener_df", pd.DataFrame()))
+    yt_company_name = st.text_input(
+        "Şirketin Tam Adı",
+        value=yt_company_name_auto,
+        key="yt_company_name",
+        help="YouTube aramasında sembol ile birlikte şirketin tam adı da aranır.",
+    )
+
+    yc1, yc2, yc3, yc4 = st.columns(4)
+    with yc1:
+        yt_lookback = st.selectbox("Zaman Aralığı", ["Son 1 Gün", "Son 7 Gün", "Son 30 Gün", "Son 90 Gün", "Son 12 Ay"], index=2, key="yt_lookback")
+    with yc2:
+        yt_max_results = st.slider("Maksimum Video", min_value=5, max_value=50, value=25, step=5, key="yt_max_results")
+    with yc3:
+        yt_api_key_input = st.text_input("YouTube API Key (opsiyonel)", value="", type="password", key="yt_api_key_input")
+    with yc4:
+        run_yt = st.button("▶️ YouTube Analizini Çalıştır", key="run_youtube_analysis", use_container_width=True)
+
+    if run_yt:
+        yt_result = fetch_youtube_trends_bundle(
+            naked_ticker(yt_ticker),
+            yt_company_name.strip(),
+            api_key_override=yt_api_key_input,
+            lookback_label=yt_lookback,
+            max_results=int(yt_max_results),
         )
+        st.session_state.youtube_trends_result = yt_result
+        if yt_result.get("error") is None:
+            st.session_state.youtube_trends_analysis = build_youtube_indicators(yt_result.get("videos_df"))
+        else:
+            st.session_state.youtube_trends_analysis = {"error": yt_result.get("error")}
 
+    yt_result = st.session_state.get("youtube_trends_result")
+    yt_analysis = st.session_state.get("youtube_trends_analysis")
+
+    if yt_result and yt_result.get("error"):
+        st.warning(yt_result["error"])
+    elif yt_analysis and yt_analysis.get("error"):
+        st.warning(yt_analysis["error"])
+    elif yt_result and yt_analysis:
+        yt_videos_df = yt_result.get("videos_df", pd.DataFrame())
+
+        yg1, yg2, yg3, yg4, yg5, yg6 = st.columns(6)
+        yg1.metric("Pozitif Skor", f"%{yt_analysis['positive_score']:.1f}")
+        yg2.metric("Negatif Skor", f"%{yt_analysis['negative_score']:.1f}")
+        yg3.metric("Pozitif Video", str(yt_analysis["positive_count"]))
+        yg4.metric("Negatif Video", str(yt_analysis["negative_count"]))
+        yg5.metric("Ortalama İzlenme", f"{yt_analysis['avg_views']:.1f}" if pd.notna(yt_analysis['avg_views']) else "N/A")
+        yg6.metric("Genel Karar", yt_analysis["verdict"])
+
+        yv1, yv2 = st.columns(2)
+        with yv1:
+            yt_volume_df = yt_analysis.get("volume_df", pd.DataFrame())
+            if not yt_volume_df.empty:
+                yt_vol_fig = go.Figure()
+                yt_vol_fig.add_trace(go.Bar(x=yt_volume_df["Day"], y=yt_volume_df["Video Count"], name="Video Count"))
+                yt_vol_fig.update_layout(height=340, title="Günlük YouTube Video Sayısı", xaxis_title="Tarih", yaxis_title="Video")
+                st.plotly_chart(yt_vol_fig, use_container_width=True)
+
+        with yv2:
+            yt_pol_df = yt_analysis.get("polarity_df", pd.DataFrame())
+            if not yt_pol_df.empty:
+                yt_pol_fig = go.Figure()
+                yt_pol_fig.add_trace(go.Bar(x=yt_pol_df["Polarity"], y=yt_pol_df["Count"], name="Count"))
+                yt_pol_fig.update_layout(height=340, title="YouTube Polarity Dağılımı", xaxis_title="Polarity", yaxis_title="Adet")
+                st.plotly_chart(yt_pol_fig, use_container_width=True)
+
+        st.subheader("🧾 YouTube Sonuç Tablosu")
+        if not yt_videos_df.empty:
+            yt_show = yt_videos_df[["Published At", "Channel", "Polarity", "View Count", "Like Count", "Comment Count", "Title", "Video URL"]].copy()
+            st.dataframe(yt_show.sort_values("Published At", ascending=False), use_container_width=True, height=360)
+        else:
+            st.info("YouTube araması veri döndürmedi.")
 
