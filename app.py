@@ -3840,6 +3840,7 @@ def build_youtube_indicators(videos_df: pd.DataFrame) -> Dict[str, Any]:
     }
 
 
+
 # =============================
 # ECONOMIC CALENDAR HELPERS
 # =============================
@@ -3933,54 +3934,231 @@ def make_hover_question_html(event_name: str, category: str = "", country: str =
     tooltip = tooltip.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
     return f'<span title="{tooltip}" style="cursor:help; font-weight:700; color:#d97706;"> ? </span>'
 
+def _normalize_te_calendar_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    out = df.copy()
+    if "Date" in out.columns:
+        out["Date"] = pd.to_datetime(out["Date"], errors="coerce", utc=True).dt.tz_convert(None)
+    else:
+        out["Date"] = pd.NaT
+
+    preferred_cols = [
+        "Date", "Country", "Category", "Event", "Actual", "Forecast", "Previous",
+        "Importance", "Unit", "Currency", "Reference", "Ticker", "Symbol", "URL"
+    ]
+    for col in preferred_cols:
+        if col not in out.columns:
+            out[col] = np.nan
+
+    out["ImportanceLabel"] = out["Importance"].map({1: "Düşük", 2: "Orta", 3: "Yüksek"}).fillna("N/A")
+    out["Education"] = out.apply(
+        lambda r: get_econ_event_education(r.get("Event", ""), r.get("Category", ""), r.get("Country", "")),
+        axis=1,
+    )
+    out = out.sort_values(["Date", "Country", "Importance"], ascending=[True, True, False]).reset_index(drop=True)
+    return out[preferred_cols + ["ImportanceLabel", "Education"]]
+
 @st.cache_data(ttl=15 * 60, show_spinner=False)
 def fetch_economic_calendar(country_names: Tuple[str, ...], importance: str = "3", api_key_override: str = "", days_back: int = 1, days_forward: int = 14) -> Dict[str, Any]:
-    api_key = str(api_key_override or "").strip()
-    if not api_key:
-        try:
-            api_key = str(st.secrets.get("TRADING_ECONOMICS_API_KEY", "")).strip()
-        except Exception:
-            api_key = ""
-    if not api_key:
-        api_key = "guest:guest"
-
     clean_countries = [str(c).strip().lower() for c in country_names if str(c).strip()]
     if not clean_countries:
-        return {"error": "En az bir ülke seçmelisin.", "df": pd.DataFrame()}
-
-    country_path = ",".join([c.replace(" ", "%20") for c in clean_countries])
-    url = f"https://api.tradingeconomics.com/calendar/country/{country_path}?c={api_key}&importance={importance}"
-
-    try:
-        resp = requests.get(url, timeout=35)
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as e:
-        return {"error": f"Economic Calendar API çağrısı başarısız: {e}", "df": pd.DataFrame()}
-
-    df = pd.DataFrame(data)
-    if df.empty:
-        return {"error": "Seçilen filtrelerle ekonomik takvim verisi gelmedi.", "df": pd.DataFrame()}
-
-    if "Date" in df.columns:
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce", utc=True).dt.tz_convert(None)
-    else:
-        df["Date"] = pd.NaT
+        return {"error": "En az bir ülke seçmelisin.", "df": pd.DataFrame(), "source": ""}
 
     now_dt = datetime.datetime.utcnow()
     start_dt = now_dt - datetime.timedelta(days=int(days_back))
     end_dt = now_dt + datetime.timedelta(days=int(days_forward))
-    df = df[(df["Date"].isna()) | ((df["Date"] >= start_dt) & (df["Date"] <= end_dt))].copy()
 
-    preferred_cols = ["Date", "Country", "Category", "Event", "Actual", "Forecast", "Previous", "Importance", "Unit", "Currency", "Reference", "Ticker", "Symbol", "URL"]
-    for col in preferred_cols:
-        if col not in df.columns:
-            df[col] = np.nan
+    candidate_keys = []
+    api_key = str(api_key_override or "").strip()
+    if api_key:
+        candidate_keys.append(api_key)
 
-    df["ImportanceLabel"] = df["Importance"].map({1: "Düşük", 2: "Orta", 3: "Yüksek"}).fillna("N/A")
-    df["Education"] = df.apply(lambda r: get_econ_event_education(r.get("Event", ""), r.get("Category", ""), r.get("Country", "")), axis=1)
-    df = df.sort_values(["Date", "Country", "Importance"], ascending=[True, True, False]).reset_index(drop=True)
-    return {"error": None, "df": df[preferred_cols + ["ImportanceLabel", "Education"]]}
+    try:
+        secret_key = str(st.secrets.get("TRADING_ECONOMICS_API_KEY", "")).strip()
+    except Exception:
+        secret_key = ""
+    if secret_key and secret_key not in candidate_keys:
+        candidate_keys.append(secret_key)
+
+    if "guest:guest" not in candidate_keys:
+        candidate_keys.append("guest:guest")
+
+    country_path = ",".join([c.replace(" ", "%20") for c in clean_countries])
+
+    def _request_json(url: str):
+        resp = requests.get(url, timeout=35)
+        resp.raise_for_status()
+        return resp.json()
+
+    errors = []
+    for key in candidate_keys:
+        try:
+            url = f"https://api.tradingeconomics.com/calendar/country/{country_path}?c={key}&importance={importance}"
+            data = _request_json(url)
+            df = pd.DataFrame(data)
+            if not df.empty:
+                df = _normalize_te_calendar_df(df)
+                df = df[(df["Date"].isna()) | ((df["Date"] >= start_dt) & (df["Date"] <= end_dt))].copy()
+                if not df.empty:
+                    return {"error": None, "df": df, "source": "country_endpoint"}
+        except Exception as e:
+            errors.append(f"country endpoint ({key}): {e}")
+
+    for key in candidate_keys:
+        try:
+            url = f"https://api.tradingeconomics.com/calendar?c={key}"
+            data = _request_json(url)
+            df = pd.DataFrame(data)
+            if not df.empty:
+                df = _normalize_te_calendar_df(df)
+                df["CountryLower"] = df["Country"].astype(str).str.lower()
+                df = df[df["CountryLower"].isin(clean_countries)].drop(columns=["CountryLower"], errors="ignore")
+                if importance != "1,2,3":
+                    allowed = {int(x) for x in str(importance).split(",") if str(x).strip().isdigit()}
+                    df = df[df["Importance"].isin(allowed)]
+                df = df[(df["Date"].isna()) | ((df["Date"] >= start_dt) & (df["Date"] <= end_dt))].copy()
+                if not df.empty:
+                    return {"error": None, "df": df, "source": "snapshot_fallback"}
+        except Exception as e:
+            errors.append(f"snapshot endpoint ({key}): {e}")
+
+    return {
+        "error": "Economic Calendar verisi alınamadı. Ücretsiz TradingEconomics erişimi de sonuç döndürmedi.",
+        "df": pd.DataFrame(),
+        "source": "none",
+        "details": errors[-3:],
+    }
+
+@st.cache_data(ttl=30 * 60, show_spinner=False)
+def fetch_bist100_nhnl_indicator() -> Dict[str, Any]:
+    bist100 = load_universe_file(pjoin("universes", "bist100.txt"))
+    if not bist100:
+        return {"error": "BIST100 universe listesi bulunamadı.", "df": pd.DataFrame()}
+
+    tickers = [normalize_ticker(t, "BIST") for t in bist100]
+    try:
+        raw = yf.download(tickers, period="2y", interval="1d", auto_adjust=True, group_by="ticker", threads=True, progress=False)
+    except Exception as e:
+        return {"error": f"NH-NL verisi indirilemedi: {e}", "df": pd.DataFrame()}
+
+    if raw is None or raw.empty:
+        return {"error": "NH-NL için veri gelmedi.", "df": pd.DataFrame()}
+
+    series_list = []
+    for tk in tickers:
+        try:
+            if isinstance(raw.columns, pd.MultiIndex):
+                sub = raw[tk].copy()
+            else:
+                sub = raw.copy()
+            sub = _flatten_yf(sub)
+            if sub.empty or "High" not in sub.columns or "Low" not in sub.columns:
+                continue
+
+            rolling_high = sub["High"].rolling(252, min_periods=60).max()
+            rolling_low = sub["Low"].rolling(252, min_periods=60).min()
+
+            nh_flag = (sub["High"] >= rolling_high).astype(int)
+            nl_flag = (sub["Low"] <= rolling_low).astype(int)
+
+            tmp = pd.DataFrame({
+                f"{tk}_NH": nh_flag,
+                f"{tk}_NL": nl_flag,
+            }, index=sub.index)
+            series_list.append(tmp)
+        except Exception:
+            continue
+
+    if not series_list:
+        return {"error": "NH-NL hesaplamak için yeterli hisse verisi oluşmadı.", "df": pd.DataFrame()}
+
+    merged = pd.concat(series_list, axis=1).fillna(0)
+    nh_cols = [c for c in merged.columns if c.endswith("_NH")]
+    nl_cols = [c for c in merged.columns if c.endswith("_NL")]
+
+    out = pd.DataFrame(index=merged.index)
+    out["NH"] = merged[nh_cols].sum(axis=1)
+    out["NL"] = merged[nl_cols].sum(axis=1)
+    out["NH_NL"] = out["NH"] - out["NL"]
+    out["NH_NL_EMA10"] = ema(out["NH_NL"], 10)
+    out = out.sort_index()
+    return {"error": None, "df": out}
+
+@st.cache_data(ttl=30 * 60, show_spinner=False)
+def fetch_vix_series() -> Dict[str, Any]:
+    try:
+        vix_df = yf.download("^VIX", period="1y", interval="1d", auto_adjust=True, progress=False)
+        vix_df = _flatten_yf(vix_df)
+    except Exception as e:
+        return {"error": f"VIX verisi alınamadı: {e}", "df": pd.DataFrame()}
+
+    if vix_df.empty:
+        return {"error": "VIX verisi boş döndü.", "df": pd.DataFrame()}
+
+    vix_df["EMA13"] = ema(vix_df["Close"], 13)
+    return {"error": None, "df": vix_df}
+
+@st.cache_data(ttl=30 * 60, show_spinner=False)
+def fetch_bist100_force_index_panel() -> Dict[str, Any]:
+    try:
+        xu100 = yf.download("XU100.IS", period="2y", interval="1d", auto_adjust=True, progress=False)
+        xu100 = _flatten_yf(xu100)
+    except Exception as e:
+        return {"error": f"BIST100 panel verisi alınamadı: {e}", "df": pd.DataFrame()}
+
+    if xu100.empty:
+        return {"error": "BIST100 panel verisi boş döndü.", "df": pd.DataFrame()}
+
+    xu100["EMA13"] = ema(xu100["Close"], 13)
+    fi = force_index(xu100["Close"], xu100["Volume"])
+    xu100["ForceIndex"] = fi
+    xu100["ForceIndexEMA13"] = ema(fi, 13)
+    return {"error": None, "df": xu100}
+
+@st.cache_data(ttl=30 * 60, show_spinner=False)
+def fetch_bist100_option_volatility_free() -> Dict[str, Any]:
+    try:
+        t = yf.Ticker("XU100.IS")
+        expiries = list(getattr(t, "options", []) or [])
+    except Exception as e:
+        return {"error": f"Opsiyon oynaklığı verisi alınamadı: {e}", "df": pd.DataFrame()}
+
+    if not expiries:
+        return {"error": "Ücretsiz veri kaynağında XU100.IS için opsiyon vadesi bulunamadı.", "df": pd.DataFrame()}
+
+    rows = []
+    for exp in expiries[:6]:
+        try:
+            chain = t.option_chain(exp)
+            calls = getattr(chain, "calls", pd.DataFrame())
+            puts = getattr(chain, "puts", pd.DataFrame())
+
+            call_iv = safe_float(calls["impliedVolatility"].replace(0, np.nan).mean()) if not calls.empty and "impliedVolatility" in calls.columns else np.nan
+            put_iv = safe_float(puts["impliedVolatility"].replace(0, np.nan).mean()) if not puts.empty and "impliedVolatility" in puts.columns else np.nan
+            all_iv_vals = pd.concat([
+                calls["impliedVolatility"] if not calls.empty and "impliedVolatility" in calls.columns else pd.Series(dtype=float),
+                puts["impliedVolatility"] if not puts.empty and "impliedVolatility" in puts.columns else pd.Series(dtype=float),
+            ], axis=0).replace(0, np.nan).dropna()
+
+            avg_iv = safe_float(all_iv_vals.mean()) if not all_iv_vals.empty else np.nan
+            rows.append({
+                "Expiry": pd.to_datetime(exp),
+                "Call_IV": call_iv,
+                "Put_IV": put_iv,
+                "Avg_IV": avg_iv,
+                "Call_Count": 0 if calls.empty else int(len(calls)),
+                "Put_Count": 0 if puts.empty else int(len(puts)),
+            })
+        except Exception:
+            continue
+
+    out = pd.DataFrame(rows).sort_values("Expiry") if rows else pd.DataFrame()
+    if out.empty or out["Avg_IV"].dropna().empty:
+        return {"error": "Ücretsiz kaynakta kullanılabilir implied volatility serisi oluşmadı.", "df": pd.DataFrame()}
+
+    return {"error": None, "df": out}
 
 # =============================
 # Tabs
@@ -5172,12 +5350,14 @@ with tab_youtube:
             st.info("YouTube araması veri döndürmedi.")
 
 
+
 with tab_calendar:
-    st.header("🗓️ Ekonomik Takvim")
-    st.caption("Ülkeler bazlı önemli makro verileri getirir. Her etkinlik kartındaki soru işaretinin üzerine geldiğinde bu verinin piyasayı ve hangi sektörleri etkileyebileceğine dair kısa eğitim notu görünür.")
+    st.header("🗓️ Ekonomik Takvim + Makro Risk Paneli")
+    st.caption("Ülkeler bazlı önemli makro verileri getirir. İstediğin veri bloğunu sadece ilgili çalıştır tuşuna basınca çağırır; böylece uygulama her hisse seçiminde gereksiz yüklenmez.")
 
     country_options = ["united states", "euro area", "united kingdom", "turkey", "china", "japan", "germany", "france", "canada", "australia", "india", "brazil"]
 
+    st.subheader("1) Ekonomik Takvim")
     ec1, ec2, ec3, ec4 = st.columns(4)
     with ec1:
         selected_countries = st.multiselect(
@@ -5201,37 +5381,38 @@ with tab_calendar:
         days_back = st.slider("Kaç Gün Geri", min_value=0, max_value=7, value=1, step=1, key="econ_calendar_days_back")
 
     econ_api_key_input = st.text_input(
-        "TradingEconomics API Key (opsiyonel)",
+        "TradingEconomics API Key (opsiyonel / gelişmiş)",
         value="",
         type="password",
         key="econ_calendar_api_key_input",
-        help="Boş bırakırsan önce secrets içindeki TRADING_ECONOMICS_API_KEY denenir, yoksa guest:guest fallback kullanılır.",
+        help="Boş bırakırsan önce secrets içindeki TRADING_ECONOMICS_API_KEY, o da yoksa ücretsiz guest:guest denenir.",
     )
 
     run_econ_calendar = st.button("🗓️ Ekonomik Takvimi Getir", key="run_econ_calendar", use_container_width=True)
 
     if run_econ_calendar:
-        econ_result = fetch_economic_calendar(
+        st.session_state.econ_calendar_result = fetch_economic_calendar(
             tuple(selected_countries),
             importance=importance_value,
             api_key_override=econ_api_key_input,
             days_back=int(days_back),
             days_forward=int(days_forward),
         )
-        st.session_state.econ_calendar_result = econ_result
 
     econ_result = st.session_state.get("econ_calendar_result")
-
     if econ_result:
         if econ_result.get("error"):
             st.warning(econ_result["error"])
+            if econ_result.get("details"):
+                with st.expander("Teknik hata detayları", expanded=False):
+                    for item in econ_result.get("details", []):
+                        st.write(f"- {item}")
         else:
             econ_df = econ_result.get("df", pd.DataFrame()).copy()
-
             if econ_df.empty:
                 st.info("Seçilen filtrelerle ekonomik takvim verisi bulunamadı.")
             else:
-                st.success(f"Toplam {len(econ_df)} ekonomik etkinlik bulundu.")
+                st.success(f"Toplam {len(econ_df)} ekonomik etkinlik bulundu. Kaynak: {econ_result.get('source', 'N/A')}")
 
                 m1, m2, m3, m4 = st.columns(4)
                 high_count = int((econ_df["Importance"] == 3).sum()) if "Importance" in econ_df.columns else 0
@@ -5266,28 +5447,133 @@ with tab_calendar:
                         unsafe_allow_html=True,
                     )
 
-                st.subheader("Grafikler")
                 gc1, gc2 = st.columns(2)
-
                 with gc1:
                     by_country = econ_df.groupby("Country").size().reset_index(name="Event Count")
                     fig_country = go.Figure()
                     fig_country.add_trace(go.Bar(x=by_country["Country"], y=by_country["Event Count"], name="Event Count"))
-                    fig_country.update_layout(height=340, title="Ülkeye Göre Veri Sayısı", xaxis_title="Ülke", yaxis_title="Adet")
+                    fig_country.update_layout(height=320, title="Ülkeye Göre Veri Sayısı", xaxis_title="Ülke", yaxis_title="Adet")
                     st.plotly_chart(fig_country, use_container_width=True)
 
                 with gc2:
                     by_cat = econ_df.groupby("Category").size().reset_index(name="Event Count").sort_values("Event Count", ascending=False).head(12)
                     fig_cat = go.Figure()
                     fig_cat.add_trace(go.Bar(x=by_cat["Category"], y=by_cat["Event Count"], name="Event Count"))
-                    fig_cat.update_layout(height=340, title="Kategoriye Göre Veri Sayısı", xaxis_title="Kategori", yaxis_title="Adet")
+                    fig_cat.update_layout(height=320, title="Kategoriye Göre Veri Sayısı", xaxis_title="Kategori", yaxis_title="Adet")
                     st.plotly_chart(fig_cat, use_container_width=True)
 
                 st.subheader("Takvim Tablosu")
                 show_df = econ_df[["Date", "Country", "Category", "Event", "Actual", "Forecast", "Previous", "ImportanceLabel"]].copy()
-                st.dataframe(show_df, use_container_width=True, height=360)
+                st.dataframe(show_df, use_container_width=True, height=320)
 
                 with st.expander("Eğitim Notları — Hangi veri hangi sektörleri etkiler?", expanded=False):
                     edu_df = econ_df[["Country", "Event", "Category", "Education"]].drop_duplicates().reset_index(drop=True)
-                    st.dataframe(edu_df, use_container_width=True, height=320)
+                    st.dataframe(edu_df, use_container_width=True, height=280)
+
+    st.divider()
+    st.subheader("2) BIST100 NH-NL İndikatörü")
+    if st.button("NH-NL İndikatörünü Çalıştır", key="run_nhnl_indicator", use_container_width=True):
+        st.session_state.nhnl_result = fetch_bist100_nhnl_indicator()
+
+    nhnl_result = st.session_state.get("nhnl_result")
+    if nhnl_result:
+        if nhnl_result.get("error"):
+            st.warning(nhnl_result["error"])
+        else:
+            nhnl_df = nhnl_result.get("df", pd.DataFrame()).copy()
+            if not nhnl_df.empty:
+                n1, n2, n3 = st.columns(3)
+                n1.metric("Son NH", f"{int(nhnl_df['NH'].iloc[-1])}")
+                n2.metric("Son NL", f"{int(nhnl_df['NL'].iloc[-1])}")
+                n3.metric("Son NH-NL", f"{float(nhnl_df['NH_NL'].iloc[-1]):.0f}")
+
+                fig_nhnl = go.Figure()
+                fig_nhnl.add_trace(go.Bar(x=nhnl_df.index, y=nhnl_df["NH_NL"], name="NH-NL"))
+                fig_nhnl.add_trace(go.Scatter(x=nhnl_df.index, y=nhnl_df["NH_NL_EMA10"], name="EMA10", line=dict(width=2)))
+                fig_nhnl.update_layout(height=360, title="BIST100 NH-NL İndikatörü", xaxis_title="Tarih", yaxis_title="Değer")
+                st.plotly_chart(fig_nhnl, use_container_width=True)
+
+    st.divider()
+    st.subheader("3) Küresel VIX Endeksi")
+    if st.button("VIX Grafiğini Çalıştır", key="run_vix_panel", use_container_width=True):
+        st.session_state.vix_result = fetch_vix_series()
+
+    vix_result = st.session_state.get("vix_result")
+    if vix_result:
+        if vix_result.get("error"):
+            st.warning(vix_result["error"])
+        else:
+            vix_df = vix_result.get("df", pd.DataFrame()).copy()
+            if not vix_df.empty:
+                v1, v2 = st.columns(2)
+                v1.metric("Son VIX", f"{float(vix_df['Close'].iloc[-1]):.2f}")
+                v2.metric("VIX vs EMA13", f"{float(vix_df['Close'].iloc[-1] - vix_df['EMA13'].iloc[-1]):+.2f}")
+
+                fig_vix = go.Figure()
+                fig_vix.add_trace(go.Scatter(x=vix_df.index, y=vix_df["Close"], name="VIX", line=dict(width=2)))
+                fig_vix.add_trace(go.Scatter(x=vix_df.index, y=vix_df["EMA13"], name="EMA13", line=dict(width=2, dash="dash")))
+                fig_vix.update_layout(height=360, title="Küresel VIX Endeksi", xaxis_title="Tarih", yaxis_title="VIX")
+                st.plotly_chart(fig_vix, use_container_width=True)
+
+    st.divider()
+    st.subheader("4) BIST100 Opsiyon Oynaklığı (Ücretsiz Kaynak)")
+    st.caption("Bu bölüm ücretsiz kaynakta XU100.IS opsiyon zinciri bulunursa ortalama implied volatility hesaplar. Resmî VİOP opsiyon verisi değildir.")
+    if st.button("Opsiyon Oynaklığını Çalıştır", key="run_bist_option_iv", use_container_width=True):
+        st.session_state.bist_option_iv_result = fetch_bist100_option_volatility_free()
+
+    option_iv_result = st.session_state.get("bist_option_iv_result")
+    if option_iv_result:
+        if option_iv_result.get("error"):
+            st.warning(option_iv_result["error"])
+        else:
+            iv_df = option_iv_result.get("df", pd.DataFrame()).copy()
+            if not iv_df.empty:
+                o1, o2, o3 = st.columns(3)
+                o1.metric("Son Ortalama IV", f"%{float(iv_df['Avg_IV'].iloc[0] * 100):.2f}" if pd.notna(iv_df["Avg_IV"].iloc[0]) else "N/A")
+                o2.metric("Vade Sayısı", str(len(iv_df)))
+                o3.metric("İlk Vade", iv_df["Expiry"].iloc[0].strftime("%Y-%m-%d") if pd.notna(iv_df["Expiry"].iloc[0]) else "N/A")
+
+                fig_iv = go.Figure()
+                fig_iv.add_trace(go.Scatter(x=iv_df["Expiry"], y=iv_df["Avg_IV"] * 100, name="Avg IV %", mode="lines+markers"))
+                fig_iv.add_trace(go.Scatter(x=iv_df["Expiry"], y=iv_df["Call_IV"] * 100, name="Call IV %", mode="lines+markers"))
+                fig_iv.add_trace(go.Scatter(x=iv_df["Expiry"], y=iv_df["Put_IV"] * 100, name="Put IV %", mode="lines+markers"))
+                fig_iv.update_layout(height=360, title="BIST100 Opsiyon Oynaklığı", xaxis_title="Vade", yaxis_title="IV %")
+                st.plotly_chart(fig_iv, use_container_width=True)
+                st.dataframe(iv_df, use_container_width=True, height=220)
+
+    st.divider()
+    st.subheader("5) BIST100 Kuvvet Endeksi + 13 Günlük EMA (Elder)")
+    if st.button("BIST100 Elder Panelini Çalıştır", key="run_bist_force_panel", use_container_width=True):
+        st.session_state.bist_force_result = fetch_bist100_force_index_panel()
+
+    bist_force_result = st.session_state.get("bist_force_result")
+    if bist_force_result:
+        if bist_force_result.get("error"):
+            st.warning(bist_force_result["error"])
+        else:
+            elder_df = bist_force_result.get("df", pd.DataFrame()).copy()
+            if not elder_df.empty:
+                e1, e2, e3 = st.columns(3)
+                e1.metric("XU100 Son Kapanış", f"{float(elder_df['Close'].iloc[-1]):.2f}")
+                e2.metric("EMA13 Farkı", f"{float(elder_df['Close'].iloc[-1] - elder_df['EMA13'].iloc[-1]):+.2f}")
+                e3.metric("Force Index", f"{float(elder_df['ForceIndex'].iloc[-1]):.0f}")
+
+                fig_price = go.Figure()
+                fig_price.add_trace(go.Candlestick(
+                    x=elder_df.index,
+                    open=elder_df["Open"],
+                    high=elder_df["High"],
+                    low=elder_df["Low"],
+                    close=elder_df["Close"],
+                    name="XU100"
+                ))
+                fig_price.add_trace(go.Scatter(x=elder_df.index, y=elder_df["EMA13"], name="EMA13", line=dict(width=2)))
+                fig_price.update_layout(height=420, title="BIST100 Fiyat + 13 Günlük EMA", xaxis_rangeslider_visible=False)
+                st.plotly_chart(fig_price, use_container_width=True)
+
+                fig_force = go.Figure()
+                fig_force.add_trace(go.Bar(x=elder_df.index, y=elder_df["ForceIndex"], name="Force Index"))
+                fig_force.add_trace(go.Scatter(x=elder_df.index, y=elder_df["ForceIndexEMA13"], name="FI EMA13", line=dict(width=2)))
+                fig_force.update_layout(height=320, title="BIST100 Kuvvet Endeksi (Force Index) + EMA13", xaxis_title="Tarih", yaxis_title="Force Index")
+                st.plotly_chart(fig_force, use_container_width=True)
 
