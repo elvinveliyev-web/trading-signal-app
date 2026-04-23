@@ -4160,6 +4160,172 @@ def fetch_bist100_force_index_panel() -> Dict[str, Any]:
     xu100["ForceIndexEMA13"] = ema(fi, 13)
     return {"error": None, "df": xu100}
 
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def fetch_next_corporate_dates(symbol: str, selected_market: str = "USA") -> Dict[str, Any]:
+    ticker_norm = normalize_ticker(symbol, selected_market)
+    out = {
+        "ticker": ticker_norm,
+        "next_earnings_date": None,
+        "next_dividend_date": None,
+        "earnings_source": "",
+        "dividend_source": "",
+        "last_dividend_date": None,
+    }
+
+    def _to_dt(val):
+        try:
+            if val is None:
+                return None
+            if isinstance(val, pd.Timestamp):
+                ts = val
+            elif isinstance(val, (list, tuple)):
+                if len(val) == 0:
+                    return None
+                for item in val:
+                    dt = _to_dt(item)
+                    if dt is not None:
+                        return dt
+                return None
+            elif isinstance(val, dict):
+                for item in val.values():
+                    dt = _to_dt(item)
+                    if dt is not None:
+                        return dt
+                return None
+            else:
+                if isinstance(val, (int, float, np.integer, np.floating)) and not pd.isna(val):
+                    if float(val) > 1e12:
+                        ts = pd.to_datetime(val, unit="ms", errors="coerce", utc=True)
+                    else:
+                        ts = pd.to_datetime(val, unit="s", errors="coerce", utc=True)
+                else:
+                    ts = pd.to_datetime(val, errors="coerce", utc=True)
+
+            if ts is None or pd.isna(ts):
+                return None
+            if getattr(ts, "tzinfo", None) is not None:
+                ts = ts.tz_convert(None)
+            return ts
+        except Exception:
+            return None
+
+    def _pick_future(candidates):
+        now_dt = pd.Timestamp(datetime.datetime.utcnow())
+        parsed = []
+        for c in candidates:
+            dt = _to_dt(c)
+            if dt is not None:
+                parsed.append(dt)
+        parsed = sorted(set(parsed))
+        future = [d for d in parsed if d >= (now_dt - pd.Timedelta(days=1))]
+        return future[0] if future else (parsed[-1] if parsed else None)
+
+    try:
+        t = yf.Ticker(ticker_norm)
+    except Exception:
+        return out
+
+    # 1) Calendar route
+    try:
+        cal = t.calendar
+    except Exception:
+        cal = None
+
+    cal_dict = {}
+    try:
+        if isinstance(cal, pd.DataFrame):
+            if not cal.empty:
+                if cal.shape[1] == 1:
+                    cal_dict = {str(idx): cal.iloc[i, 0] for i, idx in enumerate(cal.index)}
+                else:
+                    cal_dict = cal.to_dict()
+        elif isinstance(cal, pd.Series):
+            cal_dict = cal.to_dict()
+        elif isinstance(cal, dict):
+            cal_dict = cal
+    except Exception:
+        cal_dict = {}
+
+    if cal_dict:
+        earnings_candidates = []
+        dividend_candidates = []
+        for k, v in cal_dict.items():
+            key_low = str(k).lower()
+            if "earning" in key_low:
+                earnings_candidates.append(v)
+            if "dividend" in key_low:
+                dividend_candidates.append(v)
+
+        picked_earn = _pick_future(earnings_candidates)
+        picked_div = _pick_future(dividend_candidates)
+
+        if picked_earn is not None:
+            out["next_earnings_date"] = picked_earn
+            out["earnings_source"] = "calendar"
+        if picked_div is not None:
+            out["next_dividend_date"] = picked_div
+            out["dividend_source"] = "calendar"
+
+    # 2) Earnings dates route
+    if out["next_earnings_date"] is None:
+        try:
+            edf = t.get_earnings_dates(limit=12)
+            if isinstance(edf, pd.DataFrame) and not edf.empty:
+                candidates = []
+                if isinstance(edf.index, pd.DatetimeIndex):
+                    candidates.extend(list(edf.index))
+                for col in edf.columns:
+                    if "date" in str(col).lower():
+                        candidates.extend(edf[col].tolist())
+                picked = _pick_future(candidates)
+                if picked is not None:
+                    out["next_earnings_date"] = picked
+                    out["earnings_source"] = "earnings_dates"
+        except Exception:
+            pass
+
+    # 3) Info / fast info route
+    try:
+        info = t.info or {}
+    except Exception:
+        info = {}
+
+    if out["next_earnings_date"] is None:
+        earnings_info_candidates = [
+            info.get("earningsTimestamp"),
+            info.get("earningsTimestampStart"),
+            info.get("earningsTimestampEnd"),
+            info.get("nextFiscalYearEnd"),
+        ]
+        picked = _pick_future(earnings_info_candidates)
+        if picked is not None:
+            out["next_earnings_date"] = picked
+            out["earnings_source"] = "info"
+
+    if out["next_dividend_date"] is None:
+        dividend_info_candidates = [
+            info.get("dividendDate"),
+            info.get("exDividendDate"),
+        ]
+        picked = _pick_future(dividend_info_candidates)
+        if picked is not None:
+            out["next_dividend_date"] = picked
+            out["dividend_source"] = "info"
+
+    # 4) Dividend history fallback (last known date only)
+    try:
+        divs = getattr(t, "dividends", pd.Series(dtype=float))
+        if isinstance(divs, pd.Series) and not divs.empty:
+            idx = divs.dropna().index
+            if len(idx) > 0:
+                last_dt = _to_dt(idx[-1])
+                out["last_dividend_date"] = last_dt
+    except Exception:
+        pass
+
+    return out
+
 # =============================
 # Tabs
 # =============================
@@ -5355,6 +5521,57 @@ with tab_youtube:
 with tab_calendar:
     st.header("🗓️ Ekonomik Takvim + Makro Risk Paneli")
     st.caption("Ülkeler bazlı önemli makro verileri getirir. İstediğin veri bloğunu sadece ilgili çalıştır tuşuna basınca çağırır; böylece uygulama her hisse seçiminde gereksiz yüklenmez.")
+
+
+st.subheader("0) Şirket Takvimi")
+corporate_symbol_options = [naked_ticker(x) for x in universe] if universe else [naked_ticker(ticker)]
+default_corporate_symbol = naked_ticker(ticker) if naked_ticker(ticker) in corporate_symbol_options else corporate_symbol_options[0]
+
+cc1, cc2 = st.columns([3, 1])
+with cc1:
+    corporate_symbol_raw = st.selectbox(
+        "Hisse Seç",
+        options=corporate_symbol_options,
+        index=corporate_symbol_options.index(default_corporate_symbol),
+        key="corporate_symbol_raw_calendar",
+    )
+with cc2:
+    run_corporate_dates = st.button("Şirket Takvimini Getir", key="run_corporate_dates", use_container_width=True)
+
+if run_corporate_dates:
+    st.session_state.corporate_dates_result = fetch_next_corporate_dates(corporate_symbol_raw, market)
+
+corporate_dates_result = st.session_state.get("corporate_dates_result")
+if corporate_dates_result:
+    def _fmt_dt_local(dt):
+        if dt is None or pd.isna(dt):
+            return "Açıklanmadı / Veri Yok"
+        try:
+            return pd.to_datetime(dt).strftime("%Y-%m-%d")
+        except Exception:
+            return str(dt)
+
+    next_earnings = corporate_dates_result.get("next_earnings_date")
+    next_dividend = corporate_dates_result.get("next_dividend_date")
+    last_dividend = corporate_dates_result.get("last_dividend_date")
+
+    cdm1, cdm2, cdm3 = st.columns(3)
+    cdm1.metric("Sonraki Bilanço Tarihi", _fmt_dt_local(next_earnings))
+    cdm2.metric("Sonraki Temettü Tarihi", _fmt_dt_local(next_dividend))
+    cdm3.metric("Son Bilinen Temettü Tarihi", _fmt_dt_local(last_dividend))
+
+    source_parts = []
+    if corporate_dates_result.get("earnings_source"):
+        source_parts.append(f"Bilanço kaynağı: {corporate_dates_result.get('earnings_source')}")
+    if corporate_dates_result.get("dividend_source"):
+        source_parts.append(f"Temettü kaynağı: {corporate_dates_result.get('dividend_source')}")
+    if source_parts:
+        st.caption(" | ".join(source_parts))
+    else:
+        st.caption("Veri sağlayıcı ilgili tarihleri yayınlamadıysa alanlar boş görünebilir.")
+
+st.divider()
+
 
     country_options = ["united states", "euro area", "united kingdom", "turkey", "china", "japan", "germany", "france", "canada", "australia", "india", "brazil"]
 
