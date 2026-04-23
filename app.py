@@ -3839,10 +3839,153 @@ def build_youtube_indicators(videos_df: pd.DataFrame) -> Dict[str, Any]:
         "verdict": verdict,
     }
 
+
+# =============================
+# ECONOMIC CALENDAR HELPERS
+# =============================
+ECON_CALENDAR_EVENT_MAP = {
+    "interest rate": {
+        "impact": "Faiz kararı; tahvil faizi, bankacılık hisseleri ve genel endeks üzerinde güçlü etki yaratabilir. Sürpriz artışlar büyüme hisselerini baskılayabilir.",
+        "sectors": "Bankalar, finans, gayrimenkul, yüksek büyüme/teknoloji, tüketim.",
+    },
+    "inflation": {
+        "impact": "Enflasyon verisi faiz beklentilerini değiştirir. Yüksek enflasyon tahvil faizlerini ve kur oynaklığını artırabilir.",
+        "sectors": "Bankalar, perakende, tüketim, ulaştırma, ithalatçı şirketler, teknoloji.",
+    },
+    "cpi": {
+        "impact": "TÜFE beklenenden yüksek gelirse sıkı para politikası beklentisi artabilir. Bu genelde değerlemeleri baskılar, bankalarda ise karışık etki yaratır.",
+        "sectors": "Bankalar, perakende, tüketim, büyüme hisseleri, gayrimenkul.",
+    },
+    "ppi": {
+        "impact": "Üretici fiyatları maliyet baskısını gösterir. Marj baskısı özellikle sanayi ve tüketim şirketleri için önemlidir.",
+        "sectors": "Sanayi, üretim, perakende, dayanıklı tüketim, otomotiv.",
+    },
+    "gdp": {
+        "impact": "Büyüme verisi ekonomik aktivitenin hızını gösterir. Güçlü veri döngüsel hisseleri destekleyebilir.",
+        "sectors": "Sanayi, bankalar, ulaştırma, enerji, inşaat, emtia bağlantılı hisseler.",
+    },
+    "non farm": {
+        "impact": "Tarım dışı istihdam ekonomik ısınma ve faiz beklentileri için kritik veridir. Çok güçlü veri bazen hisse için iyi, bazen de 'faiz daha yüksek kalır' endişesi nedeniyle karışık olabilir.",
+        "sectors": "Bankalar, endeks genel, tüketim, sanayi, dolar hassas şirketler.",
+    },
+    "unemployment": {
+        "impact": "İşsizlik oranı işgücü piyasasının gücünü gösterir. Düşük işsizlik tüketim için olumlu, ancak ücret baskısı ve faiz beklentileri için olumsuz olabilir.",
+        "sectors": "Tüketim, perakende, bankalar, sanayi.",
+    },
+    "payroll": {
+        "impact": "İstihdam artışı iç talep ve faiz beklentileri için önemlidir. Özellikle endeks yönü üzerinde etkili olabilir.",
+        "sectors": "Bankalar, tüketim, sanayi, endeks geneli.",
+    },
+    "pmi": {
+        "impact": "PMI ve ISM tipi veriler ekonomik aktivitenin öncü göstergeleridir. 50 üzeri genelde büyüme sinyalidir.",
+        "sectors": "Sanayi, lojistik, emtia, otomotiv, ihracatçı şirketler.",
+    },
+    "ism": {
+        "impact": "ISM verileri üretim ve hizmet aktivitesinin öncü sinyalidir. Beklenti üzeri veri risk iştahını artırabilir.",
+        "sectors": "Sanayi, ulaştırma, hizmet, bankalar, endeks geneli.",
+    },
+    "retail sales": {
+        "impact": "Perakende satışlar iç talebi gösterir. Güçlü veri tüketim hisseleri için pozitif olabilir.",
+        "sectors": "Perakende, e-ticaret, tüketim, bankalar, ödeme sistemleri.",
+    },
+    "consumer confidence": {
+        "impact": "Tüketici güveni harcama iştahını etkiler. Zayıf veri perakende ve dayanıklı tüketimi baskılayabilir.",
+        "sectors": "Perakende, otomotiv, beyaz eşya, bankalar, turizm.",
+    },
+    "industrial production": {
+        "impact": "Sanayi üretimi ekonomik aktivitenin sert verisidir. Beklenenden güçlü gelmesi döngüsel hisseleri destekleyebilir.",
+        "sectors": "Sanayi, otomotiv, çelik, çimento, enerji, taşımacılık.",
+    },
+    "housing": {
+        "impact": "Konut başlangıçları / satışları faiz duyarlılığı yüksek göstergelerdir. Zayıf veri gayrimenkul ve inşaatı baskılayabilir.",
+        "sectors": "Gayrimenkul, inşaat, çimento, banka, yapı malzemeleri.",
+    },
+    "trade balance": {
+        "impact": "Dış ticaret dengesi kur ve ihracat görünümünü etkileyebilir. Özellikle açık veren ekonomilerde önemli olabilir.",
+        "sectors": "İhracatçı sanayi, lojistik, havacılık, ithalatçı perakende.",
+    },
+    "oil": {
+        "impact": "Petrol ve stok verileri enerji maliyetlerini ve emtia fiyatlarını etkiler. Enerji maliyetine hassas sektörlerde oynaklık yaratabilir.",
+        "sectors": "Enerji, petrokimya, ulaştırma, havacılık, lojistik, sanayi.",
+    },
+}
+
+def get_econ_event_education(event_name: str, category: str = "", country: str = "") -> str:
+    event_low = str(event_name or "").lower()
+    cat_low = str(category or "").lower()
+
+    selected = None
+    for key, val in ECON_CALENDAR_EVENT_MAP.items():
+        if key in event_low or key in cat_low:
+            selected = val
+            break
+
+    if selected is None:
+        selected = {
+            "impact": "Bu veri, ilgili ülkenin büyüme, enflasyon, faiz veya tüketim görünümü üzerinden piyasayı etkileyebilir. Beklenti sapması ne kadar büyükse piyasa tepkisi de o kadar sert olabilir.",
+            "sectors": "Bankalar, endeks geneli ve veriyle ilişkili sektörler.",
+        }
+
+    return f"Piyasa Etkisi: {selected['impact']} | Etkilenebilecek Sektörler: {selected['sectors']}"
+
+def make_hover_question_html(event_name: str, category: str = "", country: str = "") -> str:
+    tooltip = get_econ_event_education(event_name, category, country)
+    tooltip = tooltip.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
+    return f'<span title="{tooltip}" style="cursor:help; font-weight:700; color:#d97706;"> ? </span>'
+
+@st.cache_data(ttl=15 * 60, show_spinner=False)
+def fetch_economic_calendar(country_names: Tuple[str, ...], importance: str = "3", api_key_override: str = "", days_back: int = 1, days_forward: int = 14) -> Dict[str, Any]:
+    api_key = str(api_key_override or "").strip()
+    if not api_key:
+        try:
+            api_key = str(st.secrets.get("TRADING_ECONOMICS_API_KEY", "")).strip()
+        except Exception:
+            api_key = ""
+    if not api_key:
+        api_key = "guest:guest"
+
+    clean_countries = [str(c).strip().lower() for c in country_names if str(c).strip()]
+    if not clean_countries:
+        return {"error": "En az bir ülke seçmelisin.", "df": pd.DataFrame()}
+
+    country_path = ",".join([c.replace(" ", "%20") for c in clean_countries])
+    url = f"https://api.tradingeconomics.com/calendar/country/{country_path}?c={api_key}&importance={importance}"
+
+    try:
+        resp = requests.get(url, timeout=35)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        return {"error": f"Economic Calendar API çağrısı başarısız: {e}", "df": pd.DataFrame()}
+
+    df = pd.DataFrame(data)
+    if df.empty:
+        return {"error": "Seçilen filtrelerle ekonomik takvim verisi gelmedi.", "df": pd.DataFrame()}
+
+    if "Date" in df.columns:
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce", utc=True).dt.tz_convert(None)
+    else:
+        df["Date"] = pd.NaT
+
+    now_dt = datetime.datetime.utcnow()
+    start_dt = now_dt - datetime.timedelta(days=int(days_back))
+    end_dt = now_dt + datetime.timedelta(days=int(days_forward))
+    df = df[(df["Date"].isna()) | ((df["Date"] >= start_dt) & (df["Date"] <= end_dt))].copy()
+
+    preferred_cols = ["Date", "Country", "Category", "Event", "Actual", "Forecast", "Previous", "Importance", "Unit", "Currency", "Reference", "Ticker", "Symbol", "URL"]
+    for col in preferred_cols:
+        if col not in df.columns:
+            df[col] = np.nan
+
+    df["ImportanceLabel"] = df["Importance"].map({1: "Düşük", 2: "Orta", 3: "Yüksek"}).fillna("N/A")
+    df["Education"] = df.apply(lambda r: get_econ_event_education(r.get("Event", ""), r.get("Category", ""), r.get("Country", "")), axis=1)
+    df = df.sort_values(["Date", "Country", "Importance"], ascending=[True, True, False]).reset_index(drop=True)
+    return {"error": None, "df": df[preferred_cols + ["ImportanceLabel", "Education"]]}
+
 # =============================
 # Tabs
 # =============================
-tab_dash, tab_export, tab_heatmap, tab_triple, tab_scan, tab_future, tab_x, tab_youtube = st.tabs(["📊 Dashboard", "📄 Rapor (PDF/HTML)", "🔥 Sektörel Heatmap", "📺 3 Ekranlı Sistem", "🔍 Tarama", "🔮 Future Price", "𝕏 X Trends", "▶️ YouTube Trends"])
+tab_dash, tab_export, tab_heatmap, tab_triple, tab_scan, tab_future, tab_x, tab_youtube, tab_calendar = st.tabs(["📊 Dashboard", "📄 Rapor (PDF/HTML)", "🔥 Sektörel Heatmap", "📺 3 Ekranlı Sistem", "🔍 Tarama", "🔮 Future Price", "𝕏 X Trends", "▶️ YouTube Trends", "🗓️ Ekonomik Takvim"])
 
 with tab_dash:
     if "app_errors" in st.session_state and st.session_state.app_errors:
@@ -5027,4 +5170,124 @@ with tab_youtube:
             st.dataframe(yt_show.sort_values("Published At", ascending=False), use_container_width=True, height=360)
         else:
             st.info("YouTube araması veri döndürmedi.")
+
+
+with tab_calendar:
+    st.header("🗓️ Ekonomik Takvim")
+    st.caption("Ülkeler bazlı önemli makro verileri getirir. Her etkinlik kartındaki soru işaretinin üzerine geldiğinde bu verinin piyasayı ve hangi sektörleri etkileyebileceğine dair kısa eğitim notu görünür.")
+
+    country_options = ["united states", "euro area", "united kingdom", "turkey", "china", "japan", "germany", "france", "canada", "australia", "india", "brazil"]
+
+    ec1, ec2, ec3, ec4 = st.columns(4)
+    with ec1:
+        selected_countries = st.multiselect(
+            "Ülkeler",
+            options=country_options,
+            default=["turkey"] if market == "BIST" else ["united states"],
+            key="econ_calendar_countries",
+        )
+    with ec2:
+        importance_label = st.selectbox(
+            "Önem Seviyesi",
+            options=["Sadece Yüksek", "Orta + Yüksek", "Hepsi"],
+            index=0,
+            key="econ_calendar_importance_label",
+        )
+        importance_map = {"Sadece Yüksek": "3", "Orta + Yüksek": "2,3", "Hepsi": "1,2,3"}
+        importance_value = importance_map[importance_label]
+    with ec3:
+        days_forward = st.slider("Kaç Gün İleri", min_value=1, max_value=30, value=14, step=1, key="econ_calendar_days_forward")
+    with ec4:
+        days_back = st.slider("Kaç Gün Geri", min_value=0, max_value=7, value=1, step=1, key="econ_calendar_days_back")
+
+    econ_api_key_input = st.text_input(
+        "TradingEconomics API Key (opsiyonel)",
+        value="",
+        type="password",
+        key="econ_calendar_api_key_input",
+        help="Boş bırakırsan önce secrets içindeki TRADING_ECONOMICS_API_KEY denenir, yoksa guest:guest fallback kullanılır.",
+    )
+
+    run_econ_calendar = st.button("🗓️ Ekonomik Takvimi Getir", key="run_econ_calendar", use_container_width=True)
+
+    if run_econ_calendar:
+        econ_result = fetch_economic_calendar(
+            tuple(selected_countries),
+            importance=importance_value,
+            api_key_override=econ_api_key_input,
+            days_back=int(days_back),
+            days_forward=int(days_forward),
+        )
+        st.session_state.econ_calendar_result = econ_result
+
+    econ_result = st.session_state.get("econ_calendar_result")
+
+    if econ_result:
+        if econ_result.get("error"):
+            st.warning(econ_result["error"])
+        else:
+            econ_df = econ_result.get("df", pd.DataFrame()).copy()
+
+            if econ_df.empty:
+                st.info("Seçilen filtrelerle ekonomik takvim verisi bulunamadı.")
+            else:
+                st.success(f"Toplam {len(econ_df)} ekonomik etkinlik bulundu.")
+
+                m1, m2, m3, m4 = st.columns(4)
+                high_count = int((econ_df["Importance"] == 3).sum()) if "Importance" in econ_df.columns else 0
+                country_count = int(econ_df["Country"].nunique()) if "Country" in econ_df.columns else 0
+                upcoming_count = int((econ_df["Date"] >= pd.Timestamp(datetime.datetime.utcnow())).sum()) if "Date" in econ_df.columns else 0
+                released_count = max(len(econ_df) - upcoming_count, 0)
+
+                m1.metric("Yüksek Önemli Veri", str(high_count))
+                m2.metric("Ülke Sayısı", str(country_count))
+                m3.metric("Yaklaşan Veri", str(upcoming_count))
+                m4.metric("Açıklanmış Veri", str(released_count))
+
+                st.subheader("Öne Çıkan Etkinlikler")
+                top_cards = econ_df.head(12).copy()
+                for _, row in top_cards.iterrows():
+                    dt_str = row["Date"].strftime("%Y-%m-%d %H:%M") if pd.notna(row["Date"]) else "N/A"
+                    info_html = make_hover_question_html(row.get("Event", ""), row.get("Category", ""), row.get("Country", ""))
+                    st.markdown(
+                        f"""
+                        <div style="padding:10px 12px; border:1px solid #ddd; border-radius:10px; margin-bottom:8px;">
+                            <div style="font-weight:700;">
+                                {row.get("Country", "N/A")} — {row.get("Event", "N/A")} {info_html}
+                            </div>
+                            <div style="font-size:13px; margin-top:4px;">
+                                Tarih: {dt_str} | Önem: {row.get("ImportanceLabel", "N/A")} | Kategori: {row.get("Category", "N/A")}
+                            </div>
+                            <div style="font-size:13px; margin-top:4px;">
+                                Actual: {row.get("Actual", "N/A")} | Forecast: {row.get("Forecast", "N/A")} | Previous: {row.get("Previous", "N/A")}
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+                st.subheader("Grafikler")
+                gc1, gc2 = st.columns(2)
+
+                with gc1:
+                    by_country = econ_df.groupby("Country").size().reset_index(name="Event Count")
+                    fig_country = go.Figure()
+                    fig_country.add_trace(go.Bar(x=by_country["Country"], y=by_country["Event Count"], name="Event Count"))
+                    fig_country.update_layout(height=340, title="Ülkeye Göre Veri Sayısı", xaxis_title="Ülke", yaxis_title="Adet")
+                    st.plotly_chart(fig_country, use_container_width=True)
+
+                with gc2:
+                    by_cat = econ_df.groupby("Category").size().reset_index(name="Event Count").sort_values("Event Count", ascending=False).head(12)
+                    fig_cat = go.Figure()
+                    fig_cat.add_trace(go.Bar(x=by_cat["Category"], y=by_cat["Event Count"], name="Event Count"))
+                    fig_cat.update_layout(height=340, title="Kategoriye Göre Veri Sayısı", xaxis_title="Kategori", yaxis_title="Adet")
+                    st.plotly_chart(fig_cat, use_container_width=True)
+
+                st.subheader("Takvim Tablosu")
+                show_df = econ_df[["Date", "Country", "Category", "Event", "Actual", "Forecast", "Previous", "ImportanceLabel"]].copy()
+                st.dataframe(show_df, use_container_width=True, height=360)
+
+                with st.expander("Eğitim Notları — Hangi veri hangi sektörleri etkiler?", expanded=False):
+                    edu_df = econ_df[["Country", "Event", "Category", "Education"]].drop_duplicates().reset_index(drop=True)
+                    st.dataframe(edu_df, use_container_width=True, height=320)
 
