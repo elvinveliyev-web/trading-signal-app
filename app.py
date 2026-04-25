@@ -4908,6 +4908,7 @@ FINANCIAL_METRIC_INFO = {
     "pb": "PD/DD (P/B): Piyasa değeri / özkaynak. Özellikle banka ve varlık yoğun şirketlerde önemli bir değerleme çarpanıdır.",
     "net_debt_ebitda": "Net Borç / FAVÖK: Net borcun operasyonel kâra göre büyüklüğünü gösterir. Daha düşük oran genelde daha sağlıklı borçluluk anlamına gelir.",
     "shares_outstanding": "Dolaşımdaki Hisse Sayısı: Şirketin yatırımcılar tarafından taşınan toplam hisse miktarını gösterir. Artış genelde sulanma (dilution), düşüş ise geri alım etkisi anlamına gelebilir; bu nedenle çoğu durumda daha düşük veya yatay seyir daha olumlu yorumlanır.",
+    "eps": "Hisse Başına Kar (EPS): Net kârın hisse başına düşen kısmını gösterir. Genel olarak daha yüksek EPS daha güçlü kârlılık anlamına gelir; ancak hisse sayısındaki artış/azalış da bu metriği etkileyebilir.",
 }
 
 def _html_escape(value: Any) -> str:
@@ -5111,6 +5112,16 @@ def fetch_financial_snapshot_analysis(symbol: str, selected_market: str = "USA",
         if np.isfinite(current_shares_out):
             shares_series = shares_series.fillna(float(current_shares_out))
 
+    eps_series = _pick_series_from_rows(
+        income_df,
+        ["Diluted EPS", "Basic EPS", "Reported EPS", "EPS"]
+    ).reindex(periods)
+    if eps_series.empty or eps_series.isna().all():
+        eps_series = _safe_div_series(net_income.astype(float), shares_series.astype(float))
+    else:
+        eps_series = eps_series.astype(float).reindex(periods)
+        eps_series = eps_series.fillna(_safe_div_series(net_income.astype(float), shares_series.astype(float)))
+
     hist_prices = load_data_cached(ticker_norm, "5y", "1d", end_date=None, force_latest=False)
     close_series = hist_prices["Close"].sort_index() if hist_prices is not None and not hist_prices.empty and "Close" in hist_prices.columns else pd.Series(dtype=float)
 
@@ -5142,6 +5153,7 @@ def fetch_financial_snapshot_analysis(symbol: str, selected_market: str = "USA",
         {"label": "PD/DD (P/B)", "key": "pb", "series": pb, "higher_better": False},
         {"label": "Net Borç / FAVÖK", "key": "net_debt_ebitda", "series": net_debt_ebitda, "higher_better": False},
         {"label": "Dolaşımdaki Hisse Sayısı", "key": "shares_outstanding", "series": shares_series, "higher_better": False},
+        {"label": "Hisse Başına Kar (EPS)", "key": "eps", "series": eps_series, "higher_better": True},
     ]
 
     period_labels = [pd.to_datetime(x).strftime("%Y-%m-%d") for x in periods]
