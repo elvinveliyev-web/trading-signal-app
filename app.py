@@ -4891,10 +4891,329 @@ def build_chart_pattern_figure(df: pd.DataFrame, match: Dict[str, Any], ticker_l
     )
     return fig
 
+
+# =============================
+# FINANCIAL SNAPSHOT HELPERS
+# =============================
+FINANCIAL_METRIC_INFO = {
+    "roe": "Özsermaye Karlılığı (ROE): Şirketin özkaynağını ne kadar verimli kullandığını gösterir. Genel olarak daha yüksek ROE daha güçlü kârlılık anlamına gelir.",
+    "revenue_growth": "Net Satış Büyümesi: Satışların bir önceki döneme göre büyüme hızını gösterir. Artış, talep ve operasyonel genişleme açısından olumlu yorumlanabilir.",
+    "ebitda": "FAVÖK (EBITDA): Faiz, vergi, amortisman ve itfa öncesi kâr. Şirketin ana faaliyetlerinden yarattığı operasyonel kârlılığı ölçmekte kullanılır.",
+    "ebitda_margin": "FAVÖK Marjı: EBITDA / Satışlar. Operasyonel verimlilik ve fiyatlama gücü hakkında fikir verir. Daha yüksek marj genelde daha güçlüdür.",
+    "debt_to_equity": "Borç / Özsermaye: Toplam borcun özkaynağa oranıdır. Çok yüksek oranlar bilanço riskini artırabilir; genelde daha düşük olması tercih edilir.",
+    "current_ratio": "Cari Oran: Dönen varlıklar / kısa vadeli yükümlülükler. Kısa vadeli ödeme gücünü gösterir. 1'in üzeri çoğu zaman daha sağlıklı kabul edilir.",
+    "net_profit_margin": "Net Kar Marjı: Net kâr / satışlar. Şirketin satışından ne kadar net kâr bıraktığını gösterir. Daha yüksek marj genelde daha iyidir.",
+    "free_cash_flow": "Serbest Nakit Akışı (FCF): Faaliyetlerden gelen nakitten yatırımlar düşüldükten sonra geriye kalan nakit. Sürdürülebilirlik için kritik göstergedir.",
+    "pe": "F/K (P/E): Piyasa değeri / net kâr. Aynı sektör içindeki şirketlerle kıyaslanır. Genel yaklaşımda daha düşük çarpan daha ucuz değerleme anlamına gelebilir.",
+    "pb": "PD/DD (P/B): Piyasa değeri / özkaynak. Özellikle banka ve varlık yoğun şirketlerde önemli bir değerleme çarpanıdır.",
+    "net_debt_ebitda": "Net Borç / FAVÖK: Net borcun operasyonel kâra göre büyüklüğünü gösterir. Daha düşük oran genelde daha sağlıklı borçluluk anlamına gelir.",
+}
+
+def _html_escape(value: Any) -> str:
+    s = "" if value is None else str(value)
+    return (
+        s.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+def make_fin_metric_help_html(metric_key: str) -> str:
+    tip = _html_escape(FINANCIAL_METRIC_INFO.get(metric_key, "Finansal oran açıklaması bulunamadı."))
+    return f'<span title="{tip}" style="cursor:help; font-weight:700; color:#d97706;"> ? </span>'
+
+def _pick_series_from_rows(stmt_df: pd.DataFrame, row_names: List[str]) -> pd.Series:
+    if stmt_df is None or stmt_df.empty:
+        return pd.Series(dtype=float)
+    for name in row_names:
+        if name in stmt_df.columns:
+            return stmt_df[name]
+    return pd.Series(dtype=float)
+
+def _safe_div_series(a: pd.Series, b: pd.Series) -> pd.Series:
+    if a is None or len(a) == 0:
+        return pd.Series(dtype=float)
+    if b is None or len(b) == 0:
+        return pd.Series(index=a.index, dtype=float)
+    aa, bb = a.align(b, join="outer")
+    out = aa.astype(float) / bb.astype(float).replace(0, np.nan)
+    return out.replace([np.inf, -np.inf], np.nan)
+
+def _money_fmt(val: float) -> str:
+    try:
+        if val is None or not np.isfinite(val):
+            return "N/A"
+        abs_v = abs(float(val))
+        if abs_v >= 1_000_000_000_000:
+            return f"{val/1_000_000_000_000:.2f}T"
+        if abs_v >= 1_000_000_000:
+            return f"{val/1_000_000_000:.2f}B"
+        if abs_v >= 1_000_000:
+            return f"{val/1_000_000:.2f}M"
+        if abs_v >= 1_000:
+            return f"{val/1_000:.2f}K"
+        return f"{val:.2f}"
+    except Exception:
+        return "N/A"
+
+def _fmt_fin_value(metric_key: str, val: float) -> str:
+    if val is None or not np.isfinite(val):
+        return "N/A"
+    if metric_key in {"roe", "revenue_growth", "ebitda_margin", "net_profit_margin"}:
+        return f"{val * 100:.2f}%"
+    if metric_key in {"ebitda", "free_cash_flow"}:
+        return _money_fmt(float(val))
+    if metric_key in {"debt_to_equity", "current_ratio", "pe", "pb", "net_debt_ebitda"}:
+        return f"{float(val):.2f}"
+    return f"{float(val):.2f}"
+
+def _compute_delta_pct(current: float, previous: float) -> float:
+    if current is None or previous is None:
+        return np.nan
+    if not np.isfinite(current) or not np.isfinite(previous):
+        return np.nan
+    if previous == 0:
+        return np.nan
+    return ((current - previous) / abs(previous)) * 100.0
+
+def _statement_to_period_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.T.copy()
+    try:
+        out.index = pd.to_datetime(out.index)
+    except Exception:
+        pass
+    out = out.sort_index(ascending=False)
+    return out
+
+@st.cache_data(ttl=30 * 60, show_spinner=False)
+def fetch_financial_snapshot_analysis(symbol: str, selected_market: str = "USA", statement_mode: str = "quarterly") -> Dict[str, Any]:
+    ticker_norm = normalize_ticker(symbol, selected_market)
+    t = yf.Ticker(ticker_norm)
+
+    def _get_attr(obj, names: List[str]):
+        for n in names:
+            try:
+                v = getattr(obj, n)
+                if v is not None and not (hasattr(v, "empty") and v.empty):
+                    return v
+            except Exception:
+                continue
+        return pd.DataFrame()
+
+    if statement_mode == "quarterly":
+        income_raw = _get_attr(t, ["quarterly_income_stmt", "quarterly_financials"])
+        balance_raw = _get_attr(t, ["quarterly_balance_sheet"])
+        cash_raw = _get_attr(t, ["quarterly_cashflow"])
+    else:
+        income_raw = _get_attr(t, ["income_stmt", "financials"])
+        balance_raw = _get_attr(t, ["balance_sheet"])
+        cash_raw = _get_attr(t, ["cashflow"])
+
+    income_df = _statement_to_period_df(income_raw)
+    balance_df = _statement_to_period_df(balance_raw)
+    cash_df = _statement_to_period_df(cash_raw)
+
+    base_index = income_df.index
+    if len(base_index) == 0:
+        base_index = balance_df.index
+    if len(base_index) == 0:
+        base_index = cash_df.index
+    if len(base_index) == 0:
+        return {"error": "Seçilen hisse için bilanço / gelir tablosu verisi bulunamadı.", "table_html": "", "summary": {}}
+
+    periods = pd.Index(sorted(pd.to_datetime(base_index).unique(), reverse=True))[:4]
+
+    revenue = _pick_series_from_rows(income_df, ["Total Revenue", "Operating Revenue", "Revenue"]).reindex(periods)
+    net_income = _pick_series_from_rows(income_df, ["Net Income", "Net Income Common Stockholders", "Net Income Including Noncontrolling Interests"]).reindex(periods)
+    ebitda = _pick_series_from_rows(income_df, ["EBITDA", "Ebitda"]).reindex(periods)
+
+    equity = _pick_series_from_rows(balance_df, ["Stockholders Equity", "Common Stock Equity", "Total Equity Gross Minority Interest", "Total Equity"]).reindex(periods)
+    total_debt = _pick_series_from_rows(balance_df, ["Total Debt", "Total Borrowings"]).reindex(periods)
+    if total_debt.empty or total_debt.isna().all():
+        ltd = _pick_series_from_rows(balance_df, ["Long Term Debt", "Long Term Debt And Capital Lease Obligation"]).reindex(periods)
+        std = _pick_series_from_rows(balance_df, ["Current Debt", "Current Debt And Capital Lease Obligation", "Short Long Term Debt"]).reindex(periods)
+        total_debt = ltd.fillna(0) + std.fillna(0)
+
+    current_assets = _pick_series_from_rows(balance_df, ["Current Assets", "Total Current Assets"]).reindex(periods)
+    current_liabilities = _pick_series_from_rows(balance_df, ["Current Liabilities", "Total Current Liabilities"]).reindex(periods)
+    cash = _pick_series_from_rows(balance_df, ["Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments", "Cash And Short Term Investments"]).reindex(periods)
+
+    op_cf = _pick_series_from_rows(cash_df, ["Operating Cash Flow", "Cash Flow From Continuing Operating Activities", "Total Cash From Operating Activities"]).reindex(periods)
+    capex = _pick_series_from_rows(cash_df, ["Capital Expenditure", "Capital Expenditures"]).reindex(periods)
+    free_cash_flow = _pick_series_from_rows(cash_df, ["Free Cash Flow"]).reindex(periods)
+    if free_cash_flow.empty or free_cash_flow.isna().all():
+        free_cash_flow = op_cf.fillna(0) + capex.fillna(0)
+
+    revenue_growth = revenue.astype(float).pct_change(periods=-1)
+    ebitda_margin = _safe_div_series(ebitda, revenue)
+    current_ratio = _safe_div_series(current_assets, current_liabilities)
+    net_profit_margin = _safe_div_series(net_income, revenue)
+
+    if statement_mode == "quarterly":
+        roe_income = net_income.astype(float) * 4.0
+        ni_ttm = net_income.sort_index().rolling(4).sum().sort_index(ascending=False).reindex(periods)
+        ebitda_ref = ebitda.sort_index().rolling(4).sum().sort_index(ascending=False).reindex(periods)
+    else:
+        roe_income = net_income.astype(float)
+        ni_ttm = net_income.astype(float)
+        ebitda_ref = ebitda.astype(float)
+
+    roe = _safe_div_series(roe_income, equity)
+    debt_to_equity = _safe_div_series(total_debt, equity)
+    net_debt = total_debt.astype(float).fillna(0) - cash.astype(float).fillna(0)
+
+    try:
+        info = t.info or {}
+    except Exception:
+        info = {}
+
+    shares_out = safe_float(info.get("sharesOutstanding"))
+    current_price = safe_float(info.get("currentPrice") or info.get("regularMarketPrice"))
+    current_market_cap = safe_float(info.get("marketCap"))
+    if (not np.isfinite(shares_out)) and np.isfinite(current_market_cap) and np.isfinite(current_price) and current_price > 0:
+        shares_out = current_market_cap / current_price
+
+    hist_prices = load_data_cached(ticker_norm, "5y", "1d", end_date=None, force_latest=False)
+    close_series = hist_prices["Close"].sort_index() if hist_prices is not None and not hist_prices.empty and "Close" in hist_prices.columns else pd.Series(dtype=float)
+
+    market_caps = pd.Series(index=periods, dtype=float)
+    for dt in periods:
+        px = close_series.asof(pd.to_datetime(dt)) if not close_series.empty else np.nan
+        if np.isfinite(shares_out) and np.isfinite(px):
+            market_caps.loc[dt] = float(px) * float(shares_out)
+        elif np.isfinite(current_market_cap):
+            market_caps.loc[dt] = float(current_market_cap)
+        else:
+            market_caps.loc[dt] = np.nan
+
+    pe = _safe_div_series(market_caps, ni_ttm)
+    pb = _safe_div_series(market_caps, equity)
+    net_debt_ebitda = _safe_div_series(net_debt, ebitda_ref)
+
+    metric_rows = [
+        {"label": "Özsermaye Karlılığı (ROE)", "key": "roe", "series": roe, "higher_better": True},
+        {"label": "Net Satış Büyümesi", "key": "revenue_growth", "series": revenue_growth, "higher_better": True},
+        {"label": "FAVÖK (EBITDA)", "key": "ebitda", "series": ebitda, "higher_better": True},
+        {"label": "FAVÖK Marjı", "key": "ebitda_margin", "series": ebitda_margin, "higher_better": True},
+        {"label": "Borç / Özsermaye", "key": "debt_to_equity", "series": debt_to_equity, "higher_better": False},
+        {"label": "Cari Oran", "key": "current_ratio", "series": current_ratio, "higher_better": True},
+        {"label": "Net Kar Marjı", "key": "net_profit_margin", "series": net_profit_margin, "higher_better": True},
+        {"label": "Serbest Nakit Akışı", "key": "free_cash_flow", "series": free_cash_flow, "higher_better": True},
+        {"label": "F/K (P/E)", "key": "pe", "series": pe, "higher_better": False},
+        {"label": "PD/DD (P/B)", "key": "pb", "series": pb, "higher_better": False},
+        {"label": "Net Borç / FAVÖK", "key": "net_debt_ebitda", "series": net_debt_ebitda, "higher_better": False},
+    ]
+
+    period_labels = [pd.to_datetime(x).strftime("%Y-%m-%d") for x in periods]
+
+    html_parts = []
+    html_parts.append(
+        '''
+        <style>
+        .fin-table-wrap {overflow-x:auto; margin-top:8px;}
+        .fin-table {width:100%; border-collapse:collapse; font-size:13px;}
+        .fin-table th, .fin-table td {border:1px solid #e5e7eb; padding:8px 10px; vertical-align:top;}
+        .fin-table th {background:#f8fafc; font-weight:700; text-align:center;}
+        .fin-label {font-weight:700;}
+        .delta-green {color:#16a34a; font-weight:700; font-size:12px;}
+        .delta-red {color:#dc2626; font-weight:700; font-size:12px;}
+        .delta-gray {color:#6b7280; font-weight:700; font-size:12px;}
+        .val-main {display:block; font-weight:600;}
+        </style>
+        <div class="fin-table-wrap"><table class="fin-table">
+        '''
+    )
+    html_parts.append("<thead><tr><th>Metrix</th>" + "".join([f"<th>{_html_escape(lbl)}</th>" for lbl in period_labels]) + "</tr></thead><tbody>")
+
+    for row in metric_rows:
+        series = row["series"].reindex(periods)
+        label_html = f'{_html_escape(row["label"])} {make_fin_metric_help_html(row["key"])}'
+        row_html = [f"<tr><td class='fin-label'>{label_html}</td>"]
+        vals = list(series.values)
+        for i, val in enumerate(vals):
+            value_str = _fmt_fin_value(row["key"], float(val)) if pd.notna(val) else "N/A"
+            delta_html = "<span class='delta-gray'>—</span>"
+            if i < len(vals) - 1 and pd.notna(val) and pd.notna(vals[i + 1]):
+                delta_pct = _compute_delta_pct(float(val), float(vals[i + 1]))
+                if np.isfinite(delta_pct):
+                    better = float(val) > float(vals[i + 1]) if row["higher_better"] else float(val) < float(vals[i + 1])
+                    css = "delta-green" if better else "delta-red"
+                    delta_html = f"<span class='{css}'>{delta_pct:+.1f}%</span>"
+            row_html.append(f"<td><span class='val-main'>{_html_escape(value_str)}</span>{delta_html}</td>")
+        row_html.append("</tr>")
+        html_parts.append("".join(row_html))
+
+    html_parts.append("</tbody></table></div>")
+    table_html = "".join(html_parts)
+
+    latest_idx = periods[0]
+    latest_revenue_growth = revenue_growth.loc[latest_idx] if latest_idx in revenue_growth.index else np.nan
+    latest_net_margin = net_profit_margin.loc[latest_idx] if latest_idx in net_profit_margin.index else np.nan
+    latest_roe = roe.loc[latest_idx] if latest_idx in roe.index else np.nan
+    latest_de_ratio = debt_to_equity.loc[latest_idx] if latest_idx in debt_to_equity.index else np.nan
+    latest_nd_ebitda = net_debt_ebitda.loc[latest_idx] if latest_idx in net_debt_ebitda.index else np.nan
+    latest_equity = equity.loc[latest_idx] if latest_idx in equity.index else np.nan
+    latest_earnings = ni_ttm.loc[latest_idx] if latest_idx in ni_ttm.index else np.nan
+    latest_ebitda = ebitda_ref.loc[latest_idx] if latest_idx in ebitda_ref.index else np.nan
+    latest_net_debt = net_debt.loc[latest_idx] if latest_idx in net_debt.index else np.nan
+
+    def _clip(val, low, high):
+        try:
+            return max(low, min(high, float(val)))
+        except Exception:
+            return low
+
+    target_pe = _clip(8 + max(safe_float(latest_revenue_growth), -0.2) * 25 + max(safe_float(latest_net_margin), 0) * 30 + max(safe_float(latest_roe), 0) * 10 - max(safe_float(latest_de_ratio), 0) * 1.5, 5, 25)
+    target_pb = _clip(0.8 + max(safe_float(latest_roe), 0) * 8 + max(safe_float(latest_net_margin), 0) * 4 - max(safe_float(latest_de_ratio), 0) * 0.3, 0.5, 5)
+    target_ev_ebitda = _clip(5 + max(safe_float(latest_revenue_growth), -0.2) * 15 + max(safe_float(latest_net_margin), 0) * 12 - max(safe_float(latest_nd_ebitda), 0) * 0.5, 4, 16)
+
+    fair_components = []
+    fair_labels = []
+    fair_weights = []
+
+    if np.isfinite(latest_earnings) and latest_earnings > 0:
+        fair_components.append(float(latest_earnings) * float(target_pe))
+        fair_labels.append("F/K tabanlı")
+        fair_weights.append(0.40)
+    if np.isfinite(latest_equity) and latest_equity > 0:
+        fair_components.append(float(latest_equity) * float(target_pb))
+        fair_labels.append("PD/DD tabanlı")
+        fair_weights.append(0.30)
+    if np.isfinite(latest_ebitda) and latest_ebitda > 0:
+        fair_components.append((float(latest_ebitda) * float(target_ev_ebitda)) - float(latest_net_debt if np.isfinite(latest_net_debt) else 0))
+        fair_labels.append("EV/FAVÖK tabanlı")
+        fair_weights.append(0.30)
+
+    fair_market_cap = np.nan
+    fair_breakdown = []
+    if fair_components:
+        total_w = sum(fair_weights)
+        fair_market_cap = sum(v * w for v, w in zip(fair_components, fair_weights)) / total_w if total_w > 0 else np.nan
+        fair_breakdown = [{"method": lab, "value": val} for lab, val in zip(fair_labels, fair_components)]
+
+    latest_market_cap = market_caps.loc[latest_idx] if latest_idx in market_caps.index else np.nan
+    upside_pct = _compute_delta_pct(float(fair_market_cap), float(latest_market_cap)) if np.isfinite(fair_market_cap) and np.isfinite(latest_market_cap) else np.nan
+
+    summary = {
+        "ticker": ticker_norm,
+        "statement_mode": statement_mode,
+        "latest_period": pd.to_datetime(latest_idx).strftime("%Y-%m-%d") if latest_idx is not None else "",
+        "current_market_cap": latest_market_cap,
+        "fair_market_cap": fair_market_cap,
+        "upside_pct": upside_pct,
+        "target_pe": target_pe,
+        "target_pb": target_pb,
+        "target_ev_ebitda": target_ev_ebitda,
+        "fair_breakdown": fair_breakdown,
+    }
+    return {"error": None, "table_html": table_html, "summary": summary}
+
 # =============================
 # Tabs
 # =============================
-tab_dash, tab_export, tab_heatmap, tab_triple, tab_scan, tab_future, tab_chart_patterns, tab_x, tab_youtube, tab_calendar = st.tabs(["📊 Dashboard", "📄 Rapor (PDF/HTML)", "🔥 Sektörel Heatmap", "📺 3 Ekranlı Sistem", "🔍 Tarama", "🔮 Future Price", "📐 Grafik Formasyonları", "𝕏 X Trends", "▶️ YouTube Trends", "🗓️ Ekonomik Takvim"])
+tab_dash, tab_triple, tab_future, tab_chart_patterns, tab_financials, tab_calendar, tab_social, tab_heatmap, tab_export, tab_scan = st.tabs(["📊 Dashboard", "📺 3 Ekranlı Sistem", "🔮 Future Price", "📐 Grafik Formasyonları", "📘 Bilanço Analizi", "🗓️ Ekonomik Takvim", "📣 X + YouTube Trends", "🔥 Sektörel Heatmap", "📄 Rapor (PDF/HTML)", "🔍 Tarama"])
 
 with tab_dash:
     if "app_errors" in st.session_state and st.session_state.app_errors:
@@ -5997,183 +6316,250 @@ with tab_chart_patterns:
                     )
 
 
-with tab_x:
-    st.header("𝕏 X Trends")
-    st.caption("Seçili hisse için hem sembol hem de şirketin tam adıyla X recent search yapar; pozitif/negatif post göstergeleri ve grafikler üretir.")
 
-    x_symbol_options = [naked_ticker(x) for x in universe] if universe else [naked_ticker(ticker)]
-    default_x_symbol = naked_ticker(ticker) if naked_ticker(ticker) in x_symbol_options else x_symbol_options[0]
+with tab_social:
+    st.header("📣 X + YouTube Trends")
+    social_tab_x, social_tab_youtube = st.tabs(["𝕏 X Trends", "▶️ YouTube Trends"])
 
-    x_symbol_raw = st.selectbox(
-        "Hisse Seç",
-        options=x_symbol_options,
-        index=x_symbol_options.index(default_x_symbol),
-        key="x_symbol_raw",
-    )
-    x_ticker = normalize_ticker(x_symbol_raw, market)
+    with social_tab_x:
+        st.header("𝕏 X Trends")
+        st.caption("Seçili hisse için hem sembol hem de şirketin tam adıyla X recent search yapar; pozitif/negatif post göstergeleri ve grafikler üretir.")
 
-    x_company_name_auto = get_company_name_for_social(x_ticker, market, st.session_state.get("screener_df", pd.DataFrame()))
-    x_company_name = st.text_input(
-        "Şirketin Tam Adı",
-        value=x_company_name_auto,
-        key="x_company_name",
-        help="X aramasında sembol ile birlikte şirketin tam adı da aranır.",
-    )
+        x_symbol_options = [naked_ticker(x) for x in universe] if universe else [naked_ticker(ticker)]
+        default_x_symbol = naked_ticker(ticker) if naked_ticker(ticker) in x_symbol_options else x_symbol_options[0]
 
-    xc1, xc2, xc3 = st.columns(3)
-    with xc1:
-        x_max_results = st.slider("Maksimum Post", min_value=10, max_value=100, value=50, step=10, key="x_max_results")
-    with xc2:
-        x_token_input = st.text_input("X Bearer Token (opsiyonel)", value="", type="password", key="x_token_input")
-    with xc3:
-        run_x = st.button("𝕏 X Analizini Çalıştır", key="run_x_analysis", use_container_width=True)
-
-    if run_x:
-        x_result = fetch_x_trends_bundle(
-            naked_ticker(x_ticker),
-            x_company_name.strip(),
-            bearer_token_override=x_token_input,
-            max_results=int(x_max_results),
+        x_symbol_raw = st.selectbox(
+            "Hisse Seç",
+            options=x_symbol_options,
+            index=x_symbol_options.index(default_x_symbol),
+            key="x_symbol_raw",
         )
-        st.session_state.x_trends_result = x_result
-        if x_result.get("error") is None:
-            st.session_state.x_trends_analysis = build_x_indicators(x_result.get("posts_df"))
-        else:
-            st.session_state.x_trends_analysis = {"error": x_result.get("error")}
+        x_ticker = normalize_ticker(x_symbol_raw, market)
 
-    x_result = st.session_state.get("x_trends_result")
-    x_analysis = st.session_state.get("x_trends_analysis")
-
-    if x_result and x_result.get("error"):
-        st.warning(x_result["error"])
-    elif x_analysis and x_analysis.get("error"):
-        st.warning(x_analysis["error"])
-    elif x_result and x_analysis:
-        x_posts_df = x_result.get("posts_df", pd.DataFrame())
-
-        xg1, xg2, xg3, xg4, xg5, xg6 = st.columns(6)
-        xg1.metric("Pozitif Skor", f"%{x_analysis['positive_score']:.1f}")
-        xg2.metric("Negatif Skor", f"%{x_analysis['negative_score']:.1f}")
-        xg3.metric("Pozitif Post", str(x_analysis["positive_count"]))
-        xg4.metric("Negatif Post", str(x_analysis["negative_count"]))
-        xg5.metric("Ortalama Etkileşim", f"{x_analysis['avg_engagement']:.1f}" if pd.notna(x_analysis['avg_engagement']) else "N/A")
-        xg6.metric("Genel Karar", x_analysis["verdict"])
-
-        xv1, xv2 = st.columns(2)
-        with xv1:
-            x_volume_df = x_analysis.get("volume_df", pd.DataFrame())
-            if not x_volume_df.empty:
-                x_vol_fig = go.Figure()
-                x_vol_fig.add_trace(go.Bar(x=x_volume_df["Day"], y=x_volume_df["Post Count"], name="Post Count"))
-                x_vol_fig.update_layout(height=340, title="Günlük X Post Sayısı", xaxis_title="Tarih", yaxis_title="Post")
-                st.plotly_chart(x_vol_fig, use_container_width=True)
-
-        with xv2:
-            x_pol_df = x_analysis.get("polarity_df", pd.DataFrame())
-            if not x_pol_df.empty:
-                x_pol_fig = go.Figure()
-                x_pol_fig.add_trace(go.Bar(x=x_pol_df["Polarity"], y=x_pol_df["Count"], name="Count"))
-                x_pol_fig.update_layout(height=340, title="X Polarity Dağılımı", xaxis_title="Polarity", yaxis_title="Adet")
-                st.plotly_chart(x_pol_fig, use_container_width=True)
-
-        st.subheader("🧾 X Sonuç Tablosu")
-        if not x_posts_df.empty:
-            x_show = x_posts_df[["Date", "Author", "Author Name", "Polarity", "Engagement", "Text"]].copy()
-            st.dataframe(x_show.sort_values("Date", ascending=False), use_container_width=True, height=360)
-        else:
-            st.info("X araması veri döndürmedi.")
-
-with tab_youtube:
-    st.header("▶️ YouTube Trends")
-    st.caption("Seçili hisse için hem sembol hem de şirketin tam adıyla YouTube araması yapar; pozitif/negatif video göstergeleri ve grafikler üretir.")
-
-    yt_symbol_options = [naked_ticker(x) for x in universe] if universe else [naked_ticker(ticker)]
-    default_yt_symbol = naked_ticker(ticker) if naked_ticker(ticker) in yt_symbol_options else yt_symbol_options[0]
-
-    yt_symbol_raw = st.selectbox(
-        "Hisse Seç",
-        options=yt_symbol_options,
-        index=yt_symbol_options.index(default_yt_symbol),
-        key="yt_symbol_raw",
-    )
-    yt_ticker = normalize_ticker(yt_symbol_raw, market)
-
-    yt_company_name_auto = get_company_name_for_social(yt_ticker, market, st.session_state.get("screener_df", pd.DataFrame()))
-    yt_company_name = st.text_input(
-        "Şirketin Tam Adı",
-        value=yt_company_name_auto,
-        key="yt_company_name",
-        help="YouTube aramasında sembol ile birlikte şirketin tam adı da aranır.",
-    )
-
-    yc1, yc2, yc3, yc4 = st.columns(4)
-    with yc1:
-        yt_lookback = st.selectbox("Zaman Aralığı", ["Son 1 Gün", "Son 7 Gün", "Son 30 Gün", "Son 90 Gün", "Son 12 Ay"], index=2, key="yt_lookback")
-    with yc2:
-        yt_max_results = st.slider("Maksimum Video", min_value=5, max_value=50, value=25, step=5, key="yt_max_results")
-    with yc3:
-        yt_api_key_input = st.text_input("YouTube API Key (opsiyonel)", value="", type="password", key="yt_api_key_input")
-    with yc4:
-        run_yt = st.button("▶️ YouTube Analizini Çalıştır", key="run_youtube_analysis", use_container_width=True)
-
-    if run_yt:
-        yt_result = fetch_youtube_trends_bundle(
-            naked_ticker(yt_ticker),
-            yt_company_name.strip(),
-            api_key_override=yt_api_key_input,
-            lookback_label=yt_lookback,
-            max_results=int(yt_max_results),
+        x_company_name_auto = get_company_name_for_social(x_ticker, market, st.session_state.get("screener_df", pd.DataFrame()))
+        x_company_name = st.text_input(
+            "Şirketin Tam Adı",
+            value=x_company_name_auto,
+            key="x_company_name",
+            help="X aramasında sembol ile birlikte şirketin tam adı da aranır.",
         )
-        st.session_state.youtube_trends_result = yt_result
-        if yt_result.get("error") is None:
-            st.session_state.youtube_trends_analysis = build_youtube_indicators(yt_result.get("videos_df"))
+
+        xc1, xc2, xc3 = st.columns(3)
+        with xc1:
+            x_max_results = st.slider("Maksimum Post", min_value=10, max_value=100, value=50, step=10, key="x_max_results")
+        with xc2:
+            x_token_input = st.text_input("X Bearer Token (opsiyonel)", value="", type="password", key="x_token_input")
+        with xc3:
+            run_x = st.button("𝕏 X Analizini Çalıştır", key="run_x_analysis", use_container_width=True)
+
+        if run_x:
+            x_result = fetch_x_trends_bundle(
+                naked_ticker(x_ticker),
+                x_company_name.strip(),
+                bearer_token_override=x_token_input,
+                max_results=int(x_max_results),
+            )
+            st.session_state.x_trends_result = x_result
+            if x_result.get("error") is None:
+                st.session_state.x_trends_analysis = build_x_indicators(x_result.get("posts_df"))
+            else:
+                st.session_state.x_trends_analysis = {"error": x_result.get("error")}
+
+        x_result = st.session_state.get("x_trends_result")
+        x_analysis = st.session_state.get("x_trends_analysis")
+
+        if x_result and x_result.get("error"):
+            st.warning(x_result["error"])
+        elif x_analysis and x_analysis.get("error"):
+            st.warning(x_analysis["error"])
+        elif x_result and x_analysis:
+            x_posts_df = x_result.get("posts_df", pd.DataFrame())
+
+            xg1, xg2, xg3, xg4, xg5, xg6 = st.columns(6)
+            xg1.metric("Pozitif Skor", f"%{x_analysis['positive_score']:.1f}")
+            xg2.metric("Negatif Skor", f"%{x_analysis['negative_score']:.1f}")
+            xg3.metric("Pozitif Post", str(x_analysis["positive_count"]))
+            xg4.metric("Negatif Post", str(x_analysis["negative_count"]))
+            xg5.metric("Ortalama Etkileşim", f"{x_analysis['avg_engagement']:.1f}" if pd.notna(x_analysis['avg_engagement']) else "N/A")
+            xg6.metric("Genel Karar", x_analysis["verdict"])
+
+            xv1, xv2 = st.columns(2)
+            with xv1:
+                x_volume_df = x_analysis.get("volume_df", pd.DataFrame())
+                if not x_volume_df.empty:
+                    x_vol_fig = go.Figure()
+                    x_vol_fig.add_trace(go.Bar(x=x_volume_df["Day"], y=x_volume_df["Post Count"], name="Post Count"))
+                    x_vol_fig.update_layout(height=340, title="Günlük X Post Sayısı", xaxis_title="Tarih", yaxis_title="Post")
+                    st.plotly_chart(x_vol_fig, use_container_width=True)
+
+            with xv2:
+                x_pol_df = x_analysis.get("polarity_df", pd.DataFrame())
+                if not x_pol_df.empty:
+                    x_pol_fig = go.Figure()
+                    x_pol_fig.add_trace(go.Bar(x=x_pol_df["Polarity"], y=x_pol_df["Count"], name="Count"))
+                    x_pol_fig.update_layout(height=340, title="X Polarity Dağılımı", xaxis_title="Polarity", yaxis_title="Adet")
+                    st.plotly_chart(x_pol_fig, use_container_width=True)
+
+            st.subheader("🧾 X Sonuç Tablosu")
+            if not x_posts_df.empty:
+                x_show = x_posts_df[["Date", "Author", "Author Name", "Polarity", "Engagement", "Text"]].copy()
+                st.dataframe(x_show.sort_values("Date", ascending=False), use_container_width=True, height=360)
+            else:
+                st.info("X araması veri döndürmedi.")
+
+    with social_tab_youtube:
+        st.header("▶️ YouTube Trends")
+        st.caption("Seçili hisse için hem sembol hem de şirketin tam adıyla YouTube araması yapar; pozitif/negatif video göstergeleri ve grafikler üretir.")
+
+        yt_symbol_options = [naked_ticker(x) for x in universe] if universe else [naked_ticker(ticker)]
+        default_yt_symbol = naked_ticker(ticker) if naked_ticker(ticker) in yt_symbol_options else yt_symbol_options[0]
+
+        yt_symbol_raw = st.selectbox(
+            "Hisse Seç",
+            options=yt_symbol_options,
+            index=yt_symbol_options.index(default_yt_symbol),
+            key="yt_symbol_raw",
+        )
+        yt_ticker = normalize_ticker(yt_symbol_raw, market)
+
+        yt_company_name_auto = get_company_name_for_social(yt_ticker, market, st.session_state.get("screener_df", pd.DataFrame()))
+        yt_company_name = st.text_input(
+            "Şirketin Tam Adı",
+            value=yt_company_name_auto,
+            key="yt_company_name",
+            help="YouTube aramasında sembol ile birlikte şirketin tam adı da aranır.",
+        )
+
+        yc1, yc2, yc3, yc4 = st.columns(4)
+        with yc1:
+            yt_lookback = st.selectbox("Zaman Aralığı", ["Son 1 Gün", "Son 7 Gün", "Son 30 Gün", "Son 90 Gün", "Son 12 Ay"], index=2, key="yt_lookback")
+        with yc2:
+            yt_max_results = st.slider("Maksimum Video", min_value=5, max_value=50, value=25, step=5, key="yt_max_results")
+        with yc3:
+            yt_api_key_input = st.text_input("YouTube API Key (opsiyonel)", value="", type="password", key="yt_api_key_input")
+        with yc4:
+            run_yt = st.button("▶️ YouTube Analizini Çalıştır", key="run_youtube_analysis", use_container_width=True)
+
+        if run_yt:
+            yt_result = fetch_youtube_trends_bundle(
+                naked_ticker(yt_ticker),
+                yt_company_name.strip(),
+                api_key_override=yt_api_key_input,
+                lookback_label=yt_lookback,
+                max_results=int(yt_max_results),
+            )
+            st.session_state.youtube_trends_result = yt_result
+            if yt_result.get("error") is None:
+                st.session_state.youtube_trends_analysis = build_youtube_indicators(yt_result.get("videos_df"))
+            else:
+                st.session_state.youtube_trends_analysis = {"error": yt_result.get("error")}
+
+        yt_result = st.session_state.get("youtube_trends_result")
+        yt_analysis = st.session_state.get("youtube_trends_analysis")
+
+        if yt_result and yt_result.get("error"):
+            st.warning(yt_result["error"])
+        elif yt_analysis and yt_analysis.get("error"):
+            st.warning(yt_analysis["error"])
+        elif yt_result and yt_analysis:
+            yt_videos_df = yt_result.get("videos_df", pd.DataFrame())
+
+            yg1, yg2, yg3, yg4, yg5, yg6 = st.columns(6)
+            yg1.metric("Pozitif Skor", f"%{yt_analysis['positive_score']:.1f}")
+            yg2.metric("Negatif Skor", f"%{yt_analysis['negative_score']:.1f}")
+            yg3.metric("Pozitif Video", str(yt_analysis["positive_count"]))
+            yg4.metric("Negatif Video", str(yt_analysis["negative_count"]))
+            yg5.metric("Ortalama İzlenme", f"{yt_analysis['avg_views']:.1f}" if pd.notna(yt_analysis['avg_views']) else "N/A")
+            yg6.metric("Genel Karar", yt_analysis["verdict"])
+
+            yv1, yv2 = st.columns(2)
+            with yv1:
+                yt_volume_df = yt_analysis.get("volume_df", pd.DataFrame())
+                if not yt_volume_df.empty:
+                    yt_vol_fig = go.Figure()
+                    yt_vol_fig.add_trace(go.Bar(x=yt_volume_df["Day"], y=yt_volume_df["Video Count"], name="Video Count"))
+                    yt_vol_fig.update_layout(height=340, title="Günlük YouTube Video Sayısı", xaxis_title="Tarih", yaxis_title="Video")
+                    st.plotly_chart(yt_vol_fig, use_container_width=True)
+
+            with yv2:
+                yt_pol_df = yt_analysis.get("polarity_df", pd.DataFrame())
+                if not yt_pol_df.empty:
+                    yt_pol_fig = go.Figure()
+                    yt_pol_fig.add_trace(go.Bar(x=yt_pol_df["Polarity"], y=yt_pol_df["Count"], name="Count"))
+                    yt_pol_fig.update_layout(height=340, title="YouTube Polarity Dağılımı", xaxis_title="Polarity", yaxis_title="Adet")
+                    st.plotly_chart(yt_pol_fig, use_container_width=True)
+
+            st.subheader("🧾 YouTube Sonuç Tablosu")
+            if not yt_videos_df.empty:
+                yt_show = yt_videos_df[["Published At", "Channel", "Polarity", "View Count", "Like Count", "Comment Count", "Title", "Video URL"]].copy()
+                st.dataframe(yt_show.sort_values("Published At", ascending=False), use_container_width=True, height=360)
+            else:
+                st.info("YouTube araması veri döndürmedi.")
+
+with tab_financials:
+    st.header("📘 Bilanço Analizi")
+    st.caption("Seçilen hissenin çeyreklik veya senelik son 4 bilanço dönemini gösterir. Her metrik bir önceki dönemle yüzdesel karşılaştırılır; daha iyi yönde değişim yeşil, kötü yönde değişim kırmızı görünür.")
+
+    fin_symbol_options = [naked_ticker(x) for x in universe] if universe else [naked_ticker(ticker)]
+    default_fin_symbol = naked_ticker(ticker) if naked_ticker(ticker) in fin_symbol_options else fin_symbol_options[0]
+
+    fc1, fc2, fc3 = st.columns([2, 1, 1])
+    with fc1:
+        fin_symbol_raw = st.selectbox(
+            "Hisse Seç",
+            options=fin_symbol_options,
+            index=fin_symbol_options.index(default_fin_symbol),
+            key="financials_symbol_raw",
+        )
+    with fc2:
+        fin_mode = st.radio(
+            "Dönem Türü",
+            options=["quarterly", "annual"],
+            format_func=lambda x: "Çeyreklik" if x == "quarterly" else "Senelik",
+            key="financials_mode",
+            horizontal=True,
+        )
+    with fc3:
+        run_financials = st.button("📘 Bilanço Analizini Getir", key="run_financials_snapshot", use_container_width=True)
+
+    if run_financials:
+        st.session_state.financial_snapshot_result = fetch_financial_snapshot_analysis(
+            fin_symbol_raw,
+            selected_market=market,
+            statement_mode=fin_mode,
+        )
+
+    fin_result = st.session_state.get("financial_snapshot_result")
+    if fin_result:
+        if fin_result.get("error"):
+            st.warning(fin_result["error"])
         else:
-            st.session_state.youtube_trends_analysis = {"error": yt_result.get("error")}
+            st.markdown(fin_result.get("table_html", ""), unsafe_allow_html=True)
 
-    yt_result = st.session_state.get("youtube_trends_result")
-    yt_analysis = st.session_state.get("youtube_trends_analysis")
+            summary = fin_result.get("summary", {})
+            st.divider()
+            st.subheader("Son Bilançoya Göre Tahmini Net Piyasa Değeri")
+            fm1, fm2, fm3 = st.columns(3)
+            current_mc = summary.get("current_market_cap", np.nan)
+            fair_mc = summary.get("fair_market_cap", np.nan)
+            upside = summary.get("upside_pct", np.nan)
 
-    if yt_result and yt_result.get("error"):
-        st.warning(yt_result["error"])
-    elif yt_analysis and yt_analysis.get("error"):
-        st.warning(yt_analysis["error"])
-    elif yt_result and yt_analysis:
-        yt_videos_df = yt_result.get("videos_df", pd.DataFrame())
+            fm1.metric("Son Dönem", summary.get("latest_period", "N/A"))
+            fm2.metric("Mevcut Piyasa Değeri", _money_fmt(current_mc) if np.isfinite(current_mc) else "N/A")
+            fm3.metric("Tahmini Adil Net Piyasa Değeri", _money_fmt(fair_mc) if np.isfinite(fair_mc) else "N/A")
 
-        yg1, yg2, yg3, yg4, yg5, yg6 = st.columns(6)
-        yg1.metric("Pozitif Skor", f"%{yt_analysis['positive_score']:.1f}")
-        yg2.metric("Negatif Skor", f"%{yt_analysis['negative_score']:.1f}")
-        yg3.metric("Pozitif Video", str(yt_analysis["positive_count"]))
-        yg4.metric("Negatif Video", str(yt_analysis["negative_count"]))
-        yg5.metric("Ortalama İzlenme", f"{yt_analysis['avg_views']:.1f}" if pd.notna(yt_analysis['avg_views']) else "N/A")
-        yg6.metric("Genel Karar", yt_analysis["verdict"])
+            fm4, fm5, fm6 = st.columns(3)
+            fm4.metric("Potansiyel Fark", f"{upside:+.2f}%" if np.isfinite(upside) else "N/A")
+            fm5.metric("Hedef F/K", f"{summary.get('target_pe', np.nan):.2f}" if np.isfinite(summary.get('target_pe', np.nan)) else "N/A")
+            fm6.metric("Hedef PD/DD", f"{summary.get('target_pb', np.nan):.2f}" if np.isfinite(summary.get('target_pb', np.nan)) else "N/A")
 
-        yv1, yv2 = st.columns(2)
-        with yv1:
-            yt_volume_df = yt_analysis.get("volume_df", pd.DataFrame())
-            if not yt_volume_df.empty:
-                yt_vol_fig = go.Figure()
-                yt_vol_fig.add_trace(go.Bar(x=yt_volume_df["Day"], y=yt_volume_df["Video Count"], name="Video Count"))
-                yt_vol_fig.update_layout(height=340, title="Günlük YouTube Video Sayısı", xaxis_title="Tarih", yaxis_title="Video")
-                st.plotly_chart(yt_vol_fig, use_container_width=True)
-
-        with yv2:
-            yt_pol_df = yt_analysis.get("polarity_df", pd.DataFrame())
-            if not yt_pol_df.empty:
-                yt_pol_fig = go.Figure()
-                yt_pol_fig.add_trace(go.Bar(x=yt_pol_df["Polarity"], y=yt_pol_df["Count"], name="Count"))
-                yt_pol_fig.update_layout(height=340, title="YouTube Polarity Dağılımı", xaxis_title="Polarity", yaxis_title="Adet")
-                st.plotly_chart(yt_pol_fig, use_container_width=True)
-
-        st.subheader("🧾 YouTube Sonuç Tablosu")
-        if not yt_videos_df.empty:
-            yt_show = yt_videos_df[["Published At", "Channel", "Polarity", "View Count", "Like Count", "Comment Count", "Title", "Video URL"]].copy()
-            st.dataframe(yt_show.sort_values("Published At", ascending=False), use_container_width=True, height=360)
-        else:
-            st.info("YouTube araması veri döndürmedi.")
-
-
-
+            with st.expander("Tahmini piyasa değeri hesap yöntemi", expanded=False):
+                st.write("Bu değer, son finansal tabloya göre F/K, PD/DD ve EV/FAVÖK tabanlı heuristik bir birleşik tahmindir. Sektör karşılaştırması veya tam DCF modeli değildir.")
+                breakdown = summary.get("fair_breakdown", [])
+                if breakdown:
+                    bd_df = pd.DataFrame(breakdown)
+                    bd_df["value"] = bd_df["value"].apply(lambda x: _money_fmt(x) if np.isfinite(x) else "N/A")
+                    st.dataframe(bd_df, use_container_width=True, height=180)
 
 with tab_calendar:
     st.header("🗓️ Ekonomik Takvim + Makro Risk Paneli")
@@ -6423,4 +6809,3 @@ with tab_calendar:
                 fig_force.add_trace(go.Scatter(x=elder_df.index, y=elder_df["ForceIndexEMA13"], name="FI EMA13", line=dict(width=2)))
                 fig_force.update_layout(height=320, title="BIST100 Kuvvet Endeksi (Force Index) + EMA13", xaxis_title="Tarih", yaxis_title="Force Index")
                 st.plotly_chart(fig_force, use_container_width=True)
-
