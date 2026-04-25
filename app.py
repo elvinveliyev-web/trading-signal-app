@@ -4907,6 +4907,7 @@ FINANCIAL_METRIC_INFO = {
     "pe": "F/K (P/E): Piyasa değeri / net kâr. Aynı sektör içindeki şirketlerle kıyaslanır. Genel yaklaşımda daha düşük çarpan daha ucuz değerleme anlamına gelebilir.",
     "pb": "PD/DD (P/B): Piyasa değeri / özkaynak. Özellikle banka ve varlık yoğun şirketlerde önemli bir değerleme çarpanıdır.",
     "net_debt_ebitda": "Net Borç / FAVÖK: Net borcun operasyonel kâra göre büyüklüğünü gösterir. Daha düşük oran genelde daha sağlıklı borçluluk anlamına gelir.",
+    "shares_outstanding": "Dolaşımdaki Hisse Sayısı: Şirketin yatırımcılar tarafından taşınan toplam hisse miktarını gösterir. Artış genelde sulanma (dilution), düşüş ise geri alım etkisi anlamına gelebilir; bu nedenle çoğu durumda daha düşük veya yatay seyir daha olumlu yorumlanır.",
 }
 
 def _html_escape(value: Any) -> str:
@@ -4961,7 +4962,7 @@ def _fmt_fin_value(metric_key: str, val: float) -> str:
         return "N/A"
     if metric_key in {"roe", "revenue_growth", "ebitda_margin", "net_profit_margin"}:
         return f"{val * 100:.2f}%"
-    if metric_key in {"ebitda", "free_cash_flow"}:
+    if metric_key in {"ebitda", "free_cash_flow", "shares_outstanding"}:
         return _money_fmt(float(val))
     if metric_key in {"debt_to_equity", "current_ratio", "pe", "pb", "net_debt_ebitda"}:
         return f"{float(val):.2f}"
@@ -4986,6 +4987,7 @@ def _statement_to_period_df(df: pd.DataFrame) -> pd.DataFrame:
         pass
     out = out.sort_index(ascending=False)
     return out
+
 
 @st.cache_data(ttl=30 * 60, show_spinner=False)
 def fetch_financial_snapshot_analysis(symbol: str, selected_market: str = "USA", statement_mode: str = "quarterly") -> Dict[str, Any]:
@@ -5029,6 +5031,29 @@ def fetch_financial_snapshot_analysis(symbol: str, selected_market: str = "USA",
     net_income = _pick_series_from_rows(income_df, ["Net Income", "Net Income Common Stockholders", "Net Income Including Noncontrolling Interests"]).reindex(periods)
     ebitda = _pick_series_from_rows(income_df, ["EBITDA", "Ebitda"]).reindex(periods)
 
+    shares_series = _pick_series_from_rows(
+        income_df,
+        [
+            "Diluted Average Shares",
+            "Diluted Weighted Average Shares",
+            "Basic Average Shares",
+            "Weighted Average Shares",
+            "Weighted Average Shares Diluted",
+            "Weighted Average Shares Basic",
+        ],
+    ).reindex(periods)
+
+    if shares_series.empty or shares_series.isna().all():
+        shares_series = _pick_series_from_rows(
+            balance_df,
+            [
+                "Ordinary Shares Number",
+                "Share Issued",
+                "Common Stock Shares Outstanding",
+                "Common Stock",
+            ],
+        ).reindex(periods)
+
     equity = _pick_series_from_rows(balance_df, ["Stockholders Equity", "Common Stock Equity", "Total Equity Gross Minority Interest", "Total Equity"]).reindex(periods)
     total_debt = _pick_series_from_rows(balance_df, ["Total Debt", "Total Borrowings"]).reindex(periods)
     if total_debt.empty or total_debt.isna().all():
@@ -5055,10 +5080,12 @@ def fetch_financial_snapshot_analysis(symbol: str, selected_market: str = "USA",
         roe_income = net_income.astype(float) * 4.0
         ni_ttm = net_income.sort_index().rolling(4).sum().sort_index(ascending=False).reindex(periods)
         ebitda_ref = ebitda.sort_index().rolling(4).sum().sort_index(ascending=False).reindex(periods)
+        fcf_ref = free_cash_flow.sort_index().rolling(4).sum().sort_index(ascending=False).reindex(periods)
     else:
         roe_income = net_income.astype(float)
         ni_ttm = net_income.astype(float)
         ebitda_ref = ebitda.astype(float)
+        fcf_ref = free_cash_flow.astype(float)
 
     roe = _safe_div_series(roe_income, equity)
     debt_to_equity = _safe_div_series(total_debt, equity)
@@ -5069,11 +5096,20 @@ def fetch_financial_snapshot_analysis(symbol: str, selected_market: str = "USA",
     except Exception:
         info = {}
 
-    shares_out = safe_float(info.get("sharesOutstanding"))
+    current_shares_out = safe_float(info.get("sharesOutstanding"))
     current_price = safe_float(info.get("currentPrice") or info.get("regularMarketPrice"))
     current_market_cap = safe_float(info.get("marketCap"))
-    if (not np.isfinite(shares_out)) and np.isfinite(current_market_cap) and np.isfinite(current_price) and current_price > 0:
-        shares_out = current_market_cap / current_price
+    if (not np.isfinite(current_shares_out)) and np.isfinite(current_market_cap) and np.isfinite(current_price) and current_price > 0:
+        current_shares_out = current_market_cap / current_price
+
+    shares_series = shares_series.astype(float)
+    if shares_series.empty or shares_series.isna().all():
+        shares_series = pd.Series(index=periods, data=current_shares_out, dtype=float)
+    else:
+        shares_series = shares_series.reindex(periods)
+        shares_series = shares_series.ffill().bfill()
+        if np.isfinite(current_shares_out):
+            shares_series = shares_series.fillna(float(current_shares_out))
 
     hist_prices = load_data_cached(ticker_norm, "5y", "1d", end_date=None, force_latest=False)
     close_series = hist_prices["Close"].sort_index() if hist_prices is not None and not hist_prices.empty and "Close" in hist_prices.columns else pd.Series(dtype=float)
@@ -5081,8 +5117,9 @@ def fetch_financial_snapshot_analysis(symbol: str, selected_market: str = "USA",
     market_caps = pd.Series(index=periods, dtype=float)
     for dt in periods:
         px = close_series.asof(pd.to_datetime(dt)) if not close_series.empty else np.nan
-        if np.isfinite(shares_out) and np.isfinite(px):
-            market_caps.loc[dt] = float(px) * float(shares_out)
+        period_shares = shares_series.loc[dt] if dt in shares_series.index else np.nan
+        if np.isfinite(period_shares) and np.isfinite(px):
+            market_caps.loc[dt] = float(px) * float(period_shares)
         elif np.isfinite(current_market_cap):
             market_caps.loc[dt] = float(current_market_cap)
         else:
@@ -5104,6 +5141,7 @@ def fetch_financial_snapshot_analysis(symbol: str, selected_market: str = "USA",
         {"label": "F/K (P/E)", "key": "pe", "series": pe, "higher_better": False},
         {"label": "PD/DD (P/B)", "key": "pb", "series": pb, "higher_better": False},
         {"label": "Net Borç / FAVÖK", "key": "net_debt_ebitda", "series": net_debt_ebitda, "higher_better": False},
+        {"label": "Dolaşımdaki Hisse Sayısı", "key": "shares_outstanding", "series": shares_series, "higher_better": False},
     ]
 
     period_labels = [pd.to_datetime(x).strftime("%Y-%m-%d") for x in periods]
@@ -5158,6 +5196,8 @@ def fetch_financial_snapshot_analysis(symbol: str, selected_market: str = "USA",
     latest_earnings = ni_ttm.loc[latest_idx] if latest_idx in ni_ttm.index else np.nan
     latest_ebitda = ebitda_ref.loc[latest_idx] if latest_idx in ebitda_ref.index else np.nan
     latest_net_debt = net_debt.loc[latest_idx] if latest_idx in net_debt.index else np.nan
+    latest_fcf = fcf_ref.loc[latest_idx] if latest_idx in fcf_ref.index else np.nan
+    latest_shares = shares_series.loc[latest_idx] if latest_idx in shares_series.index else current_shares_out
 
     def _clip(val, low, high):
         try:
@@ -5193,8 +5233,43 @@ def fetch_financial_snapshot_analysis(symbol: str, selected_market: str = "USA",
         fair_market_cap = sum(v * w for v, w in zip(fair_components, fair_weights)) / total_w if total_w > 0 else np.nan
         fair_breakdown = [{"method": lab, "value": val} for lab, val in zip(fair_labels, fair_components)]
 
+    # Simple DCF (education-grade) based on latest FCF, 5Y fade, terminal growth
+    dcf_fair_market_cap = np.nan
+    dcf_breakdown = {}
+    if np.isfinite(latest_fcf) and latest_fcf > 0:
+        dcf_growth = _clip(max(safe_float(latest_revenue_growth), 0.0) * 0.60 + 0.05, 0.02, 0.15)
+        dcf_discount = 0.12
+        dcf_terminal_growth = 0.03
+
+        pv_stage = 0.0
+        fcf_proj = float(latest_fcf)
+        for year in range(1, 6):
+            if dcf_growth > dcf_terminal_growth:
+                step = (dcf_growth - dcf_terminal_growth) / 4.0
+                growth_y = max(dcf_terminal_growth, dcf_growth - step * (year - 1))
+            else:
+                growth_y = dcf_growth
+            fcf_proj = fcf_proj * (1.0 + growth_y)
+            pv_stage += fcf_proj / ((1.0 + dcf_discount) ** year)
+
+        terminal_fcf = fcf_proj * (1.0 + dcf_terminal_growth)
+        if dcf_discount > dcf_terminal_growth:
+            terminal_value = terminal_fcf / (dcf_discount - dcf_terminal_growth)
+            pv_terminal = terminal_value / ((1.0 + dcf_discount) ** 5)
+            dcf_equity_value = pv_stage + pv_terminal - float(latest_net_debt if np.isfinite(latest_net_debt) else 0)
+            if np.isfinite(dcf_equity_value) and dcf_equity_value > 0:
+                dcf_fair_market_cap = dcf_equity_value
+                dcf_breakdown = {
+                    "latest_fcf": float(latest_fcf),
+                    "discount_rate": dcf_discount,
+                    "growth_rate": dcf_growth,
+                    "terminal_growth": dcf_terminal_growth,
+                }
+
     latest_market_cap = market_caps.loc[latest_idx] if latest_idx in market_caps.index else np.nan
     upside_pct = _compute_delta_pct(float(fair_market_cap), float(latest_market_cap)) if np.isfinite(fair_market_cap) and np.isfinite(latest_market_cap) else np.nan
+    fair_share_price = (float(fair_market_cap) / float(latest_shares)) if np.isfinite(fair_market_cap) and np.isfinite(latest_shares) and latest_shares > 0 else np.nan
+    dcf_fair_share_price = (float(dcf_fair_market_cap) / float(latest_shares)) if np.isfinite(dcf_fair_market_cap) and np.isfinite(latest_shares) and latest_shares > 0 else np.nan
 
     summary = {
         "ticker": ticker_norm,
@@ -5202,11 +5277,16 @@ def fetch_financial_snapshot_analysis(symbol: str, selected_market: str = "USA",
         "latest_period": pd.to_datetime(latest_idx).strftime("%Y-%m-%d") if latest_idx is not None else "",
         "current_market_cap": latest_market_cap,
         "fair_market_cap": fair_market_cap,
+        "fair_share_price": fair_share_price,
+        "dcf_fair_market_cap": dcf_fair_market_cap,
+        "dcf_fair_share_price": dcf_fair_share_price,
         "upside_pct": upside_pct,
         "target_pe": target_pe,
         "target_pb": target_pb,
         "target_ev_ebitda": target_ev_ebitda,
+        "latest_shares": latest_shares,
         "fair_breakdown": fair_breakdown,
+        "dcf_breakdown": dcf_breakdown,
     }
     return {"error": None, "table_html": table_html, "summary": summary}
 
@@ -6538,28 +6618,58 @@ with tab_financials:
 
             summary = fin_result.get("summary", {})
             st.divider()
-            st.subheader("Son Bilançoya Göre Tahmini Net Piyasa Değeri")
-            fm1, fm2, fm3 = st.columns(3)
+            st.subheader("Son Bilançoya Göre Tahmini Adil Değerler")
             current_mc = summary.get("current_market_cap", np.nan)
             fair_mc = summary.get("fair_market_cap", np.nan)
+            fair_share_price = summary.get("fair_share_price", np.nan)
+            dcf_mc = summary.get("dcf_fair_market_cap", np.nan)
+            dcf_share = summary.get("dcf_fair_share_price", np.nan)
             upside = summary.get("upside_pct", np.nan)
+            latest_shares = summary.get("latest_shares", np.nan)
 
+            fm1, fm2, fm3, fm4 = st.columns(4)
             fm1.metric("Son Dönem", summary.get("latest_period", "N/A"))
             fm2.metric("Mevcut Piyasa Değeri", _money_fmt(current_mc) if np.isfinite(current_mc) else "N/A")
             fm3.metric("Tahmini Adil Net Piyasa Değeri", _money_fmt(fair_mc) if np.isfinite(fair_mc) else "N/A")
+            fm4.metric("Adil Hisse Fiyatı", f"{fair_share_price:.2f}" if np.isfinite(fair_share_price) else "N/A")
 
-            fm4, fm5, fm6 = st.columns(3)
-            fm4.metric("Potansiyel Fark", f"{upside:+.2f}%" if np.isfinite(upside) else "N/A")
-            fm5.metric("Hedef F/K", f"{summary.get('target_pe', np.nan):.2f}" if np.isfinite(summary.get('target_pe', np.nan)) else "N/A")
-            fm6.metric("Hedef PD/DD", f"{summary.get('target_pb', np.nan):.2f}" if np.isfinite(summary.get('target_pb', np.nan)) else "N/A")
+            fm5, fm6, fm7, fm8 = st.columns(4)
+            fm5.metric("Potansiyel Fark", f"{upside:+.2f}%" if np.isfinite(upside) else "N/A")
+            fm6.metric("Son Hisse Sayısı", _money_fmt(latest_shares) if np.isfinite(latest_shares) else "N/A")
+            fm7.metric("DCF Adil Piyasa Değeri", _money_fmt(dcf_mc) if np.isfinite(dcf_mc) else "N/A")
+            fm8.metric("DCF Adil Hisse Fiyatı", f"{dcf_share:.2f}" if np.isfinite(dcf_share) else "N/A")
+
+            fm9, fm10, fm11 = st.columns(3)
+            fm9.metric("Hedef F/K", f"{summary.get('target_pe', np.nan):.2f}" if np.isfinite(summary.get('target_pe', np.nan)) else "N/A")
+            fm10.metric("Hedef PD/DD", f"{summary.get('target_pb', np.nan):.2f}" if np.isfinite(summary.get('target_pb', np.nan)) else "N/A")
+            fm11.metric("Hedef EV/FAVÖK", f"{summary.get('target_ev_ebitda', np.nan):.2f}" if np.isfinite(summary.get('target_ev_ebitda', np.nan)) else "N/A")
 
             with st.expander("Tahmini piyasa değeri hesap yöntemi", expanded=False):
-                st.write("Bu değer, son finansal tabloya göre F/K, PD/DD ve EV/FAVÖK tabanlı heuristik bir birleşik tahmindir. Sektör karşılaştırması veya tam DCF modeli değildir.")
+                st.write("Heuristik adil değer; son finansal tabloya göre F/K, PD/DD ve EV/FAVÖK tabanlı birleşik tahmindir. Buna ek olarak eğitim amaçlı basit bir DCF yaklaşımı da ayrıca hesaplanır.")
                 breakdown = summary.get("fair_breakdown", [])
                 if breakdown:
                     bd_df = pd.DataFrame(breakdown)
                     bd_df["value"] = bd_df["value"].apply(lambda x: _money_fmt(x) if np.isfinite(x) else "N/A")
                     st.dataframe(bd_df, use_container_width=True, height=180)
+
+                dcf_breakdown = summary.get("dcf_breakdown", {})
+                if dcf_breakdown:
+                    st.write("DCF Varsayımları:")
+                    st.dataframe(
+                        pd.DataFrame(
+                            {
+                                "Varsayım": ["Son FCF", "İskonto Oranı", "Büyüme Oranı", "Terminal Büyüme"],
+                                "Değer": [
+                                    _money_fmt(dcf_breakdown.get("latest_fcf", np.nan)) if np.isfinite(dcf_breakdown.get("latest_fcf", np.nan)) else "N/A",
+                                    f"%{dcf_breakdown.get('discount_rate', np.nan) * 100:.2f}" if np.isfinite(dcf_breakdown.get("discount_rate", np.nan)) else "N/A",
+                                    f"%{dcf_breakdown.get('growth_rate', np.nan) * 100:.2f}" if np.isfinite(dcf_breakdown.get("growth_rate", np.nan)) else "N/A",
+                                    f"%{dcf_breakdown.get('terminal_growth', np.nan) * 100:.2f}" if np.isfinite(dcf_breakdown.get("terminal_growth", np.nan)) else "N/A",
+                                ],
+                            }
+                        ),
+                        use_container_width=True,
+                        height=170,
+                    )
 
 with tab_calendar:
     st.header("🗓️ Ekonomik Takvim + Makro Risk Paneli")
