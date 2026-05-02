@@ -5323,6 +5323,10 @@ def _falling(s: pd.Series) -> pd.Series:
 
 
 def _rolling_divergence_flags(close: pd.Series, indicator: pd.Series, kind: str = "bull", lookback: int = 30, recent_bars: int = 2) -> pd.Series:
+    """
+    İndikatör İstatistik sekmesi için uyumsuzlukları tararken olayı tespit edildiği bara değil,
+    gerçek pivot barına yazar. Böylece 3 Ekranlı Sistem'deki "X bar önce" mantığıyla tarih hizalanır.
+    """
     flags = pd.Series(False, index=close.index)
     if close is None or indicator is None or len(close) < lookback + 3:
         return flags
@@ -5335,10 +5339,14 @@ def _rolling_divergence_flags(close: pd.Series, indicator: pd.Series, kind: str 
                 ok, bars_ago = check_bullish_divergence(c_slice, ind_slice, lookback=lookback)
             else:
                 ok, bars_ago = check_bearish_divergence(c_slice, ind_slice, lookback=lookback)
+
             if ok and bars_ago <= recent_bars:
-                flags.iloc[i] = True
+                pivot_pos = i - int(bars_ago)
+                if 0 <= pivot_pos < len(flags):
+                    flags.iloc[pivot_pos] = True
         except Exception:
             pass
+
     return flags
 
 
