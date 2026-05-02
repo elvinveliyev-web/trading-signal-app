@@ -5302,10 +5302,355 @@ def fetch_financial_snapshot_analysis(symbol: str, selected_market: str = "USA",
     }
     return {"error": None, "table_html": table_html, "summary": summary}
 
+
+# =============================
+# INDICATOR STATISTICS HELPERS
+# =============================
+def _cross_up(a: pd.Series, b: pd.Series) -> pd.Series:
+    return (a > b) & (a.shift(1) <= b.shift(1))
+
+
+def _cross_down(a: pd.Series, b: pd.Series) -> pd.Series:
+    return (a < b) & (a.shift(1) >= b.shift(1))
+
+
+def _rising(s: pd.Series) -> pd.Series:
+    return s > s.shift(1)
+
+
+def _falling(s: pd.Series) -> pd.Series:
+    return s < s.shift(1)
+
+
+def _rolling_divergence_flags(close: pd.Series, indicator: pd.Series, kind: str = "bull", lookback: int = 30, recent_bars: int = 2) -> pd.Series:
+    flags = pd.Series(False, index=close.index)
+    if close is None or indicator is None or len(close) < lookback + 3:
+        return flags
+
+    for i in range(lookback, len(close)):
+        c_slice = close.iloc[: i + 1]
+        ind_slice = indicator.iloc[: i + 1]
+        try:
+            if kind == "bull":
+                ok, bars_ago = check_bullish_divergence(c_slice, ind_slice, lookback=lookback)
+            else:
+                ok, bars_ago = check_bearish_divergence(c_slice, ind_slice, lookback=lookback)
+            if ok and bars_ago <= recent_bars:
+                flags.iloc[i] = True
+        except Exception:
+            pass
+    return flags
+
+
+def _prepare_indicator_stats_frames(symbol: str, selected_market: str, cfg: dict) -> Dict[str, Any]:
+    ticker_norm = normalize_ticker(symbol, selected_market)
+    try:
+        daily_raw = yf.download(ticker_norm, period="7y", interval="1d", auto_adjust=True, progress=False)
+        weekly_raw = yf.download(ticker_norm, period="10y", interval="1wk", auto_adjust=True, progress=False)
+    except Exception as e:
+        return {"error": f"Veri indirilemedi: {e}", "daily": pd.DataFrame(), "weekly": pd.DataFrame(), "ticker": ticker_norm}
+
+    daily = _flatten_yf(daily_raw)
+    weekly = _flatten_yf(weekly_raw)
+
+    if daily.empty and weekly.empty:
+        return {"error": "İstatistik analizi için veri gelmedi.", "daily": pd.DataFrame(), "weekly": pd.DataFrame(), "ticker": ticker_norm}
+
+    if not daily.empty:
+        daily = build_features(daily, cfg)
+        daily["EMA13_High"] = ema(daily["High"], 13)
+        daily["EMA13_Low"] = ema(daily["Low"], 13)
+        daily["EMA13_Close"] = ema(daily["Close"], 13)
+        daily["EMA11"] = ema(daily["Close"], 11)
+        daily["EMA22"] = ema(daily["Close"], 22)
+        daily["FI"] = force_index(daily["Close"], daily["Volume"])
+        daily["FI_EMA13"] = ema(daily["FI"], 13)
+        daily["FI_EMA2"] = ema(daily["FI"], 2)
+        daily["RSI13"] = rsi(daily["Close"], 13)
+        daily["STOCH5"], daily["STOCH5_D"] = stochastic(daily["High"], daily["Low"], daily["Close"], k_period=5, d_period=3)
+        daily["ER_EMA13"], daily["BULL_POWER"], daily["BEAR_POWER"] = elder_ray(daily["High"], daily["Low"], daily["Close"], 13)
+        daily["ADX14"], daily["PDI14"], daily["MDI14"] = adx_indicator(daily["High"], daily["Low"], daily["Close"], 14)
+
+    if not weekly.empty:
+        weekly = build_features(weekly, cfg)
+        weekly["EMA13"] = ema(weekly["Close"], 13)
+        weekly["EMA26"] = ema(weekly["Close"], 26)
+        weekly["ADX14"], weekly["PDI14"], weekly["MDI14"] = adx_indicator(weekly["High"], weekly["Low"], weekly["Close"], 14)
+
+    return {"error": None, "daily": daily, "weekly": weekly, "ticker": ticker_norm}
+
+
+def get_indicator_stats_catalog() -> Dict[str, Dict[str, Any]]:
+    return {
+        # Price action
+        "KANGAROO_BULL": {"label": "Fiyat Aksiyonu • Kangaroo Bull", "timeframe": "1d", "direction": "bull"},
+        "KANGAROO_BEAR": {"label": "Fiyat Aksiyonu • Kangaroo Bear", "timeframe": "1d", "direction": "bear"},
+        "PATTERN_HAMMER": {"label": "Fiyat Aksiyonu • Hammer", "timeframe": "1d", "direction": "bull"},
+        "PATTERN_HANGING_MAN": {"label": "Fiyat Aksiyonu • Hanging Man", "timeframe": "1d", "direction": "bear"},
+        "PATTERN_SHOOTING_STAR": {"label": "Fiyat Aksiyonu • Shooting Star", "timeframe": "1d", "direction": "bear"},
+        "PATTERN_INV_HAMMER": {"label": "Fiyat Aksiyonu • Inverted Hammer", "timeframe": "1d", "direction": "bull"},
+        "PATTERN_ENGULFING_BULL": {"label": "Fiyat Aksiyonu • Bullish Engulfing", "timeframe": "1d", "direction": "bull"},
+        "PATTERN_ENGULFING_BEAR": {"label": "Fiyat Aksiyonu • Bearish Engulfing", "timeframe": "1d", "direction": "bear"},
+        "PATTERN_HARAMI_BULL": {"label": "Fiyat Aksiyonu • Bullish Harami", "timeframe": "1d", "direction": "bull"},
+        "PATTERN_HARAMI_BEAR": {"label": "Fiyat Aksiyonu • Bearish Harami", "timeframe": "1d", "direction": "bear"},
+        "PATTERN_MARUBOZU_BULL": {"label": "Fiyat Aksiyonu • Bullish Marubozu", "timeframe": "1d", "direction": "bull"},
+        "PATTERN_MARUBOZU_BEAR": {"label": "Fiyat Aksiyonu • Bearish Marubozu", "timeframe": "1d", "direction": "bear"},
+        "PATTERN_TWEEZER_BOTTOM": {"label": "Fiyat Aksiyonu • Tweezer Bottom", "timeframe": "1d", "direction": "bull"},
+        "PATTERN_TWEEZER_TOP": {"label": "Fiyat Aksiyonu • Tweezer Top", "timeframe": "1d", "direction": "bear"},
+        "PATTERN_PIERCING": {"label": "Fiyat Aksiyonu • Piercing Pattern", "timeframe": "1d", "direction": "bull"},
+        "PATTERN_DARK_CLOUD": {"label": "Fiyat Aksiyonu • Dark Cloud", "timeframe": "1d", "direction": "bear"},
+        "PATTERN_MORNING_STAR": {"label": "Fiyat Aksiyonu • Morning Star", "timeframe": "1d", "direction": "bull"},
+        "PATTERN_EVENING_STAR": {"label": "Fiyat Aksiyonu • Evening Star", "timeframe": "1d", "direction": "bear"},
+        "PATTERN_LL_DOJI": {"label": "Fiyat Aksiyonu • Long-Legged Doji", "timeframe": "1d", "direction": "neutral"},
+        "PATTERN_DOJI": {"label": "Fiyat Aksiyonu • Doji", "timeframe": "1d", "direction": "neutral"},
+        # EMA13 touches
+        "EMA13_LOW_TOUCH": {"label": "13 EMA • EMA13 Low Teması", "timeframe": "1d", "direction": "bull"},
+        "EMA13_CLOSE_TOUCH": {"label": "13 EMA • EMA13 Close Teması", "timeframe": "1d", "direction": "neutral"},
+        "EMA13_HIGH_TOUCH": {"label": "13 EMA • EMA13 High Teması", "timeframe": "1d", "direction": "bear"},
+        # Weekly screen 1
+        "W_MACD_SLOPE_UP": {"label": "1. Ekran Haftalık • MACD Histogram Eğimi Yukarı", "timeframe": "1wk", "direction": "bull"},
+        "W_MACD_SLOPE_DOWN": {"label": "1. Ekran Haftalık • MACD Histogram Eğimi Aşağı", "timeframe": "1wk", "direction": "bear"},
+        "W_MACD_DIV_BULL": {"label": "1. Ekran Haftalık • MACD Pozitif Uyumsuzluk", "timeframe": "1wk", "direction": "bull"},
+        "W_MACD_DIV_BEAR": {"label": "1. Ekran Haftalık • MACD Negatif Uyumsuzluk", "timeframe": "1wk", "direction": "bear"},
+        "W_EMA1326_AL": {"label": "1. Ekran Haftalık • EMA(13-26) AL", "timeframe": "1wk", "direction": "bull"},
+        "W_EMA1326_SAT": {"label": "1. Ekran Haftalık • EMA(13-26) SAT", "timeframe": "1wk", "direction": "bear"},
+        "W_ADX_AL": {"label": "1. Ekran Haftalık • ADX(14) AL", "timeframe": "1wk", "direction": "bull"},
+        "W_ADX_SAT": {"label": "1. Ekran Haftalık • ADX(14) SAT", "timeframe": "1wk", "direction": "bear"},
+        # Daily screen 2
+        "D_EMA1122_AL": {"label": "2. Ekran Günlük • EMA(11-22) AL", "timeframe": "1d", "direction": "bull"},
+        "D_EMA1122_SAT": {"label": "2. Ekran Günlük • EMA(11-22) SAT", "timeframe": "1d", "direction": "bear"},
+        "D_FI_AL": {"label": "2. Ekran Günlük • Kuvvet Endeksi (FI) AL", "timeframe": "1d", "direction": "bull"},
+        "D_FI_SAT": {"label": "2. Ekran Günlük • Kuvvet Endeksi (FI) SAT", "timeframe": "1d", "direction": "bear"},
+        "D_RSI13_AL": {"label": "2. Ekran Günlük • RSI(13) Aşırı Satım", "timeframe": "1d", "direction": "bull"},
+        "D_RSI13_SAT": {"label": "2. Ekran Günlük • RSI(13) Aşırı Alım", "timeframe": "1d", "direction": "bear"},
+        "D_RSI_DIV_BULL": {"label": "2. Ekran Günlük • RSI Pozitif Uyumsuzluk", "timeframe": "1d", "direction": "bull"},
+        "D_RSI_DIV_BEAR": {"label": "2. Ekran Günlük • RSI Negatif Uyumsuzluk", "timeframe": "1d", "direction": "bear"},
+        "D_STOCH5_AL": {"label": "2. Ekran Günlük • Stokastik(5) Aşırı Satım", "timeframe": "1d", "direction": "bull"},
+        "D_STOCH5_SAT": {"label": "2. Ekran Günlük • Stokastik(5) Aşırı Alım", "timeframe": "1d", "direction": "bear"},
+        "D_STOCH_DIV_BULL": {"label": "2. Ekran Günlük • Stokastik Pozitif Uyumsuzluk", "timeframe": "1d", "direction": "bull"},
+        "D_STOCH_DIV_BEAR": {"label": "2. Ekran Günlük • Stokastik Negatif Uyumsuzluk", "timeframe": "1d", "direction": "bear"},
+        "D_ELDERRAY_AL": {"label": "2. Ekran Günlük • Elder-Ray AL", "timeframe": "1d", "direction": "bull"},
+        "D_ELDERRAY_SAT": {"label": "2. Ekran Günlük • Elder-Ray SAT", "timeframe": "1d", "direction": "bear"},
+        "D_ELDERRAY_DIV_BULL": {"label": "2. Ekran Günlük • Elder-Ray Pozitif Uyumsuzluk", "timeframe": "1d", "direction": "bull"},
+        "D_ELDERRAY_DIV_BEAR": {"label": "2. Ekran Günlük • Elder-Ray Negatif Uyumsuzluk", "timeframe": "1d", "direction": "bear"},
+        "D_ADX_AL": {"label": "2. Ekran Günlük • ADX(14) AL", "timeframe": "1d", "direction": "bull"},
+        "D_ADX_SAT": {"label": "2. Ekran Günlük • ADX(14) SAT", "timeframe": "1d", "direction": "bear"},
+    }
+
+
+def build_indicator_signal_series(event_key: str, daily: pd.DataFrame, weekly: pd.DataFrame) -> Tuple[pd.Series, pd.DataFrame, str, str]:
+    catalog = get_indicator_stats_catalog()
+    meta = catalog[event_key]
+    timeframe = meta["timeframe"]
+    direction = meta["direction"]
+    df = daily if timeframe == "1d" else weekly
+    if df is None or df.empty:
+        return pd.Series(dtype=bool), pd.DataFrame(), timeframe, direction
+
+    sig = pd.Series(False, index=df.index)
+
+    if event_key in df.columns:
+        sig = df[event_key].fillna(0).astype(int) == 1
+    elif event_key == "EMA13_LOW_TOUCH":
+        sig = (df["Low"] <= df["EMA13_Low"]) & (df["Close"] >= df["EMA13_Low"])
+    elif event_key == "EMA13_CLOSE_TOUCH":
+        sig = (df["Low"] <= df["EMA13_Close"]) & (df["High"] >= df["EMA13_Close"])
+    elif event_key == "EMA13_HIGH_TOUCH":
+        sig = (df["High"] >= df["EMA13_High"]) & (df["Close"] <= df["EMA13_High"])
+    elif event_key == "W_MACD_SLOPE_UP":
+        hist = df["MACD_hist"]
+        sig = (hist.diff() > 0) & (hist.diff().shift(1) <= 0)
+    elif event_key == "W_MACD_SLOPE_DOWN":
+        hist = df["MACD_hist"]
+        sig = (hist.diff() < 0) & (hist.diff().shift(1) >= 0)
+    elif event_key == "W_MACD_DIV_BULL":
+        sig = _rolling_divergence_flags(df["Close"], df["MACD_hist"], kind="bull", lookback=30, recent_bars=2)
+    elif event_key == "W_MACD_DIV_BEAR":
+        sig = _rolling_divergence_flags(df["Close"], df["MACD_hist"], kind="bear", lookback=30, recent_bars=2)
+    elif event_key == "W_EMA1326_AL":
+        state = (df["EMA13"] > df["EMA26"]) & (df["Close"] > df["EMA13"])
+        sig = state & (~state.shift(1).fillna(False))
+    elif event_key == "W_EMA1326_SAT":
+        state = (df["EMA13"] < df["EMA26"]) & (df["Close"] < df["EMA13"])
+        sig = state & (~state.shift(1).fillna(False))
+    elif event_key == "W_ADX_AL":
+        state = (df["ADX14"] >= 25) & (df["PDI14"] > df["MDI14"])
+        sig = state & (~state.shift(1).fillna(False))
+    elif event_key == "W_ADX_SAT":
+        state = (df["ADX14"] >= 25) & (df["MDI14"] > df["PDI14"])
+        sig = state & (~state.shift(1).fillna(False))
+    elif event_key == "D_EMA1122_AL":
+        state = (df["EMA11"] > df["EMA22"]) & (df["Close"] > df["EMA11"])
+        sig = state & (~state.shift(1).fillna(False))
+    elif event_key == "D_EMA1122_SAT":
+        state = (df["EMA11"] < df["EMA22"]) & (df["Close"] < df["EMA11"])
+        sig = state & (~state.shift(1).fillna(False))
+    elif event_key == "D_FI_AL":
+        state = (df["FI"] > df["FI_EMA13"]) & (df["FI_EMA2"] < 0)
+        sig = state & (~state.shift(1).fillna(False))
+    elif event_key == "D_FI_SAT":
+        state = (df["FI"] < df["FI_EMA13"]) & (df["FI_EMA2"] > 0)
+        sig = state & (~state.shift(1).fillna(False))
+    elif event_key == "D_RSI13_AL":
+        sig = (df["RSI13"] < 30) & (df["RSI13"].shift(1) >= 30)
+    elif event_key == "D_RSI13_SAT":
+        sig = (df["RSI13"] > 70) & (df["RSI13"].shift(1) <= 70)
+    elif event_key == "D_RSI_DIV_BULL":
+        sig = _rolling_divergence_flags(df["Close"], df["RSI13"], kind="bull", lookback=30, recent_bars=2)
+    elif event_key == "D_RSI_DIV_BEAR":
+        sig = _rolling_divergence_flags(df["Close"], df["RSI13"], kind="bear", lookback=30, recent_bars=2)
+    elif event_key == "D_STOCH5_AL":
+        sig = (df["STOCH5"] < 20) & (df["STOCH5"].shift(1) >= 20)
+    elif event_key == "D_STOCH5_SAT":
+        sig = (df["STOCH5"] > 80) & (df["STOCH5"].shift(1) <= 80)
+    elif event_key == "D_STOCH_DIV_BULL":
+        sig = _rolling_divergence_flags(df["Close"], df["STOCH5"], kind="bull", lookback=30, recent_bars=2)
+    elif event_key == "D_STOCH_DIV_BEAR":
+        sig = _rolling_divergence_flags(df["Close"], df["STOCH5"], kind="bear", lookback=30, recent_bars=2)
+    elif event_key == "D_ELDERRAY_AL":
+        state = _rising(df["ER_EMA13"]) & (df["BEAR_POWER"] < 0) & (df["BEAR_POWER"] > df["BEAR_POWER"].shift(1))
+        sig = state & (~state.shift(1).fillna(False))
+    elif event_key == "D_ELDERRAY_SAT":
+        state = _falling(df["ER_EMA13"]) & (df["BULL_POWER"] > 0) & (df["BULL_POWER"] < df["BULL_POWER"].shift(1))
+        sig = state & (~state.shift(1).fillna(False))
+    elif event_key == "D_ELDERRAY_DIV_BULL":
+        sig = _rolling_divergence_flags(df["Close"], df["BEAR_POWER"], kind="bull", lookback=30, recent_bars=2)
+    elif event_key == "D_ELDERRAY_DIV_BEAR":
+        sig = _rolling_divergence_flags(df["Close"], df["BULL_POWER"], kind="bear", lookback=30, recent_bars=2)
+    elif event_key == "D_ADX_AL":
+        state = (df["ADX14"] >= 25) & (df["PDI14"] > df["MDI14"])
+        sig = state & (~state.shift(1).fillna(False))
+    elif event_key == "D_ADX_SAT":
+        state = (df["ADX14"] >= 25) & (df["MDI14"] > df["PDI14"])
+        sig = state & (~state.shift(1).fillna(False))
+
+    return sig.fillna(False), df, timeframe, direction
+
+
+def compute_indicator_signal_statistics(df: pd.DataFrame, signal_mask: pd.Series, direction: str = "bull", max_bars: int = 20, move_threshold: float = 0.02, timeframe: str = "1d") -> Tuple[Dict[str, Any], pd.DataFrame]:
+    if df is None or df.empty or signal_mask is None or signal_mask.empty:
+        return {"occurrences": 0, "worked": 0, "win_rate": np.nan}, pd.DataFrame()
+
+    event_positions = np.where(signal_mask.fillna(False).values)[0]
+    rows = []
+    bar_to_day = 7 if timeframe == "1wk" else 1
+
+    for pos in event_positions:
+        if pos >= len(df) - 2:
+            continue
+        entry_price = float(df["Close"].iloc[pos])
+        future = df.iloc[pos + 1 : pos + 1 + int(max_bars)].copy()
+        if future.empty or not np.isfinite(entry_price) or entry_price <= 0:
+            continue
+
+        up_path = (future["High"] / entry_price) - 1.0
+        down_path = (future["Low"] / entry_price) - 1.0
+        max_up = float(up_path.max()) if not up_path.empty else 0.0
+        max_down = float(down_path.min()) if not down_path.empty else 0.0
+        up_idx = int(np.argmax(up_path.values)) + 1 if len(up_path) else 0
+        down_idx = int(np.argmin(down_path.values)) + 1 if len(down_path) else 0
+        down_abs = abs(max_down)
+
+        if direction == "bull":
+            worked = (max_up >= move_threshold) and (max_up >= down_abs)
+            dominant_dir = "Yukarı" if max_up >= down_abs else "Aşağı"
+            dominant_move = max_up if max_up >= down_abs else max_down
+            trend_bars = up_idx if max_up >= down_abs else down_idx
+        elif direction == "bear":
+            worked = (down_abs >= move_threshold) and (down_abs >= max_up)
+            dominant_dir = "Aşağı" if down_abs >= max_up else "Yukarı"
+            dominant_move = -down_abs if down_abs >= max_up else max_up
+            trend_bars = down_idx if down_abs >= max_up else up_idx
+        else:
+            if max_up >= down_abs:
+                worked = max_up >= move_threshold
+                dominant_dir = "Yukarı"
+                dominant_move = max_up
+                trend_bars = up_idx
+            else:
+                worked = down_abs >= move_threshold
+                dominant_dir = "Aşağı"
+                dominant_move = -down_abs
+                trend_bars = down_idx
+
+        rows.append({
+            "Tarih": pd.to_datetime(df.index[pos]),
+            "Giriş Fiyatı": entry_price,
+            "Çalıştı": bool(worked),
+            "Baskın Yön": dominant_dir,
+            "Trend Bar": int(trend_bars),
+            "Trend Gün": int(trend_bars * bar_to_day),
+            "Maks. Yükseliş %": max_up * 100.0,
+            "Maks. Düşüş %": max_down * 100.0,
+            "Baskın Hareket %": dominant_move * 100.0,
+        })
+
+    res_df = pd.DataFrame(rows)
+    if res_df.empty:
+        return {
+            "occurrences": 0,
+            "worked": 0,
+            "win_rate": np.nan,
+            "avg_days": np.nan,
+            "median_days": np.nan,
+            "avg_up": np.nan,
+            "avg_down": np.nan,
+            "avg_dom": np.nan,
+            "best": np.nan,
+            "worst": np.nan,
+        }, res_df
+
+    worked_df = res_df[res_df["Çalıştı"] == True].copy()
+    summary = {
+        "occurrences": int(len(res_df)),
+        "worked": int(res_df["Çalıştı"].sum()),
+        "win_rate": float(res_df["Çalıştı"].mean() * 100.0),
+        "avg_days": float(worked_df["Trend Gün"].mean()) if not worked_df.empty else np.nan,
+        "median_days": float(worked_df["Trend Gün"].median()) if not worked_df.empty else np.nan,
+        "avg_up": float(res_df["Maks. Yükseliş %"].mean()),
+        "avg_down": float(res_df["Maks. Düşüş %"].mean()),
+        "avg_dom": float(res_df["Baskın Hareket %"].mean()),
+        "best": float(res_df["Baskın Hareket %"].max()),
+        "worst": float(res_df["Baskın Hareket %"].min()),
+    }
+    return summary, res_df.sort_values("Tarih", ascending=False)
+
+
+def build_indicator_occurrence_chart(df: pd.DataFrame, signal_mask: pd.Series, title: str = "İndikatör Oluşumları") -> go.Figure:
+    fig = go.Figure()
+    fig.add_trace(go.Candlestick(
+        x=df.index,
+        open=df["Open"],
+        high=df["High"],
+        low=df["Low"],
+        close=df["Close"],
+        name="Fiyat",
+    ))
+
+    if "EMA13_Close" in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df["EMA13_Close"], name="EMA13 Close", line=dict(width=1.8, color="darkorange")))
+    if "EMA13_Low" in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df["EMA13_Low"], name="EMA13 Low", line=dict(width=1, color="rgba(255,165,0,0.7)")))
+    if "EMA13_High" in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df["EMA13_High"], name="EMA13 High", line=dict(width=1, color="rgba(255,165,0,0.7)")))
+
+    mask = signal_mask.fillna(False)
+    if mask.any():
+        fig.add_trace(go.Scatter(
+            x=df.index[mask],
+            y=df.loc[mask, "Close"],
+            mode="markers",
+            name="Oluşum",
+            marker=dict(size=10, color="limegreen", symbol="circle"),
+        ))
+
+    fig.update_layout(height=520, title=title, xaxis_rangeslider_visible=False, yaxis_title="Fiyat", xaxis_title="Tarih")
+    return fig
+
 # =============================
 # Tabs
 # =============================
-tab_dash, tab_triple, tab_future, tab_chart_patterns, tab_financials, tab_calendar, tab_social, tab_heatmap, tab_export, tab_scan = st.tabs(["📊 Dashboard", "📺 3 Ekranlı Sistem", "🔮 Future Price", "📐 Grafik Formasyonları", "📘 Bilanço Analizi", "🗓️ Ekonomik Takvim", "📣 X + YouTube Trends", "🔥 Sektörel Heatmap", "📄 Rapor (PDF/HTML)", "🔍 Tarama"])
+tab_dash, tab_triple, tab_indicator_stats, tab_future, tab_chart_patterns, tab_financials, tab_calendar, tab_social, tab_heatmap, tab_export, tab_scan = st.tabs(["📊 Dashboard", "📺 3 Ekranlı Sistem", "📈 İndikatör İstatistik", "🔮 Future Price", "📐 Grafik Formasyonları", "📘 Bilanço Analizi", "🗓️ Ekonomik Takvim", "📣 X + YouTube Trends", "🔥 Sektörel Heatmap", "📄 Rapor (PDF/HTML)", "🔍 Tarama"])
 
 with tab_dash:
     if "app_errors" in st.session_state and st.session_state.app_errors:
@@ -6180,6 +6525,108 @@ with tab_triple:
                         fig3_adx.update_layout(title="1 Saatlik ADX ve Yön Göstergeleri (+DI / -DI)", height=250)
                         st.plotly_chart(fig3_adx, use_container_width=True)
 
+
+
+with tab_indicator_stats:
+    st.header("📈 İndikatör İstatistik")
+    st.caption("Seçilen hisse ve indikatör için geçmiş oluşumları tarar; kaç kez oluştuğunu, kaç kez çalıştığını, trendin ortalama kaç gün sürdüğünü ve oluşum sonrası yüzde kaç yükselip/düştüğünü istatistiksel olarak verir.")
+
+    if not st.session_state.ta_ran:
+        st.info("Sol menüden 'Teknik Analizi Çalıştır' butonuna basarak sistemi aktifleştirmelisin.")
+    else:
+        stats_symbol_options_raw = [str(x).upper() for x in universe]
+        if not st.session_state.screener_df.empty and "ticker" in st.session_state.screener_df.columns:
+            stats_symbol_options_raw = st.session_state.screener_df["ticker"].astype(str).str.upper().tolist() + stats_symbol_options_raw
+        if ticker:
+            stats_symbol_options_raw = [ticker] + stats_symbol_options_raw
+
+        stats_symbol_options = []
+        seen_stats = set()
+        for opt in stats_symbol_options_raw:
+            nopt = naked_ticker(opt)
+            if nopt not in seen_stats:
+                seen_stats.add(nopt)
+                stats_symbol_options.append(opt)
+
+        default_stats_symbol = ticker if ticker in stats_symbol_options else (stats_symbol_options[0] if stats_symbol_options else "")
+        catalog = get_indicator_stats_catalog()
+        label_to_key = {v["label"]: k for k, v in catalog.items()}
+        ordered_labels = list(label_to_key.keys())
+
+        s1, s2, s3, s4 = st.columns([2.2, 3.2, 1.2, 1.2])
+        with s1:
+            stats_symbol_raw = st.selectbox("Hisse Seç", options=stats_symbol_options, index=stats_symbol_options.index(default_stats_symbol) if default_stats_symbol in stats_symbol_options else 0, key="stats_symbol_raw")
+        with s2:
+            selected_indicator_label = st.selectbox("İndikatör / Formasyon Seç", options=ordered_labels, index=0, key="selected_indicator_label")
+        with s3:
+            max_bars_forward = st.slider("İleri Bakış (bar)", min_value=5, max_value=60, value=20, step=1, key="stats_max_bars_forward")
+        with s4:
+            move_threshold_pct = st.slider("Çalıştı Eşiği %", min_value=1.0, max_value=10.0, value=2.0, step=0.5, key="stats_move_threshold_pct")
+
+        run_indicator_stats = st.button("📈 İstatistik Analizini Çalıştır", key="run_indicator_stats", use_container_width=True)
+
+        if run_indicator_stats:
+            selected_key = label_to_key[selected_indicator_label]
+            with st.spinner("İndikatör geçmişi hazırlanıyor ve istatistik hesaplanıyor..."):
+                prep = _prepare_indicator_stats_frames(stats_symbol_raw, market, cfg)
+                if prep.get("error"):
+                    st.session_state.indicator_stats_result = {"error": prep.get("error")}
+                else:
+                    sig_mask, src_df, src_tf, src_dir = build_indicator_signal_series(selected_key, prep["daily"], prep["weekly"])
+                    summary, details_df = compute_indicator_signal_statistics(
+                        src_df,
+                        sig_mask,
+                        direction=src_dir,
+                        max_bars=int(max_bars_forward),
+                        move_threshold=float(move_threshold_pct) / 100.0,
+                        timeframe=src_tf,
+                    )
+                    occ_chart = build_indicator_occurrence_chart(src_df, sig_mask, title=f"{prep['ticker']} — {selected_indicator_label}") if src_df is not None and not src_df.empty else None
+                    st.session_state.indicator_stats_result = {
+                        "error": None,
+                        "ticker": prep["ticker"],
+                        "indicator_label": selected_indicator_label,
+                        "indicator_key": selected_key,
+                        "timeframe": src_tf,
+                        "direction": src_dir,
+                        "summary": summary,
+                        "details_df": details_df,
+                        "chart": occ_chart,
+                    }
+
+        stats_result = st.session_state.get("indicator_stats_result")
+        if stats_result:
+            if stats_result.get("error"):
+                st.warning(stats_result["error"])
+            else:
+                summary = stats_result.get("summary", {})
+                st.success(f"Analiz tamamlandı: {stats_result.get('ticker', '')} | {stats_result.get('indicator_label', '')} | Zaman dilimi: {stats_result.get('timeframe', '')}")
+
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Toplam Oluşum", f"{summary.get('occurrences', 0)}")
+                m2.metric("Çalışan Oluşum", f"{summary.get('worked', 0)}")
+                m3.metric("Başarı Oranı", f"%{summary.get('win_rate', np.nan):.1f}" if np.isfinite(summary.get('win_rate', np.nan)) else "N/A")
+                m4.metric("Ortalama Trend Gün", f"{summary.get('avg_days', np.nan):.1f}" if np.isfinite(summary.get('avg_days', np.nan)) else "N/A")
+
+                m5, m6, m7, m8 = st.columns(4)
+                m5.metric("Medyan Trend Gün", f"{summary.get('median_days', np.nan):.1f}" if np.isfinite(summary.get('median_days', np.nan)) else "N/A")
+                m6.metric("Ort. Maks. Yükseliş", f"%{summary.get('avg_up', np.nan):.2f}" if np.isfinite(summary.get('avg_up', np.nan)) else "N/A")
+                m7.metric("Ort. Maks. Düşüş", f"%{summary.get('avg_down', np.nan):.2f}" if np.isfinite(summary.get('avg_down', np.nan)) else "N/A")
+                m8.metric("Ort. Baskın Hareket", f"%{summary.get('avg_dom', np.nan):.2f}" if np.isfinite(summary.get('avg_dom', np.nan)) else "N/A")
+
+                m9, m10 = st.columns(2)
+                m9.metric("En İyi Baskın Hareket", f"%{summary.get('best', np.nan):.2f}" if np.isfinite(summary.get('best', np.nan)) else "N/A")
+                m10.metric("En Kötü Baskın Hareket", f"%{summary.get('worst', np.nan):.2f}" if np.isfinite(summary.get('worst', np.nan)) else "N/A")
+
+                if stats_result.get("chart") is not None:
+                    st.plotly_chart(stats_result["chart"], use_container_width=True)
+
+                with st.expander("Detaylı Oluşum Tablosu", expanded=False):
+                    details_df = stats_result.get("details_df", pd.DataFrame())
+                    if details_df is not None and not details_df.empty:
+                        st.dataframe(details_df, use_container_width=True, height=360)
+                    else:
+                        st.info("Bu indikatör için yeterli geçmiş oluşum bulunamadı.")
 
 with tab_future:
     st.header("🔮 Future Price")
