@@ -5527,9 +5527,47 @@ def build_indicator_signal_series(event_key: str, daily: pd.DataFrame, weekly: p
     return sig.fillna(False), df, timeframe, direction
 
 
+
 def compute_indicator_signal_statistics(df: pd.DataFrame, signal_mask: pd.Series, direction: str = "bull", max_bars: int = 20, move_threshold: float = 0.02, timeframe: str = "1d") -> Tuple[Dict[str, Any], pd.DataFrame]:
     if df is None or df.empty or signal_mask is None or signal_mask.empty:
         return {"occurrences": 0, "worked": 0, "win_rate": np.nan}, pd.DataFrame()
+
+    def _trend_bars_until_reversal(entry_price: float, future_close: pd.Series, sig_direction: str, fallback_direction: str = "Yukarı") -> Tuple[int, str]:
+        if future_close is None or future_close.empty or not np.isfinite(entry_price):
+            return 0, fallback_direction
+
+        closes = pd.to_numeric(future_close, errors="coerce").dropna()
+        if closes.empty:
+            return 0, fallback_direction
+
+        if sig_direction == "bull":
+            eval_direction = "Yukarı"
+        elif sig_direction == "bear":
+            eval_direction = "Aşağı"
+        else:
+            eval_direction = fallback_direction
+
+        prev_close = float(entry_price)
+        trend_bars = 0
+
+        if eval_direction == "Yukarı":
+            for close_val in closes:
+                close_val = float(close_val)
+                if close_val >= prev_close:
+                    trend_bars += 1
+                    prev_close = close_val
+                else:
+                    break
+        else:
+            for close_val in closes:
+                close_val = float(close_val)
+                if close_val <= prev_close:
+                    trend_bars += 1
+                    prev_close = close_val
+                else:
+                    break
+
+        return int(trend_bars), eval_direction
 
     event_positions = np.where(signal_mask.fillna(False).values)[0]
     rows = []
@@ -5538,6 +5576,7 @@ def compute_indicator_signal_statistics(df: pd.DataFrame, signal_mask: pd.Series
     for pos in event_positions:
         if pos >= len(df) - 2:
             continue
+
         entry_price = float(df["Close"].iloc[pos])
         future = df.iloc[pos + 1 : pos + 1 + int(max_bars)].copy()
         if future.empty or not np.isfinite(entry_price) or entry_price <= 0:
@@ -5555,34 +5594,40 @@ def compute_indicator_signal_statistics(df: pd.DataFrame, signal_mask: pd.Series
             worked = (max_up >= move_threshold) and (max_up >= down_abs)
             dominant_dir = "Yukarı" if max_up >= down_abs else "Aşağı"
             dominant_move = max_up if max_up >= down_abs else max_down
-            trend_bars = up_idx if max_up >= down_abs else down_idx
         elif direction == "bear":
             worked = (down_abs >= move_threshold) and (down_abs >= max_up)
             dominant_dir = "Aşağı" if down_abs >= max_up else "Yukarı"
             dominant_move = -down_abs if down_abs >= max_up else max_up
-            trend_bars = down_idx if down_abs >= max_up else up_idx
         else:
             if max_up >= down_abs:
                 worked = max_up >= move_threshold
                 dominant_dir = "Yukarı"
                 dominant_move = max_up
-                trend_bars = up_idx
             else:
                 worked = down_abs >= move_threshold
                 dominant_dir = "Aşağı"
                 dominant_move = -down_abs
-                trend_bars = down_idx
+
+        trend_bars, trend_direction = _trend_bars_until_reversal(
+            entry_price=entry_price,
+            future_close=future["Close"],
+            sig_direction=direction,
+            fallback_direction=dominant_dir,
+        )
 
         rows.append({
             "Tarih": pd.to_datetime(df.index[pos]),
             "Giriş Fiyatı": entry_price,
             "Çalıştı": bool(worked),
             "Baskın Yön": dominant_dir,
+            "Trend Yönü": trend_direction,
             "Trend Bar": int(trend_bars),
             "Trend Gün": int(trend_bars * bar_to_day),
             "Maks. Yükseliş %": max_up * 100.0,
             "Maks. Düşüş %": max_down * 100.0,
             "Baskın Hareket %": dominant_move * 100.0,
+            "Yukarı Zirve Barı": int(up_idx),
+            "Aşağı Dip Barı": int(down_idx),
         })
 
     res_df = pd.DataFrame(rows)
@@ -5600,13 +5645,12 @@ def compute_indicator_signal_statistics(df: pd.DataFrame, signal_mask: pd.Series
             "worst": np.nan,
         }, res_df
 
-    worked_df = res_df[res_df["Çalıştı"] == True].copy()
     summary = {
         "occurrences": int(len(res_df)),
         "worked": int(res_df["Çalıştı"].sum()),
         "win_rate": float(res_df["Çalıştı"].mean() * 100.0),
-        "avg_days": float(worked_df["Trend Gün"].mean()) if not worked_df.empty else np.nan,
-        "median_days": float(worked_df["Trend Gün"].median()) if not worked_df.empty else np.nan,
+        "avg_days": float(res_df["Trend Gün"].mean()),
+        "median_days": float(res_df["Trend Gün"].median()),
         "avg_up": float(res_df["Maks. Yükseliş %"].mean()),
         "avg_down": float(res_df["Maks. Düşüş %"].mean()),
         "avg_dom": float(res_df["Baskın Hareket %"].mean()),
@@ -6529,7 +6573,7 @@ with tab_triple:
 
 with tab_indicator_stats:
     st.header("📈 İndikatör İstatistik")
-    st.caption("Seçilen hisse ve indikatör için geçmiş oluşumları tarar; kaç kez oluştuğunu, kaç kez çalıştığını, trendin ortalama kaç gün sürdüğünü ve oluşum sonrası yüzde kaç yükselip/düştüğünü istatistiksel olarak verir.")
+    st.caption("Seçilen hisse ve indikatör için geçmiş oluşumları tarar; kaç kez oluştuğunu, kaç kez çalıştığını, trendin ters yöne dönene kadar ortalama kaç gün sürdüğünü ve oluşum sonrası yüzde kaç yükselip/düştüğünü istatistiksel olarak verir.")
 
     if not st.session_state.ta_ran:
         st.info("Sol menüden 'Teknik Analizi Çalıştır' butonuna basarak sistemi aktifleştirmelisin.")
@@ -6606,10 +6650,10 @@ with tab_indicator_stats:
                 m1.metric("Toplam Oluşum", f"{summary.get('occurrences', 0)}")
                 m2.metric("Çalışan Oluşum", f"{summary.get('worked', 0)}")
                 m3.metric("Başarı Oranı", f"%{summary.get('win_rate', np.nan):.1f}" if np.isfinite(summary.get('win_rate', np.nan)) else "N/A")
-                m4.metric("Ortalama Trend Gün", f"{summary.get('avg_days', np.nan):.1f}" if np.isfinite(summary.get('avg_days', np.nan)) else "N/A")
+                m4.metric("Ort. Trend Süresi", f"{summary.get('avg_days', np.nan):.1f} gün" if np.isfinite(summary.get('avg_days', np.nan)) else "N/A")
 
                 m5, m6, m7, m8 = st.columns(4)
-                m5.metric("Medyan Trend Gün", f"{summary.get('median_days', np.nan):.1f}" if np.isfinite(summary.get('median_days', np.nan)) else "N/A")
+                m5.metric("Medyan Trend Süresi", f"{summary.get('median_days', np.nan):.1f} gün" if np.isfinite(summary.get('median_days', np.nan)) else "N/A")
                 m6.metric("Ort. Maks. Yükseliş", f"%{summary.get('avg_up', np.nan):.2f}" if np.isfinite(summary.get('avg_up', np.nan)) else "N/A")
                 m7.metric("Ort. Maks. Düşüş", f"%{summary.get('avg_down', np.nan):.2f}" if np.isfinite(summary.get('avg_down', np.nan)) else "N/A")
                 m8.metric("Ort. Baskın Hareket", f"%{summary.get('avg_dom', np.nan):.2f}" if np.isfinite(summary.get('avg_dom', np.nan)) else "N/A")
