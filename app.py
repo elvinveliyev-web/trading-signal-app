@@ -1165,6 +1165,30 @@ def get_live_price(ticker: str) -> dict:
         pass
     return out
 
+
+def apply_live_last_override_to_df(df: pd.DataFrame, live_price: float) -> pd.DataFrame:
+    if df is None or df.empty or not np.isfinite(live_price):
+        return df
+
+    out = df.copy()
+    last_idx = out.index[-1]
+
+    try:
+        if "Close" in out.columns:
+            out.at[last_idx, "Close"] = float(live_price)
+        if "High" in out.columns and pd.notna(out.at[last_idx, "High"]):
+            out.at[last_idx, "High"] = max(float(out.at[last_idx, "High"]), float(live_price))
+        elif "High" in out.columns:
+            out.at[last_idx, "High"] = float(live_price)
+        if "Low" in out.columns and pd.notna(out.at[last_idx, "Low"]):
+            out.at[last_idx, "Low"] = min(float(out.at[last_idx, "Low"]), float(live_price))
+        elif "Low" in out.columns:
+            out.at[last_idx, "Low"] = float(live_price)
+    except Exception:
+        return df
+
+    return out
+
 @st.cache_data(ttl=12 * 3600, show_spinner=False)
 def get_short_info(ticker: str) -> dict:
     out = {"short_percent_float": np.nan, "short_ratio": np.nan}
@@ -2469,6 +2493,13 @@ with st.sidebar:
         help="Yahoo Finance günlük mumu henüz vermediyse gün içi dakikalık verilerden o mumu inşa eder. (Sadece günlük periyotta ve güncel analizde çalışır)"
     )
 
+    use_live_last_override = st.checkbox(
+        "Base ve Daily Close için Live/Last kullan + hesapları son bara uygula",
+        value=False,
+        disabled=use_custom_end_date,
+        help="Açıldığında son barın Close/High/Low değerleri Live/Last fiyatına göre güncellenir. Böylece Base, Daily Close, mum formasyonları, RSI/MACD/ATR, Stochastic RSI, Bollinger, hacim oranı, 3 Ekranlı Sistem ve Future Price hesapları Live/Last baz alınarak yeniden hesaplanır."
+    )
+
     st.divider()
     st.subheader("Teknik Parametreler")
     ema_fast = st.number_input(
@@ -2778,6 +2809,12 @@ elif use_sentiment and not ai_on:
 with st.spinner(f"Veri indiriliyor: {ticker}"):
     df_raw = load_data_cached(ticker, period, interval, end_date=custom_end_date, force_latest=force_latest_candle)
 
+live = get_live_price(ticker)
+live_price = live.get("last_price", np.nan)
+
+if use_live_last_override:
+    df_raw = apply_live_last_override_to_df(df_raw, live_price)
+
 if df_raw.empty:
     st.session_state.app_errors.append(f"Veri çekilemedi: {ticker} (Bölünme/delist veya API engeli olabilir)")
     st.error(f"Veri gelmedi: {ticker}")
@@ -2805,9 +2842,6 @@ df, checkpoints = signal_with_checkpoints(
     higher_tf_filter_series=higher_tf_filter_series,
 )
 latest = df.iloc[-1]
-
-live = get_live_price(ticker)
-live_price = live.get("last_price", np.nan)
 
 if int(latest["ENTRY"]) == 1:
     rec = "AL"
@@ -5710,7 +5744,7 @@ with tab_dash:
             st.error(f"⚠️ {err}")
         st.session_state.app_errors = []
 
-    if interval == "1d" and not force_latest_candle and not df.empty:
+    if interval == "1d" and not force_latest_candle and not use_live_last_override and not df.empty:
         last_date = df.index[-1].date()
         today_date = datetime.date.today()
         if today_date > last_date and today_date.weekday() < 5:
@@ -5756,7 +5790,7 @@ with tab_dash:
     c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
     c1.metric("Market", market)
     c2.metric("Sembol", ticker)
-    c3.metric("Daily Close", f"{latest['Close']:.2f}")
+    c3.metric("Daily Close", f"{(live_price if use_live_last_override and np.isfinite(live_price) else latest['Close']):.2f}")
     c4.metric("Live/Last", f"{live_price:.2f}" if np.isfinite(live_price) else "N/A")
     c5.metric("Skor", f"{latest['SCORE']:.0f}/100")
     c6.metric("Sinyal", rec)
@@ -6324,6 +6358,11 @@ with tab_triple:
                 df_1w = load_data_cached(ticker, "2y", "1wk")
                 df_1d = load_data_cached(ticker, "1y", "1d", force_latest=force_latest_candle)
                 df_1h = load_data_cached(ticker, "60d", "1h")
+
+                if use_live_last_override:
+                    df_1w = apply_live_last_override_to_df(df_1w, live_price)
+                    df_1d = apply_live_last_override_to_df(df_1d, live_price)
+                    df_1h = apply_live_last_override_to_df(df_1h, live_price)
                 
                 if df_1w.empty or df_1d.empty or df_1h.empty:
                     st.error("Bazı zaman dilimleri için veri çekilemedi (Hisse senedi yeni olabilir veya API gecikmesi var).")
