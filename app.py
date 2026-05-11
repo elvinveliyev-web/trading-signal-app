@@ -201,10 +201,11 @@ def elder_ray(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 1
     bear_power = low - e
     return e, bull_power, bear_power
 
+
 def _find_pivot_positions(series: pd.Series, mode: str = "low", left: int = 2, right: int = 2) -> List[int]:
     s = pd.to_numeric(series, errors="coerce")
     vals = s.values
-    pivots = []
+    pivots: List[int] = []
 
     if len(vals) < (left + right + 3):
         return pivots
@@ -325,28 +326,31 @@ def adx_indicator(high: pd.Series, low: pd.Series, close: pd.Series, period: int
 # =============================
 # KANGAROO TAIL (KANGURU KUYRUĞU)
 # =============================
+
 def add_kangaroo_tails(df: pd.DataFrame, lookback: int = 20) -> pd.DataFrame:
     df = df.copy()
     df["KANGAROO_BULL"] = 0
     df["KANGAROO_BEAR"] = 0
-    
+
     body = (df["Close"] - df["Open"]).abs()
     trange = df["High"] - df["Low"]
     lower_wick = df[["Open", "Close"]].min(axis=1) - df["Low"]
     upper_wick = df["High"] - df[["Open", "Close"]].max(axis=1)
-    
+
     rolling_min = df["Low"].rolling(window=lookback).min()
     rolling_max = df["High"].rolling(window=lookback).max()
-    
+
     atr_approx = trange.rolling(10).mean()
     valid_trange = trange > 0
-    
-    bull_cond = valid_trange & (df["Low"] == rolling_min) & ((body / trange) <= 0.3) & ((lower_wick / trange) >= 0.6) & (trange >= atr_approx * 0.8)
-    bear_cond = valid_trange & (df["High"] == rolling_max) & ((body / trange) <= 0.3) & ((upper_wick / trange) >= 0.6) & (trange >= atr_approx * 0.8)
-    
+    pivot_tol = 0.001
+
+    bull_cond = valid_trange & (df["Low"] <= (rolling_min * (1.0 + pivot_tol))) & ((body / trange) <= 0.3) & ((lower_wick / trange) >= 0.6) & (trange >= atr_approx * 0.8)
+    bear_cond = valid_trange & (df["High"] >= (rolling_max * (1.0 - pivot_tol))) & ((body / trange) <= 0.3) & ((upper_wick / trange) >= 0.6) & (trange >= atr_approx * 0.8)
+
     df.loc[bull_cond, "KANGAROO_BULL"] = 1
     df.loc[bear_cond, "KANGAROO_BEAR"] = 1
     return df
+
 
 # =============================
 # PRICE ACTION PATTERNS (CANDLESTICKS)
@@ -358,6 +362,7 @@ def add_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     H = df["High"]
     L = df["Low"]
     C = df["Close"]
+    EMA50_REF = df["EMA50"] if "EMA50" in df.columns else ema(C, 50)
 
     Body = (C - O).abs()
     Range = H - L
@@ -376,13 +381,13 @@ def add_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
 
     # 1. Hammer / Hanging Man
     shape_hammer = (LowerWick >= 2 * Body) & (UpperWick <= 0.2 * Range) & (Body > 0.02 * Range)
-    df["PATTERN_HAMMER"] = shape_hammer & (C < df.get("EMA50", C)) 
-    df["PATTERN_HANGING_MAN"] = shape_hammer & (C > df.get("EMA50", C)) 
+    df["PATTERN_HAMMER"] = shape_hammer & (C < EMA50_REF)
+    df["PATTERN_HANGING_MAN"] = shape_hammer & (C > EMA50_REF)
 
     # 2. Shooting Star / Inverted Hammer
     shape_star = (UpperWick >= 2 * Body) & (LowerWick <= 0.2 * Range) & (Body > 0.02 * Range)
-    df["PATTERN_SHOOTING_STAR"] = shape_star & (C > df.get("EMA50", C)) 
-    df["PATTERN_INV_HAMMER"] = shape_star & (C < df.get("EMA50", C)) 
+    df["PATTERN_SHOOTING_STAR"] = shape_star & (C > EMA50_REF)
+    df["PATTERN_INV_HAMMER"] = shape_star & (C < EMA50_REF)
 
     # 7. Marubozu
     df["PATTERN_MARUBOZU_BULL"] = is_bull & (Body >= 0.85 * Range) & (Range > AvgRange * 0.5)
@@ -3280,23 +3285,27 @@ def _future_make_model(model_name: str):
     raise ValueError(f"Bilinmeyen model: {model_name}")
 
 
+
 def _future_fit_predict(model_name: str, X_train_df: pd.DataFrame, y_train: pd.Series, X_pred_df: pd.DataFrame):
     model = _future_make_model(model_name)
 
+    train_medians = X_train_df.median(axis=0).fillna(0.0)
+    X_train_imp = X_train_df.fillna(train_medians)
+    X_pred_imp = X_pred_df.fillna(train_medians)
+
     if model_name in ["Ridge", "Linear Regression"]:
-        mu = X_train_df.mean(axis=0)
-        sigma = X_train_df.std(axis=0).replace(0, 1.0).fillna(1.0)
-        X_train_use = ((X_train_df - mu) / sigma).fillna(0.0)
-        X_pred_use = ((X_pred_df - mu) / sigma).fillna(0.0)
+        mu = X_train_imp.mean(axis=0)
+        sigma = X_train_imp.std(axis=0).replace(0, 1.0).fillna(1.0)
+        X_train_use = (X_train_imp - mu) / sigma
+        X_pred_use = (X_pred_imp - mu) / sigma
         model.fit(X_train_use.values, y_train.values)
         preds = model.predict(X_pred_use.values)
-        return preds, model, {"mu": mu, "sigma": sigma}
+        return preds, model, {"mu": mu, "sigma": sigma, "train_medians": train_medians}
 
-    X_train_use = X_train_df.fillna(0.0)
-    X_pred_use = X_pred_df.fillna(0.0)
-    model.fit(X_train_use.values, y_train.values)
-    preds = model.predict(X_pred_use.values)
-    return preds, model, {}
+    model.fit(X_train_imp.values, y_train.values)
+    preds = model.predict(X_pred_imp.values)
+    return preds, model, {"train_medians": train_medians}
+
 
 
 def _future_metrics(y_true: np.ndarray, y_pred: np.ndarray, current_close_arr: np.ndarray) -> Dict[str, float]:
@@ -3482,7 +3491,7 @@ def future_price_horizon_benchmark(df: pd.DataFrame, model_name: str, requested_
     for hz in candidate_horizons:
         if hz < 1:
             continue
-        quick = future_price_single_model_eval(df, hz, model_name, use_walkforward=False)
+        quick = future_price_single_model_eval(df, hz, model_name, use_walkforward=True)
         if quick.get("error"):
             rows.append({
                 "Horizon": hz,
