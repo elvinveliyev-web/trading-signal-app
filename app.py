@@ -201,47 +201,104 @@ def elder_ray(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 1
     bear_power = low - e
     return e, bull_power, bear_power
 
-def check_bullish_divergence(close: pd.Series, indicator: pd.Series, lookback: int = 30) -> Tuple[bool, int]:
-    if len(close) < lookback: return False, 0
-    c = close.tail(lookback)
-    ind = indicator.tail(lookback)
-    try:
-        min_idx = c.values.argmin()
-        bars_ago = (lookback - 1) - min_idx
-        
-        prev_c = c.iloc[:min_idx-2]
-        if len(prev_c) < 3: return False, 0
-        prev_min_idx = prev_c.values.argmin()
-        
-        p1, p2 = prev_c.iloc[prev_min_idx], c.iloc[min_idx]
-        i1, i2 = ind.iloc[prev_min_idx], ind.iloc[min_idx]
-        
-        if p2 < p1 and i2 > i1:
-            return True, bars_ago
-    except Exception:
-        pass
+def _find_pivot_positions(series: pd.Series, mode: str = "low", left: int = 2, right: int = 2) -> List[int]:
+    s = pd.to_numeric(series, errors="coerce")
+    vals = s.values
+    pivots = []
+
+    if len(vals) < (left + right + 3):
+        return pivots
+
+    for i in range(left, len(vals) - right):
+        center = vals[i]
+        if not np.isfinite(center):
+            continue
+
+        left_vals = vals[i - left:i]
+        right_vals = vals[i + 1:i + 1 + right]
+        if len(left_vals) == 0 or len(right_vals) == 0:
+            continue
+        if not np.isfinite(left_vals).all() or not np.isfinite(right_vals).all():
+            continue
+
+        if mode == "low":
+            if center < left_vals.min() and center <= right_vals.min():
+                pivots.append(i)
+        else:
+            if center > left_vals.max() and center >= right_vals.max():
+                pivots.append(i)
+
+    return pivots
+
+
+def _series_extreme_near(series: pd.Series, pos: int, mode: str = "low", radius: int = 2) -> float:
+    s = pd.to_numeric(series, errors="coerce")
+    start = max(0, int(pos) - int(radius))
+    end = min(len(s), int(pos) + int(radius) + 1)
+    window = s.iloc[start:end].dropna()
+    if window.empty:
+        return np.nan
+    return float(window.min()) if mode == "low" else float(window.max())
+
+
+def _pivot_divergence_core(close: pd.Series, indicator: pd.Series, lookback: int = 30, mode: str = "bull") -> Tuple[bool, int]:
+    if close is None or indicator is None:
+        return False, 0
+
+    lb = max(int(lookback), 12)
+    c = pd.to_numeric(close.tail(lb), errors="coerce")
+    ind = pd.to_numeric(indicator.reindex(c.index), errors="coerce")
+
+    if len(c) < 8 or len(ind) < 8:
+        return False, 0
+
+    pivot_mode = "low" if mode == "bull" else "high"
+    price_pivots = _find_pivot_positions(c, mode=pivot_mode, left=2, right=2)
+
+    if len(price_pivots) < 2:
+        return False, 0
+
+    recent_pivots = price_pivots[-6:]
+
+    for newer_idx in range(len(recent_pivots) - 1, 0, -1):
+        newer = recent_pivots[newer_idx]
+
+        for older_idx in range(newer_idx - 1, -1, -1):
+            older = recent_pivots[older_idx]
+            sep = newer - older
+
+            if sep < 4:
+                continue
+            if sep > lb - 3:
+                continue
+
+            p1 = float(c.iloc[older])
+            p2 = float(c.iloc[newer])
+
+            i1 = _series_extreme_near(ind, older, mode=pivot_mode, radius=2)
+            i2 = _series_extreme_near(ind, newer, mode=pivot_mode, radius=2)
+
+            if not (np.isfinite(p1) and np.isfinite(p2) and np.isfinite(i1) and np.isfinite(i2)):
+                continue
+
+            if mode == "bull":
+                if p2 < p1 and i2 > i1:
+                    bars_ago = (len(c) - 1) - newer
+                    return True, int(bars_ago)
+            else:
+                if p2 > p1 and i2 < i1:
+                    bars_ago = (len(c) - 1) - newer
+                    return True, int(bars_ago)
+
     return False, 0
 
+
+def check_bullish_divergence(close: pd.Series, indicator: pd.Series, lookback: int = 30) -> Tuple[bool, int]:
+    return _pivot_divergence_core(close, indicator, lookback=lookback, mode="bull")
+
+
 def check_bearish_divergence(close: pd.Series, indicator: pd.Series, lookback: int = 30) -> Tuple[bool, int]:
-    if len(close) < lookback: return False, 0
-    c = close.tail(lookback)
-    ind = indicator.tail(lookback)
-    try:
-        max_idx = c.values.argmax()
-        bars_ago = (lookback - 1) - max_idx
-        
-        prev_c = c.iloc[:max_idx-2]
-        if len(prev_c) < 3: return False, 0
-        prev_max_idx = prev_c.values.argmax()
-        
-        p1, p2 = prev_c.iloc[prev_max_idx], c.iloc[max_idx]
-        i1, i2 = ind.iloc[prev_max_idx], ind.iloc[max_idx]
-        
-        if p2 > p1 and i2 < i1:
-            return True, bars_ago
-    except Exception:
-        pass
-    return False, 0
+    return _pivot_divergence_core(close, indicator, lookback=lookback, mode="bear")
 
 def adx_indicator(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14):
     up = high - high.shift(1)
