@@ -202,7 +202,23 @@ def elder_ray(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 1
     return e, bull_power, bear_power
 
 
-def _find_pivot_positions(series: pd.Series, mode: str = "low", left: int = 2, right: int = 2) -> List[int]:
+def _find_pivot_positions(
+    series: pd.Series,
+    mode: str = "low",
+    left: int = 2,
+    right: int = 2,
+    plateau_tol_pct: float = 0.001,
+    volume: Optional[pd.Series] = None,
+    volume_sma_period: int = 20,
+) -> List[int]:
+    """
+    Tek bar pivot yerine önce plato bölgesini tanır:
+    1) Yakın/eşit fiyatlı barları plato olarak gruplar.
+    2) Divergence için platonun temsilcisini seçer:
+       - volume verisi varsa en yüksek volume_ratio barı
+       - yoksa orta bar
+    3) Pivot testini plato DIŞINDA kalan sol/sağ barlara uygular.
+    """
     s = pd.to_numeric(series, errors="coerce")
     vals = s.values
     pivots: List[int] = []
@@ -210,27 +226,71 @@ def _find_pivot_positions(series: pd.Series, mode: str = "low", left: int = 2, r
     if len(vals) < (left + right + 3):
         return pivots
 
+    vol_ratio = None
+    if volume is not None:
+        try:
+            v = pd.to_numeric(volume.reindex(series.index), errors="coerce")
+            v_sma = v.rolling(int(volume_sma_period), min_periods=1).mean().replace(0, np.nan)
+            vol_ratio = (v / v_sma).replace([np.inf, -np.inf], np.nan)
+        except Exception:
+            vol_ratio = None
+
+    seen_plateaus = set()
+
     for i in range(left, len(vals) - right):
         center = vals[i]
         if not np.isfinite(center):
             continue
 
-        left_vals = vals[i - left:i]
-        right_vals = vals[i + 1:i + 1 + right]
-        if len(left_vals) == 0 or len(right_vals) == 0:
+        tol = max(abs(center) * float(plateau_tol_pct), 1e-12)
+
+        plateau_left = i
+        plateau_right = i
+
+        while plateau_left > 0 and np.isfinite(vals[plateau_left - 1]) and abs(vals[plateau_left - 1] - center) <= tol:
+            plateau_left -= 1
+        while plateau_right < len(vals) - 1 and np.isfinite(vals[plateau_right + 1]) and abs(vals[plateau_right + 1] - center) <= tol:
+            plateau_right += 1
+
+        plateau_key = (plateau_left, plateau_right, mode)
+        if plateau_key in seen_plateaus:
             continue
-        if not np.isfinite(left_vals).all() or not np.isfinite(right_vals).all():
+        seen_plateaus.add(plateau_key)
+
+        plateau_positions = list(range(plateau_left, plateau_right + 1))
+        plateau_mid = (plateau_left + plateau_right) // 2
+        rep_idx = plateau_mid
+
+        if vol_ratio is not None:
+            plateau_scores = vol_ratio.iloc[plateau_positions]
+            if plateau_scores.notna().any():
+                max_score = plateau_scores.max()
+                best_positions = [
+                    plateau_positions[j]
+                    for j, val in enumerate(plateau_scores.values)
+                    if pd.notna(val) and val == max_score
+                ]
+                if best_positions:
+                    rep_idx = min(best_positions, key=lambda x: (abs(x - plateau_mid), x))
+
+        local_left = vals[max(0, rep_idx - left):plateau_left]
+        local_right = vals[plateau_right + 1:min(len(vals), rep_idx + right + 1)]
+
+        if len(local_left) == 0 or len(local_right) == 0:
             continue
+        if not np.isfinite(local_left).all() or not np.isfinite(local_right).all():
+            continue
+
+        plateau_value = float(np.nanmean(vals[plateau_left:plateau_right + 1]))
 
         if mode == "low":
-            if center < left_vals.min() and center <= right_vals.min():
-                pivots.append(i)
+            if plateau_value < local_left.min() and plateau_value < local_right.min():
+                pivots.append(int(rep_idx))
         else:
-            if center > left_vals.max() and center >= right_vals.max():
-                pivots.append(i)
+            if plateau_value > local_left.max() and plateau_value > local_right.max():
+                pivots.append(int(rep_idx))
 
-    return pivots
-
+    return sorted(set(pivots))
 
 def _series_extreme_near(series: pd.Series, pos: int, mode: str = "low", radius: int = 2) -> float:
     s = pd.to_numeric(series, errors="coerce")
@@ -242,19 +302,39 @@ def _series_extreme_near(series: pd.Series, pos: int, mode: str = "low", radius:
     return float(window.min()) if mode == "low" else float(window.max())
 
 
-def _pivot_divergence_core(close: pd.Series, indicator: pd.Series, lookback: int = 30, mode: str = "bull") -> Tuple[bool, int]:
+def _pivot_divergence_core(
+    close: pd.Series,
+    indicator: pd.Series,
+    lookback: int = 30,
+    mode: str = "bull",
+    volume: Optional[pd.Series] = None,
+) -> Tuple[bool, int]:
     if close is None or indicator is None:
         return False, 0
 
     lb = max(int(lookback), 12)
     c = pd.to_numeric(close.tail(lb), errors="coerce")
     ind = pd.to_numeric(indicator.reindex(c.index), errors="coerce")
+    vol = None
+    if volume is not None:
+        try:
+            vol = pd.to_numeric(volume.reindex(c.index), errors="coerce")
+        except Exception:
+            vol = None
 
     if len(c) < 8 or len(ind) < 8:
         return False, 0
 
     pivot_mode = "low" if mode == "bull" else "high"
-    price_pivots = _find_pivot_positions(c, mode=pivot_mode, left=2, right=2)
+    price_pivots = _find_pivot_positions(
+        c,
+        mode=pivot_mode,
+        left=2,
+        right=2,
+        plateau_tol_pct=0.001,
+        volume=vol,
+        volume_sma_period=20,
+    )
 
     if len(price_pivots) < 2:
         return False, 0
@@ -294,12 +374,22 @@ def _pivot_divergence_core(close: pd.Series, indicator: pd.Series, lookback: int
     return False, 0
 
 
-def check_bullish_divergence(close: pd.Series, indicator: pd.Series, lookback: int = 30) -> Tuple[bool, int]:
-    return _pivot_divergence_core(close, indicator, lookback=lookback, mode="bull")
+def check_bullish_divergence(
+    close: pd.Series,
+    indicator: pd.Series,
+    lookback: int = 30,
+    volume: Optional[pd.Series] = None,
+) -> Tuple[bool, int]:
+    return _pivot_divergence_core(close, indicator, lookback=lookback, mode="bull", volume=volume)
 
 
-def check_bearish_divergence(close: pd.Series, indicator: pd.Series, lookback: int = 30) -> Tuple[bool, int]:
-    return _pivot_divergence_core(close, indicator, lookback=lookback, mode="bear")
+def check_bearish_divergence(
+    close: pd.Series,
+    indicator: pd.Series,
+    lookback: int = 30,
+    volume: Optional[pd.Series] = None,
+) -> Tuple[bool, int]:
+    return _pivot_divergence_core(close, indicator, lookback=lookback, mode="bear", volume=volume)
 
 def adx_indicator(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14):
     up = high - high.shift(1)
@@ -3182,15 +3272,15 @@ def scan_divergences_for_symbol(ticker: str, timeframe_name: str, force_latest_d
                 "Son Kapanış": round(float(close.iloc[-1]), 4),
             })
 
-    add_result("MACD Histogram", check_bullish_divergence(close, macd_hist), check_bearish_divergence(close, macd_hist))
-    add_result("EMA", check_bullish_divergence(close, ema13), check_bearish_divergence(close, ema13))
-    add_result("ADX", check_bullish_divergence(close, adx_line), check_bearish_divergence(close, adx_line))
-    add_result("Kuvvet Endeksi (FI)", check_bullish_divergence(close, fi_line), check_bearish_divergence(close, fi_line))
-    add_result("RSI (13)", check_bullish_divergence(close, rsi13_line), check_bearish_divergence(close, rsi13_line))
-    add_result("Stokastik (5)", check_bullish_divergence(close, stoch_k), check_bearish_divergence(close, stoch_k))
+    add_result("MACD Histogram", check_bullish_divergence(close, macd_hist, volume=volume), check_bearish_divergence(close, macd_hist, volume=volume))
+    add_result("EMA", check_bullish_divergence(close, ema13, volume=volume), check_bearish_divergence(close, ema13, volume=volume))
+    add_result("ADX", check_bullish_divergence(close, adx_line, volume=volume), check_bearish_divergence(close, adx_line, volume=volume))
+    add_result("Kuvvet Endeksi (FI)", check_bullish_divergence(close, fi_line, volume=volume), check_bearish_divergence(close, fi_line, volume=volume))
+    add_result("RSI (13)", check_bullish_divergence(close, rsi13_line, volume=volume), check_bearish_divergence(close, rsi13_line, volume=volume))
+    add_result("Stokastik (5)", check_bullish_divergence(close, stoch_k, volume=volume), check_bearish_divergence(close, stoch_k, volume=volume))
 
-    elder_bull, elder_bull_ago = check_bullish_divergence(close, bear_power)
-    elder_bear, elder_bear_ago = check_bearish_divergence(close, bull_power)
+    elder_bull, elder_bull_ago = check_bullish_divergence(close, bear_power, volume=volume)
+    elder_bear, elder_bear_ago = check_bearish_divergence(close, bull_power, volume=volume)
 
     if elder_bull:
         results.append({
@@ -5422,10 +5512,17 @@ def _falling(s: pd.Series) -> pd.Series:
     return s < s.shift(1)
 
 
-def _rolling_divergence_flags(close: pd.Series, indicator: pd.Series, kind: str = "bull", lookback: int = 30, recent_bars: int = 2) -> pd.Series:
+def _rolling_divergence_flags(
+    close: pd.Series,
+    indicator: pd.Series,
+    kind: str = "bull",
+    lookback: int = 30,
+    recent_bars: int = 2,
+    volume: Optional[pd.Series] = None,
+) -> pd.Series:
     """
     İndikatör İstatistik sekmesi için uyumsuzlukları tararken olayı tespit edildiği bara değil,
-    gerçek pivot barına yazar. Böylece 3 Ekranlı Sistem'deki "X bar önce" mantığıyla tarih hizalanır.
+    gerçek pivot barına yazar. Volume varsa pivot temsilcisini seçerken kullanır.
     """
     flags = pd.Series(False, index=close.index)
     if close is None or indicator is None or len(close) < lookback + 3:
@@ -5434,11 +5531,12 @@ def _rolling_divergence_flags(close: pd.Series, indicator: pd.Series, kind: str 
     for i in range(lookback, len(close)):
         c_slice = close.iloc[: i + 1]
         ind_slice = indicator.iloc[: i + 1]
+        vol_slice = volume.iloc[: i + 1] if volume is not None else None
         try:
             if kind == "bull":
-                ok, bars_ago = check_bullish_divergence(c_slice, ind_slice, lookback=lookback)
+                ok, bars_ago = check_bullish_divergence(c_slice, ind_slice, lookback=lookback, volume=vol_slice)
             else:
-                ok, bars_ago = check_bearish_divergence(c_slice, ind_slice, lookback=lookback)
+                ok, bars_ago = check_bearish_divergence(c_slice, ind_slice, lookback=lookback, volume=vol_slice)
 
             if ok and bars_ago <= recent_bars:
                 pivot_pos = i - int(bars_ago)
@@ -5572,9 +5670,9 @@ def build_indicator_signal_series(event_key: str, daily: pd.DataFrame, weekly: p
         hist = df["MACD_hist"]
         sig = (hist.diff() < 0) & (hist.diff().shift(1) >= 0)
     elif event_key == "W_MACD_DIV_BULL":
-        sig = _rolling_divergence_flags(df["Close"], df["MACD_hist"], kind="bull", lookback=30, recent_bars=2)
+        sig = _rolling_divergence_flags(df["Close"], df["MACD_hist"], kind="bull", lookback=30, recent_bars=2, volume=df["Volume"])
     elif event_key == "W_MACD_DIV_BEAR":
-        sig = _rolling_divergence_flags(df["Close"], df["MACD_hist"], kind="bear", lookback=30, recent_bars=2)
+        sig = _rolling_divergence_flags(df["Close"], df["MACD_hist"], kind="bear", lookback=30, recent_bars=2, volume=df["Volume"])
     elif event_key == "W_EMA1326_AL":
         state = (df["EMA13"] > df["EMA26"]) & (df["Close"] > df["EMA13"])
         sig = state & (~state.shift(1).fillna(False))
@@ -5604,17 +5702,17 @@ def build_indicator_signal_series(event_key: str, daily: pd.DataFrame, weekly: p
     elif event_key == "D_RSI13_SAT":
         sig = (df["RSI13"] > 70) & (df["RSI13"].shift(1) <= 70)
     elif event_key == "D_RSI_DIV_BULL":
-        sig = _rolling_divergence_flags(df["Close"], df["RSI13"], kind="bull", lookback=30, recent_bars=2)
+        sig = _rolling_divergence_flags(df["Close"], df["RSI13"], kind="bull", lookback=30, recent_bars=2, volume=df["Volume"])
     elif event_key == "D_RSI_DIV_BEAR":
-        sig = _rolling_divergence_flags(df["Close"], df["RSI13"], kind="bear", lookback=30, recent_bars=2)
+        sig = _rolling_divergence_flags(df["Close"], df["RSI13"], kind="bear", lookback=30, recent_bars=2, volume=df["Volume"])
     elif event_key == "D_STOCH5_AL":
         sig = (df["STOCH5"] < 20) & (df["STOCH5"].shift(1) >= 20)
     elif event_key == "D_STOCH5_SAT":
         sig = (df["STOCH5"] > 80) & (df["STOCH5"].shift(1) <= 80)
     elif event_key == "D_STOCH_DIV_BULL":
-        sig = _rolling_divergence_flags(df["Close"], df["STOCH5"], kind="bull", lookback=30, recent_bars=2)
+        sig = _rolling_divergence_flags(df["Close"], df["STOCH5"], kind="bull", lookback=30, recent_bars=2, volume=df["Volume"])
     elif event_key == "D_STOCH_DIV_BEAR":
-        sig = _rolling_divergence_flags(df["Close"], df["STOCH5"], kind="bear", lookback=30, recent_bars=2)
+        sig = _rolling_divergence_flags(df["Close"], df["STOCH5"], kind="bear", lookback=30, recent_bars=2, volume=df["Volume"])
     elif event_key == "D_ELDERRAY_AL":
         state = _rising(df["ER_EMA13"]) & (df["BEAR_POWER"] < 0) & (df["BEAR_POWER"] > df["BEAR_POWER"].shift(1))
         sig = state & (~state.shift(1).fillna(False))
@@ -5622,9 +5720,9 @@ def build_indicator_signal_series(event_key: str, daily: pd.DataFrame, weekly: p
         state = _falling(df["ER_EMA13"]) & (df["BULL_POWER"] > 0) & (df["BULL_POWER"] < df["BULL_POWER"].shift(1))
         sig = state & (~state.shift(1).fillna(False))
     elif event_key == "D_ELDERRAY_DIV_BULL":
-        sig = _rolling_divergence_flags(df["Close"], df["BEAR_POWER"], kind="bull", lookback=30, recent_bars=2)
+        sig = _rolling_divergence_flags(df["Close"], df["BEAR_POWER"], kind="bull", lookback=30, recent_bars=2, volume=df["Volume"])
     elif event_key == "D_ELDERRAY_DIV_BEAR":
-        sig = _rolling_divergence_flags(df["Close"], df["BULL_POWER"], kind="bear", lookback=30, recent_bars=2)
+        sig = _rolling_divergence_flags(df["Close"], df["BULL_POWER"], kind="bear", lookback=30, recent_bars=2, volume=df["Volume"])
     elif event_key == "D_ADX_AL":
         state = (df["ADX14"] >= 25) & (df["PDI14"] > df["MDI14"])
         sig = state & (~state.shift(1).fillna(False))
@@ -6454,7 +6552,7 @@ with tab_triple:
                         prev_hist = float(m_hist.iloc[-2])
                         slope_up = last_hist > prev_hist
                         
-                        div_macd, macd_ago = check_bullish_divergence(df_1w["Close"], m_hist)
+                        div_macd, macd_ago = check_bullish_divergence(df_1w["Close"], m_hist, volume=df_1w["Volume"])
 
                         adx_1w, pdi_1w, mdi_1w = adx_indicator(df_1w["High"], df_1w["Low"], df_1w["Close"])
                         adx_val_1w = adx_1w.iloc[-1]
@@ -6534,10 +6632,10 @@ with tab_triple:
                         bp_neg_but_rising = (bear_p.iloc[-1] < 0) and (bear_p.iloc[-1] > bear_p.iloc[-2])
                         er_al = er_ema_up and bp_neg_but_rising
                         
-                        div_rsi, rsi_ago = check_bullish_divergence(df_1d["Close"], rsi13)
-                        div_stoch, stoch_ago = check_bullish_divergence(df_1d["Close"], stoch_k)
-                        div_er, er_ago = check_bullish_divergence(df_1d["Close"], bear_p)
-                        div_er_bear, er_bear_ago = check_bearish_divergence(df_1d["Close"], bull_p)
+                        div_rsi, rsi_ago = check_bullish_divergence(df_1d["Close"], rsi13, volume=df_1d["Volume"])
+                        div_stoch, stoch_ago = check_bullish_divergence(df_1d["Close"], stoch_k, volume=df_1d["Volume"])
+                        div_er, er_ago = check_bullish_divergence(df_1d["Close"], bear_p, volume=df_1d["Volume"])
+                        div_er_bear, er_bear_ago = check_bearish_divergence(df_1d["Close"], bull_p, volume=df_1d["Volume"])
                         
                         adx_1d, pdi_1d, mdi_1d = adx_indicator(df_1d["High"], df_1d["Low"], df_1d["Close"])
                         adx_val_1d = adx_1d.iloc[-1]
