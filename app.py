@@ -1300,6 +1300,67 @@ def target_price_band(df: pd.DataFrame):
 
 
 # =============================
+# Volume Profile / VPVR Helpers
+# =============================
+def compute_volume_profile(df: pd.DataFrame, bins: int = 24, lookback: int = 220) -> Tuple[pd.DataFrame, float]:
+    if df is None or df.empty or not {"High", "Low", "Close", "Volume"}.issubset(df.columns):
+        return pd.DataFrame(), np.nan
+
+    use = df.tail(min(len(df), int(lookback))).copy()
+    use = use.dropna(subset=["High", "Low", "Close", "Volume"])
+    if use.empty:
+        return pd.DataFrame(), np.nan
+
+    price_min = float(use["Low"].min())
+    price_max = float(use["High"].max())
+    if not np.isfinite(price_min) or not np.isfinite(price_max) or price_max <= price_min:
+        return pd.DataFrame(), np.nan
+
+    typical_price = ((use["High"] + use["Low"] + use["Close"]) / 3.0).astype(float)
+    volumes = pd.to_numeric(use["Volume"], errors="coerce").fillna(0.0).astype(float)
+
+    hist, edges = np.histogram(typical_price.values, bins=int(bins), range=(price_min, price_max), weights=volumes.values)
+    centers = (edges[:-1] + edges[1:]) / 2.0
+
+    vp_df = pd.DataFrame({"Price": centers, "Volume": hist.astype(float)})
+    vp_df = vp_df[vp_df["Volume"] > 0].copy()
+    if vp_df.empty:
+        return pd.DataFrame(), np.nan
+
+    poc_price = float(vp_df.loc[vp_df["Volume"].idxmax(), "Price"])
+    return vp_df.sort_values("Price"), poc_price
+
+
+def build_volume_profile_figure(df: pd.DataFrame, bins: int = 24, lookback: int = 220) -> Tuple[go.Figure, float]:
+    vp_df, poc_price = compute_volume_profile(df, bins=bins, lookback=lookback)
+    fig = go.Figure()
+
+    if vp_df.empty:
+        fig.update_layout(height=360, title="Hacim Profili (VPVR / POC)")
+        return fig, np.nan
+
+    fig.add_trace(go.Bar(
+        x=vp_df["Volume"],
+        y=vp_df["Price"],
+        orientation="h",
+        name="Volume Profile",
+    ))
+
+    if np.isfinite(poc_price):
+        fig.add_hline(y=poc_price, line_dash="dash", line_color="red", annotation_text=f"POC: {poc_price:.2f}")
+
+    fig.update_layout(
+        height=360,
+        title="Hacim Profili (VPVR / POC)",
+        xaxis_title="Hacim",
+        yaxis_title="Fiyat",
+        showlegend=False,
+        margin=dict(l=0, r=0, t=40, b=0),
+    )
+    return fig, poc_price
+
+
+# =============================
 # Live price & Short Info helpers
 # =============================
 @st.cache_data(ttl=30, show_spinner=False)
@@ -3170,6 +3231,8 @@ if "OBV" in df.columns and "OBV_EMA" in df.columns:
     fig_obv.add_trace(go.Scatter(x=df.index, y=df["OBV_EMA"], name="OBV EMA (21)", line=dict(color='orange', dash='dot')))
 fig_obv.update_layout(height=260, title="On-Balance Volume (OBV)", yaxis_title="OBV", xaxis_title="Tarih", margin=dict(l=0, r=0, t=40, b=0))
 
+fig_vpvr, vp_poc_price = build_volume_profile_figure(df, bins=28, lookback=220)
+
 figs_for_report = {
     "Price + EMA + Bollinger + Signals": fig_price,
     "RSI": fig_rsi,
@@ -3181,6 +3244,7 @@ figs_for_report = {
     "Volume vs Market": fig_vol_market,
     "Volume vs 2W Avg": fig_vol_2wk,
     "On-Balance Volume": fig_obv,
+    "Volume Profile VPVR": fig_vpvr,
     "Equity Curve": fig_eq,
 }
 
@@ -5099,6 +5163,8 @@ FINANCIAL_METRIC_INFO = {
     "net_debt_ebitda": "Net Borç / FAVÖK: Net borcun operasyonel kâra göre büyüklüğünü gösterir. Daha düşük oran genelde daha sağlıklı borçluluk anlamına gelir.",
     "shares_outstanding": "Dolaşımdaki Hisse Sayısı: Şirketin yatırımcılar tarafından taşınan toplam hisse miktarını gösterir. Artış genelde sulanma (dilution), düşüş ise geri alım etkisi anlamına gelebilir; bu nedenle çoğu durumda daha düşük veya yatay seyir daha olumlu yorumlanır.",
     "eps": "Hisse Başına Kar (EPS): Net kârın hisse başına düşen kısmını gösterir. Genel olarak daha yüksek EPS daha güçlü kârlılık anlamına gelir; ancak hisse sayısındaki artış/azalış da bu metriği etkileyebilir.",
+    "altman_z": "Altman Z-Skoru: İşletmenin bilanço gücü ve iflas riskini özetleyen bileşik bir skordur. Genel yaklaşımda 3 üstü daha güçlü, 1.8 altı daha riskli kabul edilir.",
+    "piotroski_f": "Piotroski F-Skoru: Karlılık, bilanço gücü ve operasyonel verimlilik üzerinden 0-9 arası kalite skorudur. Genel yaklaşımda 7-9 güçlü, 0-3 zayıf kabul edilir.",
 }
 
 def _html_escape(value: Any) -> str:
@@ -5155,8 +5221,10 @@ def _fmt_fin_value(metric_key: str, val: float) -> str:
         return f"{val * 100:.2f}%"
     if metric_key in {"ebitda", "free_cash_flow", "shares_outstanding"}:
         return _money_fmt(float(val))
-    if metric_key in {"debt_to_equity", "current_ratio", "pe", "pb", "net_debt_ebitda"}:
+    if metric_key in {"debt_to_equity", "current_ratio", "pe", "pb", "net_debt_ebitda", "altman_z"}:
         return f"{float(val):.2f}"
+    if metric_key in {"piotroski_f"}:
+        return f"{int(round(float(val)))}"
     return f"{float(val):.2f}"
 
 def _compute_delta_pct(current: float, previous: float) -> float:
@@ -5330,6 +5398,50 @@ def fetch_financial_snapshot_analysis(symbol: str, selected_market: str = "USA",
     pb = _safe_div_series(market_caps, equity)
     net_debt_ebitda = _safe_div_series(net_debt, ebitda_ref)
 
+    total_assets = _pick_series_from_rows(balance_df, ["Total Assets"]).reindex(periods).astype(float)
+    total_liabilities = _pick_series_from_rows(balance_df, ["Total Liabilities Net Minority Interest", "Total Liabilities", "Total Non Current Liabilities Net Minority Interest"]).reindex(periods).astype(float)
+    retained_earnings = _pick_series_from_rows(balance_df, ["Retained Earnings", "RetainedEarnings"]).reindex(periods).astype(float)
+    ebit_series = _pick_series_from_rows(income_df, ["EBIT", "Operating Income", "Operating Income As Reported"]).reindex(periods).astype(float)
+    gross_profit = _pick_series_from_rows(income_df, ["Gross Profit"]).reindex(periods).astype(float)
+    long_term_debt = _pick_series_from_rows(balance_df, ["Long Term Debt", "Long Term Debt And Capital Lease Obligation"]).reindex(periods).astype(float)
+
+    if statement_mode == "quarterly":
+        revenue_ref = revenue.sort_index().rolling(4).sum().sort_index(ascending=False).reindex(periods).astype(float)
+        cfo_ref = op_cf.sort_index().rolling(4).sum().sort_index(ascending=False).reindex(periods).astype(float)
+        gross_profit_ref = gross_profit.sort_index().rolling(4).sum().sort_index(ascending=False).reindex(periods).astype(float)
+        ebit_ref_z = ebit_series.sort_index().rolling(4).sum().sort_index(ascending=False).reindex(periods).astype(float)
+    else:
+        revenue_ref = revenue.astype(float)
+        cfo_ref = op_cf.astype(float)
+        gross_profit_ref = gross_profit.astype(float)
+        ebit_ref_z = ebit_series.astype(float)
+
+    working_capital = current_assets.astype(float) - current_liabilities.astype(float)
+    altman_z = (
+        1.2 * _safe_div_series(working_capital, total_assets)
+        + 1.4 * _safe_div_series(retained_earnings, total_assets)
+        + 3.3 * _safe_div_series(ebit_ref_z, total_assets)
+        + 0.6 * _safe_div_series(market_caps, total_liabilities)
+        + 1.0 * _safe_div_series(revenue_ref, total_assets)
+    )
+
+    roa_series = _safe_div_series(ni_ttm.astype(float), total_assets)
+    gross_margin = _safe_div_series(gross_profit_ref.astype(float), revenue_ref.astype(float))
+    asset_turnover = _safe_div_series(revenue_ref.astype(float), total_assets)
+    lt_debt_ratio = _safe_div_series(long_term_debt.astype(float), total_assets)
+
+    piotroski_f = (
+        (roa_series > 0).astype(int)
+        + (cfo_ref > 0).astype(int)
+        + (roa_series > roa_series.shift(-1)).astype(int)
+        + (cfo_ref > ni_ttm.astype(float)).astype(int)
+        + (lt_debt_ratio < lt_debt_ratio.shift(-1)).astype(int)
+        + (current_ratio > current_ratio.shift(-1)).astype(int)
+        + (shares_series.astype(float) <= shares_series.astype(float).shift(-1)).astype(int)
+        + (gross_margin > gross_margin.shift(-1)).astype(int)
+        + (asset_turnover > asset_turnover.shift(-1)).astype(int)
+    ).astype(float)
+
     metric_rows = [
         {"label": "Özsermaye Karlılığı (ROE)", "key": "roe", "series": roe, "higher_better": True},
         {"label": "Net Satış Büyümesi", "key": "revenue_growth", "series": revenue_growth, "higher_better": True},
@@ -5344,6 +5456,8 @@ def fetch_financial_snapshot_analysis(symbol: str, selected_market: str = "USA",
         {"label": "Net Borç / FAVÖK", "key": "net_debt_ebitda", "series": net_debt_ebitda, "higher_better": False},
         {"label": "Dolaşımdaki Hisse Sayısı", "key": "shares_outstanding", "series": shares_series, "higher_better": False},
         {"label": "Hisse Başına Kar (EPS)", "key": "eps", "series": eps_series, "higher_better": True},
+        {"label": "Altman Z-Skoru", "key": "altman_z", "series": altman_z, "higher_better": True},
+        {"label": "Piotroski F-Skoru", "key": "piotroski_f", "series": piotroski_f, "higher_better": True},
     ]
 
     period_labels = [pd.to_datetime(x).strftime("%Y-%m-%d") for x in periods]
@@ -5400,6 +5514,8 @@ def fetch_financial_snapshot_analysis(symbol: str, selected_market: str = "USA",
     latest_net_debt = net_debt.loc[latest_idx] if latest_idx in net_debt.index else np.nan
     latest_fcf = fcf_ref.loc[latest_idx] if latest_idx in fcf_ref.index else np.nan
     latest_shares = shares_series.loc[latest_idx] if latest_idx in shares_series.index else current_shares_out
+    latest_altman_z = altman_z.loc[latest_idx] if latest_idx in altman_z.index else np.nan
+    latest_piotroski_f = piotroski_f.loc[latest_idx] if latest_idx in piotroski_f.index else np.nan
 
     def _clip(val, low, high):
         try:
@@ -5473,6 +5589,24 @@ def fetch_financial_snapshot_analysis(symbol: str, selected_market: str = "USA",
     fair_share_price = (float(fair_market_cap) / float(latest_shares)) if np.isfinite(fair_market_cap) and np.isfinite(latest_shares) and latest_shares > 0 else np.nan
     dcf_fair_share_price = (float(dcf_fair_market_cap) / float(latest_shares)) if np.isfinite(dcf_fair_market_cap) and np.isfinite(latest_shares) and latest_shares > 0 else np.nan
 
+    def _altman_label(z: float) -> str:
+        if not np.isfinite(z):
+            return "N/A"
+        if z >= 3.0:
+            return "Güçlü"
+        if z >= 1.8:
+            return "Gri Bölge"
+        return "Riskli"
+
+    def _piotroski_label(f: float) -> str:
+        if not np.isfinite(f):
+            return "N/A"
+        if f >= 7:
+            return "Güçlü"
+        if f >= 4:
+            return "Orta"
+        return "Zayıf"
+
     summary = {
         "ticker": ticker_norm,
         "statement_mode": statement_mode,
@@ -5489,6 +5623,10 @@ def fetch_financial_snapshot_analysis(symbol: str, selected_market: str = "USA",
         "latest_shares": latest_shares,
         "fair_breakdown": fair_breakdown,
         "dcf_breakdown": dcf_breakdown,
+        "altman_z": latest_altman_z,
+        "altman_state": _altman_label(latest_altman_z),
+        "piotroski_f": latest_piotroski_f,
+        "piotroski_state": _piotroski_label(latest_piotroski_f),
     }
     return {"error": None, "table_html": table_html, "summary": summary}
 
@@ -6072,6 +6210,13 @@ with tab_dash:
     if tools_col3.button("13 EMA Kanalını Aç / Kapat", use_container_width=True, help="Grafiğe 13 EMA High, Low ve Close kanallarını ekler veya kaldırır."):
         st.session_state.show_ema13_channel = not st.session_state.show_ema13_channel
         st.rerun()
+
+    st.subheader("📦 Hacim Profili (VPVR / POC)")
+    vp1, vp2, vp3 = st.columns(3)
+    vp1.metric("POC", f"{vp_poc_price:.2f}" if np.isfinite(vp_poc_price) else "N/A")
+    vp2.metric("POC Uzaklık %", f"{pct_dist(vp_poc_price, float(latest["Close"])):+.2f}%" if np.isfinite(vp_poc_price) else "N/A")
+    vp3.metric("Profil Bar Sayısı", f"{min(len(df), 220)}")
+    st.plotly_chart(fig_vpvr, use_container_width=True)
 
     st.subheader("📉 RSI / MACD / ATR%")
     colA, colB, colC = st.columns(3)
@@ -7358,8 +7503,16 @@ with tab_financials:
             fm10.metric("Hedef PD/DD", f"{summary.get('target_pb', np.nan):.2f}" if np.isfinite(summary.get('target_pb', np.nan)) else "N/A")
             fm11.metric("Hedef EV/FAVÖK", f"{summary.get('target_ev_ebitda', np.nan):.2f}" if np.isfinite(summary.get('target_ev_ebitda', np.nan)) else "N/A")
 
+            fm12, fm13, fm14, fm15 = st.columns(4)
+            fm12.metric("Altman Z-Skoru", f"{summary.get('altman_z', np.nan):.2f}" if np.isfinite(summary.get('altman_z', np.nan)) else "N/A")
+            fm13.metric("Altman Durumu", summary.get("altman_state", "N/A"))
+            piot_val = summary.get('piotroski_f', np.nan)
+            fm14.metric("Piotroski F-Skoru", f"{int(round(piot_val))}/9" if np.isfinite(piot_val) else "N/A")
+            fm15.metric("Piotroski Durumu", summary.get("piotroski_state", "N/A"))
+
             with st.expander("Tahmini piyasa değeri hesap yöntemi", expanded=False):
                 st.write("Heuristik adil değer; son finansal tabloya göre F/K, PD/DD ve EV/FAVÖK tabanlı birleşik tahmindir. Buna ek olarak eğitim amaçlı basit bir DCF yaklaşımı da ayrıca hesaplanır.")
+                st.write("Altman Z-Skoru bilanço dayanıklılığı ve finansal stres riskini, Piotroski F-Skoru ise 0-9 arası temel kaliteyi özetler.")
                 breakdown = summary.get("fair_breakdown", [])
                 if breakdown:
                     bd_df = pd.DataFrame(breakdown)
