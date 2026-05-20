@@ -5490,11 +5490,22 @@ def fetch_financial_snapshot_analysis(symbol: str, selected_market: str = "USA",
             value_str = _fmt_fin_value(row["key"], float(val)) if pd.notna(val) else "N/A"
             delta_html = "<span class='delta-gray'>—</span>"
             if i < len(vals) - 1 and pd.notna(val) and pd.notna(vals[i + 1]):
-                delta_pct = _compute_delta_pct(float(val), float(vals[i + 1]))
-                if np.isfinite(delta_pct):
-                    better = float(val) > float(vals[i + 1]) if row["higher_better"] else float(val) < float(vals[i + 1])
-                    css = "delta-green" if better else "delta-red"
-                    delta_html = f"<span class='{css}'>{delta_pct:+.1f}%</span>"
+                compare_ok = True
+                try:
+                    curr_dt = pd.to_datetime(periods[i])
+                    prev_dt = pd.to_datetime(periods[i + 1])
+                    gap_days = abs((curr_dt - prev_dt).days)
+                    if statement_mode == "quarterly":
+                        compare_ok = 45 <= gap_days <= 130
+                except Exception:
+                    compare_ok = True
+
+                if compare_ok:
+                    delta_pct = _compute_delta_pct(float(val), float(vals[i + 1]))
+                    if np.isfinite(delta_pct):
+                        better = float(val) > float(vals[i + 1]) if row["higher_better"] else float(val) < float(vals[i + 1])
+                        css = "delta-green" if better else "delta-red"
+                        delta_html = f"<span class='{css}'>{delta_pct:+.1f}%</span>"
             row_html.append(f"<td><span class='val-main'>{_html_escape(value_str)}</span>{delta_html}</td>")
         row_html.append("</tr>")
         html_parts.append("".join(row_html))
@@ -6038,7 +6049,199 @@ def build_indicator_occurrence_chart(df: pd.DataFrame, signal_mask: pd.Series, t
 # =============================
 # Tabs
 # =============================
-tab_dash, tab_triple, tab_indicator_stats, tab_future, tab_chart_patterns, tab_financials, tab_calendar, tab_social, tab_heatmap, tab_export, tab_scan = st.tabs(["📊 Dashboard", "📺 3 Ekranlı Sistem", "📈 İndikatör İstatistik", "🔮 Future Price", "📐 Grafik Formasyonları", "📘 Bilanço Analizi", "🗓️ Ekonomik Takvim", "📣 X + YouTube Trends", "🔥 Sektörel Heatmap", "📄 Rapor (PDF/HTML)", "🔍 Tarama"])
+
+
+# =============================
+# Historical Range Analysis Helpers
+# =============================
+def _slice_df_by_date_range(df_in: pd.DataFrame, start_date: datetime.date, end_date: datetime.date) -> pd.DataFrame:
+    if df_in is None or df_in.empty:
+        return pd.DataFrame()
+    start_ts = pd.Timestamp(start_date)
+    end_ts = pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+    return df_in.loc[(df_in.index >= start_ts) & (df_in.index <= end_ts)].copy()
+
+def build_history_range_price_figure(plot_df: pd.DataFrame, show_patterns: bool = True, show_ema13: bool = False) -> go.Figure:
+    fig = go.Figure()
+    if plot_df is None or plot_df.empty:
+        fig.update_layout(height=850, title="Geçmiş Tarih Aralığı Grafiği")
+        return fig
+
+    fig.add_trace(go.Candlestick(
+        x=plot_df.index,
+        open=plot_df["Open"],
+        high=plot_df["High"],
+        low=plot_df["Low"],
+        close=plot_df["Close"],
+        name="Price"
+    ))
+    if "EMA50" in plot_df.columns:
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["EMA50"], name="EMA Fast"))
+    if "EMA200" in plot_df.columns:
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["EMA200"], name="EMA Slow"))
+    if "BB_upper" in plot_df.columns:
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["BB_upper"], name="BB Upper", line=dict(dash="dot")))
+    if "BB_mid" in plot_df.columns:
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["BB_mid"], name="BB Mid", line=dict(dash="dot")))
+    if "BB_lower" in plot_df.columns:
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["BB_lower"], name="BB Lower", line=dict(dash="dot")))
+
+    if show_ema13 and {"EMA13_High", "EMA13_Low", "EMA13_Close"}.issubset(plot_df.columns):
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["EMA13_High"], name="13 EMA High", line=dict(color='rgba(255, 165, 0, 0.8)', width=1)))
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["EMA13_Low"], name="13 EMA Low", fill='tonexty', fillcolor='rgba(255, 165, 0, 0.2)', line=dict(color='rgba(255, 165, 0, 0.8)', width=1)))
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["EMA13_Close"], name="13 EMA Close", line=dict(color='darkorange', width=2)))
+
+    if "ENTRY" in plot_df.columns:
+        entries = plot_df[plot_df["ENTRY"] == 1]
+        if not entries.empty:
+            fig.add_trace(go.Scatter(x=entries.index, y=entries["Close"], mode="markers", name="ENTRY", marker=dict(symbol="triangle-up", size=10)))
+    if "EXIT" in plot_df.columns:
+        exits = plot_df[plot_df["EXIT"] == 1]
+        if not exits.empty:
+            fig.add_trace(go.Scatter(x=exits.index, y=exits["Close"], mode="markers", name="EXIT", marker=dict(symbol="triangle-down", size=10)))
+
+    if show_patterns:
+        bull_patterns = {
+            "KANGAROO_BULL": "🟩🦘 LONG KANGURU",
+            "PATTERN_HAMMER": "🟩🔨 HAMMER",
+            "PATTERN_INV_HAMMER": "🟩🔨 INV HAMMER",
+            "PATTERN_ENGULFING_BULL": "🟢 ENGULFING",
+            "PATTERN_HARAMI_BULL": "🟢🤰 HARAMI",
+            "PATTERN_MARUBOZU_BULL": "🟩 MARUBOZU",
+            "PATTERN_TWEEZER_BOTTOM": "🟢✌️ TWEEZER",
+            "PATTERN_PIERCING": "🟢🗡️ PIERCING",
+            "PATTERN_MORNING_STAR": "🟢🌅 M.STAR",
+            "PATTERN_LL_DOJI": "🟢⚖️ LL DOJI",
+        }
+        bear_patterns = {
+            "KANGAROO_BEAR": "🟥🦘 SHORT KANGURU",
+            "PATTERN_HANGING_MAN": "🟥🪢 HANGING M.",
+            "PATTERN_SHOOTING_STAR": "🟥🌠 S.STAR",
+            "PATTERN_ENGULFING_BEAR": "🔴 ENGULFING",
+            "PATTERN_HARAMI_BEAR": "🔴🤰 HARAMI",
+            "PATTERN_MARUBOZU_BEAR": "🟥 MARUBOZU",
+            "PATTERN_TWEEZER_TOP": "🔴✌️ TWEEZER",
+            "PATTERN_DARK_CLOUD": "🔴🌩️ D.CLOUD",
+            "PATTERN_EVENING_STAR": "🔴🌃 E.STAR"
+        }
+
+        bull_texts = pd.Series("", index=plot_df.index)
+        bear_texts = pd.Series("", index=plot_df.index)
+        for col, name in bull_patterns.items():
+            if col in plot_df.columns:
+                mask = plot_df[col] == 1
+                bull_texts[mask] += name + "<br>"
+        for col, name in bear_patterns.items():
+            if col in plot_df.columns:
+                mask = plot_df[col] == 1
+                bear_texts[mask] += name + "<br>"
+
+        bull_texts = bull_texts.str.rstrip("<br>")
+        bear_texts = bear_texts.str.rstrip("<br>")
+
+        bull_mask = bull_texts != ""
+        if bull_mask.any():
+            fig.add_trace(go.Scatter(
+                x=plot_df.index[bull_mask], y=plot_df["Low"][bull_mask], mode="markers+text", name="Boğa Formasyonları",
+                text=bull_texts[bull_mask], textposition="bottom center",
+                textfont=dict(color="green", size=10, family="Arial Black"),
+                marker=dict(symbol="triangle-up", size=10, color="green", line=dict(width=1, color="DarkSlateGrey"))
+            ))
+
+        bear_mask = bear_texts != ""
+        if bear_mask.any():
+            fig.add_trace(go.Scatter(
+                x=plot_df.index[bear_mask], y=plot_df["High"][bear_mask], mode="markers+text", name="Ayı Formasyonları",
+                text=bear_texts[bear_mask], textposition="top center",
+                textfont=dict(color="red", size=10, family="Arial Black"),
+                marker=dict(symbol="triangle-down", size=10, color="red", line=dict(width=1, color="DarkSlateGrey"))
+            ))
+
+    fig.update_layout(
+        height=850,
+        xaxis_rangeslider_visible=False,
+        title="Geçmiş Tarih Aralığı Fiyat Grafiği + EMA + Bollinger + Sinyaller & Formasyonlar",
+        yaxis_title="Fiyat",
+        xaxis_title="Tarih",
+    )
+    return fig
+
+def build_history_range_indicator_figures(plot_df: pd.DataFrame, benchmark_df_full: Optional[pd.DataFrame], benchmark_symbol: str):
+    fig_rsi_local = go.Figure()
+    fig_rsi_local.add_trace(go.Scatter(x=plot_df.index, y=plot_df["RSI"], name="RSI"))
+    fig_rsi_local.add_hline(y=70, line_dash="dash", line_color="red", annotation_text="Aşırı Alım")
+    fig_rsi_local.add_hline(y=30, line_dash="dash", line_color="green", annotation_text="Aşırı Satım")
+    fig_rsi_local.update_layout(height=260, title="RSI (Göreceli Güç Endeksi)", yaxis_title="RSI", xaxis_title="Tarih")
+
+    fig_macd_local = go.Figure()
+    fig_macd_local.add_trace(go.Scatter(x=plot_df.index, y=plot_df["MACD"], name="MACD"))
+    fig_macd_local.add_trace(go.Scatter(x=plot_df.index, y=plot_df["MACD_signal"], name="Signal"))
+    fig_macd_local.add_trace(go.Bar(x=plot_df.index, y=plot_df["MACD_hist"], name="Hist"))
+    fig_macd_local.update_layout(height=260, title="MACD (Moving Average Convergence Divergence)", yaxis_title="MACD", xaxis_title="Tarih")
+
+    fig_atr_local = go.Figure()
+    fig_atr_local.add_trace(go.Scatter(x=plot_df.index, y=plot_df["ATR_PCT"] * 100, name="ATR%"))
+    fig_atr_local.update_layout(height=260, title="ATR % (Ortalama Gerçek Aralık / Fiyat)", yaxis_title="%", xaxis_title="Tarih")
+
+    fig_stoch_local = go.Figure()
+    if "STOCH_RSI_K" in plot_df.columns and "STOCH_RSI_D" in plot_df.columns:
+        fig_stoch_local.add_trace(go.Scatter(x=plot_df.index, y=plot_df["STOCH_RSI_K"], name="Stochastic RSI K"))
+        fig_stoch_local.add_trace(go.Scatter(x=plot_df.index, y=plot_df["STOCH_RSI_D"], name="Stochastic RSI D"))
+        fig_stoch_local.add_hline(y=80, line_dash="dash", line_color="red", annotation_text="Aşırı Alım")
+        fig_stoch_local.add_hline(y=20, line_dash="dash", line_color="green", annotation_text="Aşırı Satım")
+    fig_stoch_local.update_layout(height=260, title="Stochastic RSI (K & D)", yaxis_title="Değer", xaxis_title="Tarih")
+
+    fig_bbwidth_local = go.Figure()
+    if "BB_WIDTH" in plot_df.columns:
+        fig_bbwidth_local.add_trace(go.Scatter(x=plot_df.index, y=plot_df["BB_WIDTH"] * 100, name="BB % Genişlik"))
+        fig_bbwidth_local.add_hline(y=2, line_dash="dash", line_color="orange", annotation_text="Sıkışma Bölgesi")
+    fig_bbwidth_local.update_layout(height=260, title="Bollinger Bandı Genişliği %", yaxis_title="Genişlik %", xaxis_title="Tarih")
+
+    fig_volratio_local = go.Figure()
+    if "VOL_RATIO" in plot_df.columns:
+        fig_volratio_local.add_trace(go.Bar(x=plot_df.index, y=plot_df["VOL_RATIO"], name="Hacim Oranı"))
+        fig_volratio_local.add_hline(y=1.5, line_dash="dash", line_color="red", annotation_text="Anormal Hacim")
+    fig_volratio_local.update_layout(height=260, title="Hacim Oranı (Son Hacim / SMA)", yaxis_title="Oran", xaxis_title="Tarih")
+
+    plot_df_local = plot_df.copy()
+    if "VOL_SMA_10" not in plot_df_local.columns:
+        plot_df_local["VOL_SMA_10"] = plot_df_local["Volume"].rolling(10).mean()
+
+    if benchmark_df_full is not None and not benchmark_df_full.empty and "Volume" in benchmark_df_full.columns:
+        bench_slice = benchmark_df_full.reindex(plot_df_local.index)
+        bench_vol = bench_slice["Volume"].fillna(0)
+    else:
+        bench_vol = pd.Series(0, index=plot_df_local.index)
+
+    fig_vol_market_local = make_subplots(specs=[[{"secondary_y": True}]])
+    fig_vol_market_local.add_trace(go.Bar(x=plot_df_local.index, y=plot_df_local["Volume"], name="Hisse Hacmi", marker_color='lightblue', opacity=0.7), secondary_y=False)
+    fig_vol_market_local.add_trace(go.Scatter(x=plot_df_local.index, y=bench_vol, name=f"Endeks ({benchmark_symbol})", line=dict(color='orange', width=2)), secondary_y=True)
+    fig_vol_market_local.update_layout(height=260, title="Hisse vs Endeks Hacmi", yaxis_title="Hisse", yaxis2_title="Endeks", xaxis_title="Tarih", margin=dict(l=0, r=0, t=40, b=0))
+
+    fig_vol_2wk_local = go.Figure()
+    fig_vol_2wk_local.add_trace(go.Bar(x=plot_df_local.index, y=plot_df_local["Volume"], name="Hacim", marker_color='cadetblue', opacity=0.7))
+    fig_vol_2wk_local.add_trace(go.Scatter(x=plot_df_local.index, y=plot_df_local["VOL_SMA_10"], name="2 Haftalık Ort. (10 Bar)", line=dict(color='red', width=2)))
+    fig_vol_2wk_local.update_layout(height=260, title="Hisse Hacmi vs 2 Haftalık Ortalama", yaxis_title="Hacim", xaxis_title="Tarih", margin=dict(l=0, r=0, t=40, b=0))
+
+    fig_obv_local = go.Figure()
+    if "OBV" in plot_df_local.columns and "OBV_EMA" in plot_df_local.columns:
+        fig_obv_local.add_trace(go.Scatter(x=plot_df_local.index, y=plot_df_local["OBV"], name="OBV", line=dict(color='blue')))
+        fig_obv_local.add_trace(go.Scatter(x=plot_df_local.index, y=plot_df_local["OBV_EMA"], name="OBV EMA (21)", line=dict(color='orange', dash='dot')))
+    fig_obv_local.update_layout(height=260, title="On-Balance Volume (OBV)", yaxis_title="OBV", xaxis_title="Tarih", margin=dict(l=0, r=0, t=40, b=0))
+
+    return {
+        "rsi": fig_rsi_local,
+        "macd": fig_macd_local,
+        "atr": fig_atr_local,
+        "stoch": fig_stoch_local,
+        "bbwidth": fig_bbwidth_local,
+        "volratio": fig_volratio_local,
+        "vol_market": fig_vol_market_local,
+        "vol_2wk": fig_vol_2wk_local,
+        "obv": fig_obv_local,
+    }
+
+tab_dash, tab_history_range, tab_triple, tab_indicator_stats, tab_future, tab_chart_patterns, tab_financials, tab_calendar, tab_social, tab_heatmap, tab_export, tab_scan = st.tabs(["📊 Dashboard", "🕰️ Tarih Aralığı Analizi", "📺 3 Ekranlı Sistem", "📈 İndikatör İstatistik", "🔮 Future Price", "📐 Grafik Formasyonları", "📘 Bilanço Analizi", "🗓️ Ekonomik Takvim", "📣 X + YouTube Trends", "🔥 Sektörel Heatmap", "📄 Rapor (PDF/HTML)", "🔍 Tarama"])
 
 with tab_dash:
     if "app_errors" in st.session_state and st.session_state.app_errors:
@@ -6650,6 +6853,124 @@ with tab_scan:
                                 st.info("Negatif uyumsuzluk bulunmadı.")
                             else:
                                 st.dataframe(neg_df, use_container_width=True, height=320)
+
+
+
+with tab_history_range:
+    st.header("🕰️ Tarih Aralığı Analizi")
+    st.caption("Yüklü veri penceresi içinden geçmiş bir tarih aralığı seçerek büyük boy grafik ve ilgili teknik panelleri görüntüleyebilirsin. Daha eski tarihleri görmek için sol menüden periyodu genişlet.")
+
+    if df is None or df.empty:
+        st.info("Bu sekme için önce ana teknik verinin yüklenmiş olması gerekir.")
+    else:
+        available_dates = pd.to_datetime(df.index).normalize()
+        min_hist_date = available_dates.min().date()
+        max_hist_date = available_dates.max().date()
+
+        default_start = max(min_hist_date, max_hist_date - datetime.timedelta(days=60))
+        hr1, hr2 = st.columns(2)
+        with hr1:
+            history_start_date = st.date_input(
+                "Başlangıç Tarihi",
+                value=default_start,
+                min_value=min_hist_date,
+                max_value=max_hist_date,
+                key="history_range_start_date",
+            )
+        with hr2:
+            history_end_date = st.date_input(
+                "Bitiş Tarihi",
+                value=max_hist_date,
+                min_value=min_hist_date,
+                max_value=max_hist_date,
+                key="history_range_end_date",
+            )
+
+        if history_start_date > history_end_date:
+            st.warning("Başlangıç tarihi bitiş tarihinden büyük olamaz.")
+        else:
+            history_df = _slice_df_by_date_range(df, history_start_date, history_end_date)
+
+            if history_df.empty or len(history_df) < 10:
+                st.warning("Seçilen tarih aralığında yeterli veri bulunamadı. Daha geniş bir aralık seç.")
+            else:
+                history_price_fig = build_history_range_price_figure(
+                    history_df,
+                    show_patterns=st.session_state.get("show_chart_patterns", True),
+                    show_ema13=st.session_state.get("show_ema13_channel", False),
+                )
+                st.plotly_chart(history_price_fig, use_container_width=True)
+
+                hist_figs = build_history_range_indicator_figures(history_df, benchmark_df, benchmark_ticker)
+
+                st.subheader("📉 RSI / MACD / ATR%")
+                hcol1, hcol2, hcol3 = st.columns(3)
+                with hcol1:
+                    st.plotly_chart(hist_figs["rsi"], use_container_width=True)
+                with hcol2:
+                    st.plotly_chart(hist_figs["macd"], use_container_width=True)
+                with hcol3:
+                    st.plotly_chart(hist_figs["atr"], use_container_width=True)
+
+                st.subheader("📊 Stochastic RSI / Bollinger Genişliği / Hacim Oranı")
+                hcol4, hcol5, hcol6 = st.columns(3)
+                with hcol4:
+                    st.plotly_chart(hist_figs["stoch"], use_container_width=True)
+                with hcol5:
+                    st.plotly_chart(hist_figs["bbwidth"], use_container_width=True)
+                with hcol6:
+                    st.plotly_chart(hist_figs["volratio"], use_container_width=True)
+
+                st.subheader("📊 Hacim ve Trend Karşılaştırmaları")
+                hcol7, hcol8, hcol9 = st.columns(3)
+                with hcol7:
+                    st.plotly_chart(hist_figs["vol_market"], use_container_width=True)
+                with hcol8:
+                    st.plotly_chart(hist_figs["vol_2wk"], use_container_width=True)
+                with hcol9:
+                    st.plotly_chart(hist_figs["obv"], use_container_width=True)
+
+                st.subheader("🧪 Backtest Özeti (Long-only + Scale Out + Time Stop)")
+                history_benchmark_returns = None
+                if benchmark_df is not None and not benchmark_df.empty and "Close" in benchmark_df.columns:
+                    history_benchmark_slice = _slice_df_by_date_range(benchmark_df, history_start_date, history_end_date)
+                    if not history_benchmark_slice.empty:
+                        history_benchmark_returns = history_benchmark_slice["Close"].pct_change().dropna()
+
+                hist_eq, hist_tdf, hist_metrics = backtest_long_only(
+                    history_df,
+                    cfg,
+                    risk_free_annual=risk_free_annual,
+                    benchmark_returns=history_benchmark_returns,
+                )
+
+                hm1, hm2, hm3, hm4, hm5, hm6, hm7, hm8 = st.columns(8)
+                hm1.metric("Total Return", f"{hist_metrics['Total Return']*100:.1f}%")
+                hm2.metric("Ann Return", f"{hist_metrics['Annualized Return']*100:.1f}%")
+                hm3.metric("Sharpe", f"{hist_metrics['Sharpe']:.2f}")
+                hm4.metric("Max DD", f"{hist_metrics['Max Drawdown']*100:.1f}%")
+                hm5.metric("Trades", f"{hist_metrics['Trades']}")
+                hm6.metric("Win Rate", f"{hist_metrics['Win Rate']*100:.1f}%")
+                hm7.metric("Beta", f"{hist_metrics['Beta']:.2f}")
+                hm8.metric("Info Ratio", f"{hist_metrics['Information Ratio']:.2f}")
+
+                hist_eq_fig = go.Figure()
+                hist_eq_fig.add_trace(go.Scatter(x=hist_eq.index, y=hist_eq.values, name="Equity"))
+                hist_eq_fig.update_layout(height=320, title="Seçilen Tarih Aralığı Backtest Sermaye Eğrisi", yaxis_title="Sermaye", xaxis_title="Tarih")
+                st.plotly_chart(hist_eq_fig, use_container_width=True)
+
+                with st.expander("Trade listesi (Seçilen tarih aralığı)", expanded=False):
+                    st.dataframe(hist_tdf, use_container_width=True, height=240)
+
+                st.subheader("📦 Hacim Profili (VPVR / POC)")
+                hist_vpvr_fig, hist_poc_price = build_volume_profile_figure(history_df, bins=28, lookback=len(history_df))
+                hp1, hp2, hp3 = st.columns(3)
+                hp1.metric("POC", f"{hist_poc_price:.2f}" if np.isfinite(hist_poc_price) else "N/A")
+                hist_close_ref = float(history_df["Close"].iloc[-1]) if not history_df.empty else np.nan
+                hist_poc_dist = ((hist_poc_price / hist_close_ref) - 1.0) * 100.0 if np.isfinite(hist_poc_price) and np.isfinite(hist_close_ref) and hist_close_ref != 0 else np.nan
+                hp2.metric("POC Uzaklık %", f"{hist_poc_dist:+.2f}%" if np.isfinite(hist_poc_dist) else "N/A")
+                hp3.metric("Profil Bar Sayısı", f"{len(history_df)}")
+                st.plotly_chart(hist_vpvr_fig, use_container_width=True)
 
 with tab_triple:
     st.header("📺 Üçlü Ekran Trading Sistemi (Triple Screen)")
@@ -7437,7 +7758,7 @@ with tab_social:
 
 with tab_financials:
     st.header("📘 Bilanço Analizi")
-    st.caption("Seçilen hissenin çeyreklik veya senelik son 4 bilanço dönemini gösterir. Her metrik bir önceki dönemle yüzdesel karşılaştırılır; daha iyi yönde değişim yeşil, kötü yönde değişim kırmızı görünür.")
+    st.caption("Seçilen hissenin çeyreklik veya senelik son 4 bilanço dönemini gösterir. Her metrik bir önceki aynı frekanstaki dönemle yüzdesel karşılaştırılır; çeyreklik modda bir önceki çeyrek, senelik modda bir önceki yıl baz alınır. Daha iyi yönde değişim yeşil, kötü yönde değişim kırmızı görünür.")
 
     fin_symbol_options = [naked_ticker(x) for x in universe] if universe else [naked_ticker(ticker)]
     default_fin_symbol = naked_ticker(ticker) if naked_ticker(ticker) in fin_symbol_options else fin_symbol_options[0]
