@@ -5295,6 +5295,13 @@ def fetch_financial_snapshot_analysis(symbol: str, selected_market: str = "USA",
                 return np.nan
 
             if statement_mode == "quarterly":
+                if quarterly_compare_mode == "prev_period_legacy":
+                    prev_candidates = [idx for idx in s.index if pd.to_datetime(idx) < pd.to_datetime(curr_dt)]
+                    if not prev_candidates:
+                        return np.nan
+                    ref_idx = max(prev_candidates)
+                    return safe_float(s.loc[ref_idx])
+
                 if quarterly_compare_mode == "same_quarter_prev_year":
                     target_period = pd.Period(curr_dt, freq="Q") - 4
                 else:
@@ -7783,7 +7790,7 @@ with tab_social:
 
 with tab_financials:
     st.header("📘 Bilanço Analizi")
-    st.caption("Seçilen hissenin çeyreklik veya senelik son 4 bilanço dönemini gösterir. Çeyreklik modda kıyas türü olarak bir önceki çeyrek veya geçen yılın aynı çeyreği seçilebilir; senelik modda bir önceki yıl baz alınır. Daha iyi yönde değişim yeşil, kötü yönde değişim kırmızı görünür.")
+    st.caption("Seçilen hissenin çeyreklik veya senelik son 4 bilanço dönemini gösterir. Çeyreklik modda kıyas türü olarak bir önceki dönem (legacy), bir önceki çeyrek veya geçen yılın aynı çeyreği seçilebilir; senelik modda bir önceki yıl baz alınır. Daha iyi yönde değişim yeşil, kötü yönde değişim kırmızı görünür.")
 
     fin_symbol_options = [naked_ticker(x) for x in universe] if universe else [naked_ticker(ticker)]
     default_fin_symbol = naked_ticker(ticker) if naked_ticker(ticker) in fin_symbol_options else fin_symbol_options[0]
@@ -7807,8 +7814,12 @@ with tab_financials:
     with fc3:
         fin_quarter_compare_mode = st.radio(
             "Çeyrek Kıyas Türü",
-            options=["prev_quarter", "same_quarter_prev_year"],
-            format_func=lambda x: "Önceki Çeyrek" if x == "prev_quarter" else "Geçen Yıl Aynı Çeyrek",
+            options=["prev_period_legacy", "prev_quarter", "same_quarter_prev_year"],
+            format_func=lambda x: (
+                "Bir Önceki Dönem (Legacy)"
+                if x == "prev_period_legacy"
+                else ("Önceki Çeyrek" if x == "prev_quarter" else "Geçen Yıl Aynı Çeyrek")
+            ),
             key="financials_quarter_compare_mode",
             horizontal=True,
             disabled=(fin_mode != "quarterly"),
