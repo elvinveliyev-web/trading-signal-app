@@ -5249,7 +5249,7 @@ def _statement_to_period_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=30 * 60, show_spinner=False)
-def fetch_financial_snapshot_analysis(symbol: str, selected_market: str = "USA", statement_mode: str = "quarterly") -> Dict[str, Any]:
+def fetch_financial_snapshot_analysis(symbol: str, selected_market: str = "USA", statement_mode: str = "quarterly", quarterly_compare_mode: str = "prev_quarter") -> Dict[str, Any]:
     ticker_norm = normalize_ticker(symbol, selected_market)
     t = yf.Ticker(ticker_norm)
 
@@ -5285,6 +5285,35 @@ def fetch_financial_snapshot_analysis(symbol: str, selected_market: str = "USA",
         return {"error": "Seçilen hisse için bilanço / gelir tablosu verisi bulunamadı.", "table_html": "", "summary": {}}
 
     periods = pd.Index(sorted(pd.to_datetime(base_index).unique(), reverse=True))[:4]
+
+    def _find_reference_value(series: pd.Series, curr_dt: pd.Timestamp) -> float:
+        try:
+            s = pd.Series(series.copy())
+            s.index = pd.to_datetime(s.index)
+            s = s.sort_index()
+            if s.empty:
+                return np.nan
+
+            if statement_mode == "quarterly":
+                if quarterly_compare_mode == "same_quarter_prev_year":
+                    target_period = pd.Period(curr_dt, freq="Q") - 4
+                else:
+                    target_period = pd.Period(curr_dt, freq="Q") - 1
+
+                matches = [idx for idx in s.index if pd.Period(idx, freq="Q") == target_period]
+                if not matches:
+                    return np.nan
+                ref_idx = max(matches)
+                return safe_float(s.loc[ref_idx])
+
+            target_period = pd.Period(curr_dt, freq="Y") - 1
+            matches = [idx for idx in s.index if pd.Period(idx, freq="Y") == target_period]
+            if not matches:
+                return np.nan
+            ref_idx = max(matches)
+            return safe_float(s.loc[ref_idx])
+        except Exception:
+            return np.nan
 
     revenue = _pick_series_from_rows(income_df, ["Total Revenue", "Operating Revenue", "Revenue"]).reindex(periods)
     net_income = _pick_series_from_rows(income_df, ["Net Income", "Net Income Common Stockholders", "Net Income Including Noncontrolling Interests"]).reindex(periods)
@@ -5489,21 +5518,17 @@ def fetch_financial_snapshot_analysis(symbol: str, selected_market: str = "USA",
         for i, val in enumerate(vals):
             value_str = _fmt_fin_value(row["key"], float(val)) if pd.notna(val) else "N/A"
             delta_html = "<span class='delta-gray'>—</span>"
-            if i < len(vals) - 1 and pd.notna(val) and pd.notna(vals[i + 1]):
-                compare_ok = True
+            if pd.notna(val):
                 try:
                     curr_dt = pd.to_datetime(periods[i])
-                    prev_dt = pd.to_datetime(periods[i + 1])
-                    gap_days = abs((curr_dt - prev_dt).days)
-                    if statement_mode == "quarterly":
-                        compare_ok = 45 <= gap_days <= 130
+                    ref_val = _find_reference_value(row["series"], curr_dt)
                 except Exception:
-                    compare_ok = True
+                    ref_val = np.nan
 
-                if compare_ok:
-                    delta_pct = _compute_delta_pct(float(val), float(vals[i + 1]))
+                if pd.notna(ref_val):
+                    delta_pct = _compute_delta_pct(float(val), float(ref_val))
                     if np.isfinite(delta_pct):
-                        better = float(val) > float(vals[i + 1]) if row["higher_better"] else float(val) < float(vals[i + 1])
+                        better = float(val) > float(ref_val) if row["higher_better"] else float(val) < float(ref_val)
                         css = "delta-green" if better else "delta-red"
                         delta_html = f"<span class='{css}'>{delta_pct:+.1f}%</span>"
             row_html.append(f"<td><span class='val-main'>{_html_escape(value_str)}</span>{delta_html}</td>")
@@ -7758,12 +7783,12 @@ with tab_social:
 
 with tab_financials:
     st.header("📘 Bilanço Analizi")
-    st.caption("Seçilen hissenin çeyreklik veya senelik son 4 bilanço dönemini gösterir. Her metrik bir önceki aynı frekanstaki dönemle yüzdesel karşılaştırılır; çeyreklik modda bir önceki çeyrek, senelik modda bir önceki yıl baz alınır. Daha iyi yönde değişim yeşil, kötü yönde değişim kırmızı görünür.")
+    st.caption("Seçilen hissenin çeyreklik veya senelik son 4 bilanço dönemini gösterir. Çeyreklik modda kıyas türü olarak bir önceki çeyrek veya geçen yılın aynı çeyreği seçilebilir; senelik modda bir önceki yıl baz alınır. Daha iyi yönde değişim yeşil, kötü yönde değişim kırmızı görünür.")
 
     fin_symbol_options = [naked_ticker(x) for x in universe] if universe else [naked_ticker(ticker)]
     default_fin_symbol = naked_ticker(ticker) if naked_ticker(ticker) in fin_symbol_options else fin_symbol_options[0]
 
-    fc1, fc2, fc3 = st.columns([2, 1, 1])
+    fc1, fc2, fc3, fc4 = st.columns([2, 1.2, 1.6, 1])
     with fc1:
         fin_symbol_raw = st.selectbox(
             "Hisse Seç",
@@ -7780,6 +7805,15 @@ with tab_financials:
             horizontal=True,
         )
     with fc3:
+        fin_quarter_compare_mode = st.radio(
+            "Çeyrek Kıyas Türü",
+            options=["prev_quarter", "same_quarter_prev_year"],
+            format_func=lambda x: "Önceki Çeyrek" if x == "prev_quarter" else "Geçen Yıl Aynı Çeyrek",
+            key="financials_quarter_compare_mode",
+            horizontal=True,
+            disabled=(fin_mode != "quarterly"),
+        )
+    with fc4:
         run_financials = st.button("📘 Bilanço Analizini Getir", key="run_financials_snapshot", use_container_width=True)
 
     if run_financials:
@@ -7787,6 +7821,7 @@ with tab_financials:
             fin_symbol_raw,
             selected_market=market,
             statement_mode=fin_mode,
+            quarterly_compare_mode=fin_quarter_compare_mode,
         )
 
     fin_result = st.session_state.get("financial_snapshot_result")
