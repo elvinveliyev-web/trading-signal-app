@@ -6273,7 +6273,645 @@ def build_history_range_indicator_figures(plot_df: pd.DataFrame, benchmark_df_fu
         "obv": fig_obv_local,
     }
 
-tab_dash, tab_history_range, tab_triple, tab_indicator_stats, tab_future, tab_chart_patterns, tab_financials, tab_calendar, tab_social, tab_heatmap, tab_export, tab_scan = st.tabs(["📊 Dashboard", "🕰️ Tarih Aralığı Analizi", "📺 3 Ekranlı Sistem", "📈 İndikatör İstatistik", "🔮 Future Price", "📐 Grafik Formasyonları", "📘 Bilanço Analizi", "🗓️ Ekonomik Takvim", "📣 X + YouTube Trends", "🔥 Sektörel Heatmap", "📄 Rapor (PDF/HTML)", "🔍 Tarama"])
+
+
+def _bist_index_mapping() -> Dict[str, str]:
+    return {
+        "BIST 30": "XU030.IS",
+        "BIST 100": "XU100.IS",
+        "BIST Tüm": "XUTUM.IS",
+    }
+
+
+def _resolve_bist_index_benchmark(index_ticker: str) -> str:
+    if index_ticker == "XU100.IS":
+        return "XUTUM.IS"
+    return "XU100.IS"
+
+
+def _prepare_dashboard_context_for_symbol(
+    symbol: str,
+    cfg: dict,
+    current_interval: str,
+    current_period: str,
+    end_date: Optional[datetime.date],
+    force_latest: bool,
+    live_override: bool,
+    use_market_filter: bool,
+    use_htf_filter: bool,
+    risk_free_rate: float,
+) -> Dict[str, Any]:
+    raw = load_data_cached(symbol, current_period, current_interval, end_date=end_date, force_latest=force_latest)
+    if raw is None or raw.empty:
+        return {"error": f"Veri gelmedi: {symbol}"}
+
+    req = {"Open", "High", "Low", "Close", "Volume"}
+    if not req.issubset(set(raw.columns)):
+        return {"error": f"Gerekli OHLCV kolonları eksik: {symbol}"}
+
+    live_info = get_live_price(symbol)
+    live_price_local = live_info.get("last_price", np.nan)
+
+    if live_override and np.isfinite(live_price_local):
+        raw = apply_live_last_override_to_df(raw, live_price_local)
+
+    feat = build_features(raw, cfg)
+
+    market_series_local = get_bist_regime_series() if use_market_filter else None
+    htf_series_local = get_higher_tf_trend_series(symbol, higher_tf_interval="1wk", ema_period=200) if use_htf_filter else None
+
+    feat, checkpoints_local = signal_with_checkpoints(
+        feat,
+        cfg,
+        market_filter_series=market_series_local,
+        higher_tf_filter_series=htf_series_local,
+    )
+
+    feat["EMA13_High"] = ema(feat["High"], 13)
+    feat["EMA13_Low"] = ema(feat["Low"], 13)
+    feat["EMA13_Close"] = ema(feat["Close"], 13)
+
+    latest_local = feat.iloc[-1]
+
+    if int(latest_local["ENTRY"]) == 1:
+        rec_local = "AL"
+    elif int(latest_local["EXIT"]) == 1:
+        rec_local = "SAT"
+    else:
+        rec_local = "AL (Güçlü Trend)" if latest_local["SCORE"] >= 80 else ("İZLE (Orta)" if latest_local["SCORE"] >= 60 else "UZAK DUR")
+
+    benchmark_symbol_local = _resolve_bist_index_benchmark(symbol)
+    benchmark_df_local = load_data_cached(benchmark_symbol_local, current_period, current_interval, end_date=end_date, force_latest=False)
+    benchmark_returns_local = benchmark_df_local["Close"].pct_change().dropna() if benchmark_df_local is not None and not benchmark_df_local.empty and "Close" in benchmark_df_local.columns else None
+
+    eq_local, tdf_local, metrics_local = backtest_long_only(
+        feat,
+        cfg,
+        risk_free_annual=risk_free_rate,
+        benchmark_returns=benchmark_returns_local,
+    )
+
+    tp_local = target_price_band(feat)
+    rr_info_local = rr_from_atr_stop(latest_local, tp_local, cfg)
+    spec_local = detect_speculation(feat)
+
+    price_fig_local = build_history_range_price_figure(
+        feat,
+        show_patterns=st.session_state.get("show_chart_patterns", True),
+        show_ema13=st.session_state.get("show_ema13_channel", False),
+    )
+    indicator_figs_local = build_history_range_indicator_figures(feat, benchmark_df_local, benchmark_symbol_local)
+    vpvr_fig_local, poc_price_local = build_volume_profile_figure(feat, bins=28, lookback=min(len(feat), 220))
+
+    return {
+        "error": None,
+        "df": feat,
+        "raw": raw,
+        "latest": latest_local,
+        "live_info": live_info,
+        "live_price": live_price_local,
+        "checkpoints": checkpoints_local,
+        "recommendation": rec_local,
+        "eq": eq_local,
+        "tdf": tdf_local,
+        "metrics": metrics_local,
+        "tp": tp_local,
+        "rr_info": rr_info_local,
+        "spec": spec_local,
+        "price_fig": price_fig_local,
+        "indicator_figs": indicator_figs_local,
+        "vpvr_fig": vpvr_fig_local,
+        "poc_price": poc_price_local,
+        "benchmark_symbol": benchmark_symbol_local,
+        "benchmark_df": benchmark_df_local,
+    }
+
+
+def _render_dashboard_like_context(ctx: Dict[str, Any], display_name: str, interval_label: str, period_label: str):
+    if not ctx or ctx.get("error"):
+        st.warning(ctx.get("error", "Veri hazırlanamadı."))
+        return
+
+    df_local = ctx["df"]
+    latest_local = ctx["latest"]
+    live_price_local = ctx["live_price"]
+    checkpoints_local = ctx["checkpoints"]
+    rec_local = ctx["recommendation"]
+    metrics_local = ctx["metrics"]
+    tp_local = ctx["tp"]
+    rr_info_local = ctx["rr_info"]
+    spec_local = ctx["spec"]
+    vpvr_fig_local = ctx["vpvr_fig"]
+    poc_price_local = ctx["poc_price"]
+
+    st.subheader(f"📊 {display_name} Dashboard")
+    c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
+    c1.metric("Endeks", display_name)
+    c2.metric("Interval", interval_label)
+    c3.metric("Periyot", period_label)
+    c4.metric("Daily Close", f"{latest_local['Close']:.2f}")
+    c5.metric("Live/Last", f"{live_price_local:.2f}" if np.isfinite(live_price_local) else "N/A")
+    c6.metric("Skor", f"{latest_local['SCORE']:.0f}/100")
+    c7.metric("Sinyal", rec_local)
+    c8.metric("ATR%", f"{latest_local['ATR_PCT']*100:.2f}%" if pd.notna(latest_local.get("ATR_PCT", np.nan)) else "N/A")
+
+    st.subheader("📊 Aşırı Alım / Spekülasyon Göstergeleri")
+    ob1, ob2, ob3, ob4 = st.columns(4)
+    ob1.metric("Aşırı Alım Skoru", f"{spec_local['overbought_score']}/100")
+    ob2.metric("Aşırı Satım Skoru", f"{spec_local['oversold_score']}/100")
+    ob3.metric("Spekülasyon Skoru", f"{spec_local['speculation_score']}/100")
+    ob4.metric("Genel Karar", spec_local["verdict"])
+
+    with st.expander("Detaylı Aşırı Alım/Spekülasyon Analizi", expanded=False):
+        for _, v in spec_local.get("details", {}).items():
+            st.write(f"• {v}")
+
+    st.subheader("✅ Kontrol Noktaları (Son Bar)")
+    cp_cols = st.columns(3)
+    cp_items = list(checkpoints_local.items())
+    for i, (k, v) in enumerate(cp_items):
+        with cp_cols[i % 3]:
+            st.metric(k, "✅" if v else "❌")
+
+    st.subheader("🎯 Hedef Fiyat Bandı (Senaryo)")
+    base_px = float(tp_local["base"])
+    rr_str = fmt_rr(rr_info_local.get("rr"))
+    bull = tp_local.get("bull")
+    bear = tp_local.get("bear")
+    b1, b2, b3 = st.columns(3)
+    b1.metric("Base", f"{base_px:.2f}")
+    b2.metric("Bull Band", f"{bull[0]:.2f} → {bull[1]:.2f}" if bull else "N/A")
+    b3.metric("Bear Band", f"{bear[0]:.2f} → {bear[1]:.2f} | RR {rr_str}" if bear else f"N/A | RR {rr_str}")
+
+    st.subheader("📊 Fiyat + EMA + Bollinger + Sinyaller")
+    st.plotly_chart(ctx["price_fig"], use_container_width=True)
+
+    figs = ctx["indicator_figs"]
+    st.subheader("📉 RSI / MACD / ATR%")
+    colA, colB, colC = st.columns(3)
+    with colA:
+        st.plotly_chart(figs["rsi"], use_container_width=True)
+    with colB:
+        st.plotly_chart(figs["macd"], use_container_width=True)
+    with colC:
+        st.plotly_chart(figs["atr"], use_container_width=True)
+
+    st.subheader("📊 Stochastic RSI / Bollinger Genişliği / Hacim Oranı")
+    colD, colE, colF = st.columns(3)
+    with colD:
+        st.plotly_chart(figs["stoch"], use_container_width=True)
+    with colE:
+        st.plotly_chart(figs["bbwidth"], use_container_width=True)
+    with colF:
+        st.plotly_chart(figs["volratio"], use_container_width=True)
+
+    st.subheader("📊 Hacim ve Trend Karşılaştırmaları")
+    colV1, colV2, colV3 = st.columns(3)
+    with colV1:
+        st.plotly_chart(figs["vol_market"], use_container_width=True)
+    with colV2:
+        st.plotly_chart(figs["vol_2wk"], use_container_width=True)
+    with colV3:
+        st.plotly_chart(figs["obv"], use_container_width=True)
+
+    st.subheader("🧪 Backtest Özeti (Long-only + Scale Out + Time Stop)")
+    m1, m2, m3, m4, m5, m6, m7, m8 = st.columns(8)
+    m1.metric("Total Return", f"{metrics_local['Total Return']*100:.1f}%")
+    m2.metric("Ann Return", f"{metrics_local['Annualized Return']*100:.1f}%")
+    m3.metric("Sharpe", f"{metrics_local['Sharpe']:.2f}")
+    m4.metric("Max DD", f"{metrics_local['Max Drawdown']*100:.1f}%")
+    m5.metric("Trades", f"{metrics_local['Trades']}")
+    m6.metric("Win Rate", f"{metrics_local['Win Rate']*100:.1f}%")
+    m7.metric("Beta", f"{metrics_local['Beta']:.2f}")
+    m8.metric("Info Ratio", f"{metrics_local['Information Ratio']:.2f}")
+
+    eq_fig_local = go.Figure()
+    eq_fig_local.add_trace(go.Scatter(x=ctx["eq"].index, y=ctx["eq"].values, name="Equity"))
+    eq_fig_local.update_layout(height=320, title=f"{display_name} Backtest Sermaye Eğrisi", yaxis_title="Sermaye", xaxis_title="Tarih")
+    st.plotly_chart(eq_fig_local, use_container_width=True)
+
+    with st.expander("Trade listesi", expanded=False):
+        st.dataframe(ctx["tdf"], use_container_width=True, height=240)
+
+    st.subheader("📦 Hacim Profili (VPVR / POC)")
+    vp1, vp2, vp3 = st.columns(3)
+    vp1.metric("POC", f"{poc_price_local:.2f}" if np.isfinite(poc_price_local) else "N/A")
+    close_ref_local = float(df_local["Close"].iloc[-1]) if not df_local.empty else np.nan
+    poc_dist_local = ((poc_price_local / close_ref_local) - 1.0) * 100.0 if np.isfinite(poc_price_local) and np.isfinite(close_ref_local) and close_ref_local != 0 else np.nan
+    vp2.metric("POC Uzaklık %", f"{poc_dist_local:+.2f}%" if np.isfinite(poc_dist_local) else "N/A")
+    vp3.metric("Profil Bar Sayısı", f"{min(len(df_local), 220)}")
+    st.plotly_chart(vpvr_fig_local, use_container_width=True)
+
+
+def _render_future_price_panel_for_df(
+    local_df: pd.DataFrame,
+    symbol_label: str,
+    current_interval: str,
+    current_period: str,
+    session_prefix: str,
+):
+    st.header("🔮 Future Price")
+    st.caption("Makine öğrenmesi tabanlı çoklu model karşılaştırması ile seçili sembolün mevcut zaman diliminde ileri bar kapanış fiyat tahmini üretir.")
+
+    if local_df is None or local_df.empty:
+        st.info("Future Price için önce veri hazırlanmalıdır.")
+        return
+
+    st.markdown(f"**Aktif sembol:** `{symbol_label}`  |  **Aktif zaman dilimi:** `{current_interval}`  |  **Aktif periyot:** `{current_period}`")
+    future_horizon = st.number_input(
+        "Kaç bar/gün sonrası tahmin yapılsın?",
+        min_value=1,
+        max_value=250,
+        value=5,
+        step=1,
+        help="Mevcut seçili zaman dilimine göre çalışır. Örn. interval 1d ise 5 = 5 gün/bar sonrası kapanış tahmini.",
+        key=f"{session_prefix}_future_horizon_input",
+    )
+
+    run_future_price = st.button("🤖 Future Price Tahmini Yap", key=f"{session_prefix}_run_future_price", use_container_width=True)
+
+    result_key = f"{session_prefix}_future_price_result"
+    if run_future_price:
+        with st.spinner("Makine öğrenmesi modelleri eğitiliyor, walk-forward test yapılıyor ve tahmin üretiliyor..."):
+            st.session_state[result_key] = future_price_ml_forecast(local_df, int(future_horizon))
+            st.session_state[f"{session_prefix}_future_price_horizon"] = int(future_horizon)
+
+    fp_result = st.session_state.get(result_key)
+    if fp_result and not fp_result.get("error"):
+        compare_df = fp_result["compare_df"].copy()
+        best_model_name = fp_result["best_model_name"]
+
+        st.subheader("🏁 Model Karşılaştırma Panosu")
+        st.dataframe(compare_df, use_container_width=True, height=220)
+
+        model_options = compare_df["Model"].tolist()
+        best_idx = model_options.index(best_model_name) if best_model_name in model_options else 0
+        selected_model_name = st.selectbox(
+            "Grafik ve detay için model seç",
+            options=model_options,
+            index=best_idx,
+            key=f"{session_prefix}_future_price_selected_model",
+            help="Sayfadaki tüm modeller görünür. Buradan seçtiğin modele göre grafik, olasılıklar ve önem sıralaması güncellenir.",
+        )
+        selected_model = fp_result["models"][selected_model_name]
+
+        fp_c1, fp_c2, fp_c3, fp_c4, fp_c5 = st.columns(5)
+        fp_c1.metric("Mevcut Kapanış", f"{selected_model['current_price']:.2f}")
+        fp_c2.metric(f"{int(fp_result['horizon_bars'])} Bar Sonrası Tahmin", f"{selected_model['predicted_price']:.2f}")
+        fp_c3.metric("Tahmini Değişim", f"{selected_model['delta_pct']:+.2f}%")
+        fp_c4.metric("Tahmin Bandı", f"{selected_model['predicted_low']:.2f} - {selected_model['predicted_high']:.2f}" if pd.notna(selected_model['predicted_low']) and pd.notna(selected_model['predicted_high']) else "N/A")
+        fp_c5.metric("Güven Skoru", f"{selected_model['confidence_score']:.1f}%" if pd.notna(selected_model['confidence_score']) else "N/A")
+
+        fp_m1, fp_m2, fp_m3, fp_m4 = st.columns(4)
+        fp_m1.metric("MAE", f"{selected_model['mae']:.4f}" if pd.notna(selected_model['mae']) else "N/A")
+        fp_m2.metric("RMSE", f"{selected_model['rmse']:.4f}" if pd.notna(selected_model['rmse']) else "N/A")
+        fp_m3.metric("MAPE", f"%{selected_model['mape']:.2f}" if pd.notna(selected_model['mape']) else "N/A")
+        fp_m4.metric("Eğitim/Test Satırı", f"{selected_model['train_rows']}/{selected_model['test_rows']}")
+
+        fp_p1, fp_p2, fp_p3, fp_p4 = st.columns(4)
+        fp_p1.metric("Yükseliş Olasılığı", f"%{selected_model['up_prob']:.1f}" if pd.notna(selected_model['up_prob']) else "N/A")
+        fp_p2.metric("Düşüş Olasılığı", f"%{selected_model['down_prob']:.1f}" if pd.notna(selected_model['down_prob']) else "N/A")
+        fp_p3.metric("Yatay Olasılığı", f"%{selected_model['flat_prob']:.1f}" if pd.notna(selected_model['flat_prob']) else "N/A")
+        fp_p4.metric("Yön Doğruluğu", f"%{selected_model['direction_acc']:.1f}" if pd.notna(selected_model['direction_acc']) else "N/A")
+
+        st.subheader("🌡️ Rejim Özeti")
+        rg1, rg2 = st.columns(2)
+        rg1.metric("Trend Rejimi", fp_result.get("trend_regime", "N/A"))
+        rg2.metric("Volatilite Rejimi", fp_result.get("vol_regime", "N/A"))
+
+        st.subheader("📈 Seçili Modele Göre Grafik")
+        future_fig = go.Figure()
+        recent_actual = selected_model.get("recent_actual")
+        test_actual_series = selected_model.get("test_actual_series")
+        test_pred_series = selected_model.get("test_pred_series")
+        if recent_actual is not None and not recent_actual.empty:
+            future_fig.add_trace(go.Scatter(x=recent_actual.index, y=recent_actual.values, name="Geçmiş Kapanış", line=dict(color="royalblue", width=2)))
+        if test_actual_series is not None and not test_actual_series.empty:
+            future_fig.add_trace(go.Scatter(x=test_actual_series.index, y=test_actual_series.values, name="Test Gerçek", line=dict(color="seagreen", width=2)))
+        if test_pred_series is not None and not test_pred_series.empty:
+            future_fig.add_trace(go.Scatter(x=test_pred_series.index, y=test_pred_series.values, name=f"{selected_model_name} Test Tahmini", line=dict(color="darkorange", width=2, dash="dot")))
+
+        future_x = recent_actual.index[-1] if recent_actual is not None and not recent_actual.empty else pd.Timestamp.now()
+        future_fig.add_trace(go.Scatter(
+            x=[future_x],
+            y=[selected_model['predicted_price']],
+            mode="markers",
+            name="Tahmini Gelecek Fiyat",
+            marker=dict(size=14, color="darkorange", symbol="diamond"),
+        ))
+        if pd.notna(selected_model['predicted_low']) and pd.notna(selected_model['predicted_high']):
+            future_fig.add_trace(go.Scatter(
+                x=[future_x, future_x],
+                y=[selected_model['predicted_low'], selected_model['predicted_high']],
+                mode="lines",
+                name="Tahmin Bandı",
+                line=dict(width=8, color="rgba(255,140,0,0.35)"),
+            ))
+            future_fig.add_hrect(
+                y0=selected_model['predicted_low'],
+                y1=selected_model['predicted_high'],
+                fillcolor="rgba(255,165,0,0.08)",
+                line_width=0,
+                annotation_text="Olası Fiyat Bandı",
+                annotation_position="top left",
+            )
+        future_fig.add_hline(y=selected_model['predicted_price'], line_dash="dash", line_color="darkorange", annotation_text=f"Tahmin: {selected_model['predicted_price']:.2f}")
+        future_fig.update_layout(height=460, title=f"Future Price Tahmini - {selected_model_name} ({int(fp_result['horizon_bars'])} bar sonrası)", xaxis_title="Tarih", yaxis_title="Fiyat")
+        st.plotly_chart(future_fig, use_container_width=True)
+
+        st.subheader("🧠 Feature Importance / Etki Sıralaması")
+        fi_df = selected_model.get("feature_importance_df")
+        if fi_df is not None and not fi_df.empty:
+            fi_fig = go.Figure()
+            fi_top = fi_df.head(12).iloc[::-1]
+            fi_fig.add_trace(go.Bar(x=fi_top["Importance"], y=fi_top["Feature"], orientation="h", name="Önem"))
+            fi_fig.update_layout(height=420, title=f"{selected_model_name} - En Etkili Özellikler", xaxis_title="Önem", yaxis_title="Feature")
+            st.plotly_chart(fi_fig, use_container_width=True)
+            st.dataframe(fi_df, use_container_width=True, height=260)
+        else:
+            st.info("Bu model için yorumlanabilir feature importance bilgisi üretilemedi.")
+
+        st.subheader("📏 Horizon Kalite Özeti")
+        horizon_quality_df = fp_result.get("horizon_quality_df")
+        if horizon_quality_df is not None and not horizon_quality_df.empty:
+            st.dataframe(horizon_quality_df, use_container_width=True, height=220)
+
+        st.info(
+            f"Seçili model `{selected_model_name}` son kullanılabilir barı `{selected_model['last_feature_index']}` üzerinden tahmin üretti. "
+            "Bu çıktı eğitim amaçlıdır; kesin fiyat bilgisi değildir. Sayfadaki ⭐ işaretli model, mevcut karşılaştırmada en düşük hata ile öne çıkmıştır."
+        )
+    elif fp_result and fp_result.get("error"):
+        st.warning(fp_result["error"])
+
+
+def _render_triple_screen_panel_for_symbol(
+    symbol: str,
+    display_name: str,
+    session_prefix: str,
+    live_override: bool,
+):
+    st.header("📺 Üçlü Ekran Trading Sistemi (Triple Screen)")
+    st.caption(f"{display_name} için Dr. Alexander Elder'in 3 Ekranlı sistemine dayanan trend, osilatör ve giriş seviyesi analizi.")
+
+    run_key = f"{session_prefix}_run_triple_screen"
+    if st.button("Üçlü Ekran Verilerini Getir ve Analiz Et", key=f"{session_prefix}_run_triple_btn"):
+        st.session_state[run_key] = True
+
+    if st.session_state.get(run_key, False):
+        with st.spinner("3 Ekran verileri hesaplanıyor (1W, 1D, 1H)..."):
+            df_1w = load_data_cached(symbol, "2y", "1wk")
+            df_1d = load_data_cached(symbol, "1y", "1d", force_latest=force_latest_candle)
+            df_1h = load_data_cached(symbol, "60d", "1h")
+
+            live_info_local = get_live_price(symbol)
+            live_price_local = live_info_local.get("last_price", np.nan)
+            if live_override:
+                df_1w = apply_live_last_override_to_df(df_1w, live_price_local)
+                df_1d = apply_live_last_override_to_df(df_1d, live_price_local)
+                df_1h = apply_live_last_override_to_df(df_1h, live_price_local)
+
+            if df_1w.empty or df_1d.empty or df_1h.empty:
+                st.error("Bazı zaman dilimleri için veri çekilemedi (API gecikmesi veya sembol kaynaklı sorun olabilir).")
+            else:
+                t_screen1, t_screen2, t_screen3 = st.tabs(["1. Ekran (Haftalık)", "2. Ekran (Günlük)", "3. Ekran (1 Saatlik)"])
+
+                with t_screen1:
+                    st.subheader("1. Ekran: Haftalık (Ana Trend)")
+                    _, _, m_hist = macd(df_1w["Close"])
+
+                    ema_1w_13 = ema(df_1w["Close"], 13)
+                    ema_1w_26 = ema(df_1w["Close"], 26)
+
+                    last_close_1w = df_1w["Close"].iloc[-1]
+                    if ema_1w_13.iloc[-1] > ema_1w_26.iloc[-1] and last_close_1w > ema_1w_13.iloc[-1]:
+                        ema1w_sig = "AL"
+                    elif ema_1w_13.iloc[-1] < ema_1w_26.iloc[-1] and last_close_1w < ema_1w_13.iloc[-1]:
+                        ema1w_sig = "SAT"
+                    else:
+                        ema1w_sig = "BEKLE"
+
+                    last_hist = float(m_hist.iloc[-1])
+                    prev_hist = float(m_hist.iloc[-2])
+                    slope_up = last_hist > prev_hist
+
+                    div_macd, macd_ago = check_bullish_divergence(df_1w["Close"], m_hist, volume=df_1w["Volume"])
+
+                    adx_1w, pdi_1w, mdi_1w = adx_indicator(df_1w["High"], df_1w["Low"], df_1w["Close"])
+                    adx_val_1w = adx_1w.iloc[-1]
+                    pdi_val_1w = pdi_1w.iloc[-1]
+                    mdi_val_1w = mdi_1w.iloc[-1]
+
+                    if adx_val_1w >= 25 and pdi_val_1w > mdi_val_1w:
+                        adx_sig_1w = "AL (Güçlü Trend)"
+                    elif adx_val_1w >= 25 and mdi_val_1w > pdi_val_1w:
+                        adx_sig_1w = "SAT (Güçlü Trend)"
+                    else:
+                        adx_sig_1w = "BEKLE (Zayıf Trend)"
+
+                    c1w_1, c1w_2, c1w_3 = st.columns(3)
+                    c1w_1.metric("MACD Histogram Eğimi", "YUKARI (AL Sinyali)" if slope_up else "AŞAĞI (SAT Sinyali)", f"{last_hist - prev_hist:.2f}")
+                    c1w_2.metric("Haftalık EMA (13-26)", ema1w_sig, f"EMA13: {ema_1w_13.iloc[-1]:.2f} | EMA26: {ema_1w_26.iloc[-1]:.2f}")
+                    c1w_3.metric("ADX (14)", adx_sig_1w, f"ADX: {adx_val_1w:.1f} | +DI: {pdi_val_1w:.1f} | -DI: {mdi_val_1w:.1f}")
+
+                    if div_macd:
+                        st.success(f"🚀 Sistem Haftalık MACD Histogramında **Pozitif Uyumsuzluk** tespit etti! ({macd_ago} bar önce)")
+
+                    fig1_price = go.Figure()
+                    fig1_price.add_trace(go.Candlestick(x=df_1w.index, open=df_1w["Open"], high=df_1w["High"], low=df_1w["Low"], close=df_1w["Close"], name="Fiyat"))
+                    fig1_price.add_trace(go.Scatter(x=df_1w.index, y=ema_1w_13, name="EMA 13", line=dict(color='blue')))
+                    fig1_price.add_trace(go.Scatter(x=df_1w.index, y=ema_1w_26, name="EMA 26", line=dict(color='red')))
+                    fig1_price.update_layout(title="Haftalık Fiyat ve EMA (13 & 26)", height=350, xaxis_rangeslider_visible=False)
+                    st.plotly_chart(fig1_price, use_container_width=True)
+
+                    fig1 = go.Figure()
+                    colors = ['green' if x > 0 else 'red' for x in m_hist.diff()]
+                    fig1.add_trace(go.Bar(x=df_1w.index, y=m_hist, name="MACD Hist", marker_color=colors))
+                    fig1.update_layout(title="Haftalık MACD Histogramı", height=250)
+                    st.plotly_chart(fig1, use_container_width=True)
+
+                    fig1_adx = go.Figure()
+                    fig1_adx.add_trace(go.Scatter(x=df_1w.index, y=adx_1w, name="ADX", line=dict(color='black', width=2.5)))
+                    fig1_adx.add_trace(go.Scatter(x=df_1w.index, y=pdi_1w, name="+DI", line=dict(color='green')))
+                    fig1_adx.add_trace(go.Scatter(x=df_1w.index, y=mdi_1w, name="-DI", line=dict(color='red')))
+                    fig1_adx.add_hline(y=25, line_dash="dash", line_color="gray", annotation_text="Trend Başlangıcı (25)")
+                    fig1_adx.add_hline(y=50, line_dash="dot", line_color="purple", annotation_text="Aşırı Güçlü Trend (50)")
+                    fig1_adx.add_hrect(y0=25, y1=100, fillcolor="rgba(0, 255, 0, 0.05)", layer="below", line_width=0)
+                    fig1_adx.add_hrect(y0=0, y1=25, fillcolor="rgba(255, 0, 0, 0.05)", layer="below", line_width=0)
+                    fig1_adx.update_layout(title="Haftalık ADX ve Yön Göstergeleri (+DI / -DI)", height=250)
+                    st.plotly_chart(fig1_adx, use_container_width=True)
+
+                with t_screen2:
+                    st.subheader("2. Ekran: Günlük (Osilatörler ve Sapmalar)")
+                    ema_1d_11 = ema(df_1d["Close"], 11)
+                    ema_1d_22 = ema(df_1d["Close"], 22)
+
+                    last_close_1d = df_1d["Close"].iloc[-1]
+                    if ema_1d_11.iloc[-1] > ema_1d_22.iloc[-1] and last_close_1d > ema_1d_11.iloc[-1]:
+                        ema1d_sig = "AL"
+                    elif ema_1d_11.iloc[-1] < ema_1d_22.iloc[-1] and last_close_1d < ema_1d_11.iloc[-1]:
+                        ema1d_sig = "SAT"
+                    else:
+                        ema1d_sig = "BEKLE"
+
+                    st.metric("Günlük EMA (11-22)", ema1d_sig, f"EMA11: {ema_1d_11.iloc[-1]:.2f} | EMA22: {ema_1d_22.iloc[-1]:.2f}")
+
+                    fi = force_index(df_1d["Close"], df_1d["Volume"])
+                    fi_ema13 = ema(fi, 13)
+                    fi_ema2 = ema(fi, 2)
+
+                    rsi13 = rsi(df_1d["Close"], 13)
+                    stoch_k, _ = stochastic(df_1d["High"], df_1d["Low"], df_1d["Close"], k_period=5, d_period=3)
+                    er_ema, bull_p, bear_p = elder_ray(df_1d["High"], df_1d["Low"], df_1d["Close"], 13)
+
+                    fi_al = (fi.iloc[-1] > fi_ema13.iloc[-1]) and (fi_ema2.iloc[-1] < 0)
+                    rsi_al = (rsi13.iloc[-1] < 30)
+                    stoch_al = (stoch_k.iloc[-1] < 20)
+
+                    er_ema_up = (er_ema.iloc[-1] > er_ema.iloc[-2])
+                    bp_neg_but_rising = (bear_p.iloc[-1] < 0) and (bear_p.iloc[-1] > bear_p.iloc[-2])
+                    er_al = er_ema_up and bp_neg_but_rising
+
+                    div_rsi, rsi_ago = check_bullish_divergence(df_1d["Close"], rsi13, volume=df_1d["Volume"])
+                    div_stoch, stoch_ago = check_bullish_divergence(df_1d["Close"], stoch_k, volume=df_1d["Volume"])
+                    div_er, er_ago = check_bullish_divergence(df_1d["Close"], bear_p, volume=df_1d["Volume"])
+                    div_er_bear, er_bear_ago = check_bearish_divergence(df_1d["Close"], bull_p, volume=df_1d["Volume"])
+
+                    adx_1d, pdi_1d, mdi_1d = adx_indicator(df_1d["High"], df_1d["Low"], df_1d["Close"])
+                    adx_val_1d = adx_1d.iloc[-1]
+                    pdi_val_1d = pdi_1d.iloc[-1]
+                    mdi_val_1d = mdi_1d.iloc[-1]
+
+                    if adx_val_1d >= 25 and pdi_val_1d > mdi_val_1d:
+                        adx_sig_1d = "AL (Güçlü Trend)"
+                    elif adx_val_1d >= 25 and mdi_val_1d > pdi_val_1d:
+                        adx_sig_1d = "SAT (Güçlü Trend)"
+                    else:
+                        adx_sig_1d = "BEKLE (Zayıf Trend)"
+
+                    c1, c2, c3, c4, c5 = st.columns(5)
+                    c1.metric("Kuvvet Endeksi (FI)", "AL" if fi_al else "BEKLE", "2 EMA Negatif & Yukarı Dönüş" if fi_al else "")
+                    c2.metric("RSI (13)", "AL" if rsi_al else "BEKLE", f"{rsi13.iloc[-1]:.1f}")
+                    c3.metric("Stokastik (5)", "AL" if stoch_al else "BEKLE", f"{stoch_k.iloc[-1]:.1f}")
+                    c4.metric("Elder-Ray", "AL" if er_al else "BEKLE")
+                    c5.metric("ADX (14)", adx_sig_1d, f"ADX: {adx_val_1d:.1f} | +DI: {pdi_val_1d:.1f}")
+
+                    if div_rsi:
+                        st.success(f"🚀 RSI(13)'te **Pozitif Uyumsuzluk** tespit edildi! ({rsi_ago} bar önce)")
+                    if div_stoch:
+                        st.success(f"🚀 Stokastik(5)'te **Pozitif Uyumsuzluk** tespit edildi! ({stoch_ago} bar önce)")
+                    if div_er:
+                        st.success(f"🚀 Elder-Ray Bear Power'da **Pozitif Uyumsuzluk (Boğa Uyumsuzluğu)** tespit edildi! ({er_ago} bar önce)")
+                    if div_er_bear:
+                        st.warning(f"⚠️ Elder-Ray Bull Power'da **Negatif Uyumsuzluk (Ayı Uyumsuzluğu)** tespit edildi! ({er_bear_ago} bar önce)")
+
+                    fig2_price = go.Figure()
+                    fig2_price.add_trace(go.Candlestick(x=df_1d.index, open=df_1d["Open"], high=df_1d["High"], low=df_1d["Low"], close=df_1d["Close"], name="Fiyat"))
+                    fig2_price.add_trace(go.Scatter(x=df_1d.index, y=ema_1d_11, name="EMA 11", line=dict(color='blue')))
+                    fig2_price.add_trace(go.Scatter(x=df_1d.index, y=ema_1d_22, name="EMA 22", line=dict(color='red')))
+                    fig2_price.update_layout(title="Günlük Fiyat ve EMA (11 & 22)", height=350, xaxis_rangeslider_visible=False)
+                    st.plotly_chart(fig2_price, use_container_width=True)
+
+                    fig2_fi = go.Figure()
+                    fig2_fi.add_trace(go.Scatter(x=df_1d.index, y=fi_ema13, name="FI 13 EMA", line=dict(color='orange')))
+                    fig2_fi.add_trace(go.Bar(x=df_1d.index, y=fi_ema2, name="FI 2 EMA", marker_color='gray'))
+                    fig2_fi.update_layout(title="Kuvvet Endeksi (Force Index)", height=250)
+                    st.plotly_chart(fig2_fi, use_container_width=True)
+
+                    fig2_er = go.Figure()
+                    fig2_er.add_trace(go.Bar(x=df_1d.index, y=bull_p, name="Bull Power", marker_color='green'))
+                    fig2_er.add_trace(go.Bar(x=df_1d.index, y=bear_p, name="Bear Power", marker_color='red'))
+                    fig2_er.update_layout(title="Elder-Ray (Bull & Bear Power)", height=250)
+                    st.plotly_chart(fig2_er, use_container_width=True)
+
+                    fig2_adx = go.Figure()
+                    fig2_adx.add_trace(go.Scatter(x=df_1d.index, y=adx_1d, name="ADX", line=dict(color='black', width=2.5)))
+                    fig2_adx.add_trace(go.Scatter(x=df_1d.index, y=pdi_1d, name="+DI", line=dict(color='green')))
+                    fig2_adx.add_trace(go.Scatter(x=df_1d.index, y=mdi_1d, name="-DI", line=dict(color='red')))
+                    fig2_adx.add_hline(y=25, line_dash="dash", line_color="gray", annotation_text="Trend Başlangıcı (25)")
+                    fig2_adx.add_hline(y=50, line_dash="dot", line_color="purple", annotation_text="Aşırı Güçlü Trend (50)")
+                    fig2_adx.add_hrect(y0=25, y1=100, fillcolor="rgba(0, 255, 0, 0.05)", layer="below", line_width=0)
+                    fig2_adx.add_hrect(y0=0, y1=25, fillcolor="rgba(255, 0, 0, 0.05)", layer="below", line_width=0)
+                    fig2_adx.update_layout(title="Günlük ADX ve Yön Göstergeleri (+DI / -DI)", height=250)
+                    st.plotly_chart(fig2_adx, use_container_width=True)
+
+                with t_screen3:
+                    st.subheader("3. Ekran: 1 Saatlik (Giriş / Çıkış ve Hedefler)")
+                    adx_1h, pdi_1h, mdi_1h = adx_indicator(df_1h["High"], df_1h["Low"], df_1h["Close"])
+                    adx_val_1h = adx_1h.iloc[-1]
+                    pdi_val_1h = pdi_1h.iloc[-1]
+                    mdi_val_1h = mdi_1h.iloc[-1]
+
+                    if adx_val_1h >= 25 and pdi_val_1h > mdi_val_1h:
+                        adx_sig_1h = "AL (Güçlü Trend)"
+                    elif adx_val_1h >= 25 and mdi_val_1h > pdi_val_1h:
+                        adx_sig_1h = "SAT (Güçlü Trend)"
+                    else:
+                        adx_sig_1h = "BEKLE (Zayıf Trend)"
+
+                    st.metric("1 Saatlik ADX (14)", adx_sig_1h, f"ADX: {adx_val_1h:.1f} | +DI: {pdi_val_1h:.1f} | -DI: {mdi_val_1h:.1f}")
+
+                    ema_1h = ema(df_1h["Close"], 13)
+                    atr_1h = atr(df_1h["High"], df_1h["Low"], df_1h["Close"], 14)
+                    last_atr_1h = float(atr_1h.iloc[-1]) if not pd.isna(atr_1h.iloc[-1]) else 0.0
+
+                    pens = ema_1h - df_1h["Low"]
+                    pens_positive = pens[pens > 0]
+                    avg_pen = float(pens_positive.mean()) if not pens_positive.empty else 0.0
+
+                    up_pens = df_1h["High"] - ema_1h
+                    up_pens_positive = up_pens[up_pens > 0]
+                    avg_up_pen = float(up_pens_positive.mean()) if not up_pens_positive.empty else 0.0
+
+                    ema_today = float(ema_1h.iloc[-1])
+                    ema_yest = float(ema_1h.iloc[-2])
+                    ema_delta = ema_today - ema_yest
+                    ema_est_tmrw = ema_today + ema_delta
+
+                    buy_level = ema_est_tmrw - avg_pen
+                    stop_loss = buy_level - (1.5 * last_atr_1h) if last_atr_1h > 0 else buy_level * 0.98
+                    risk = buy_level - stop_loss
+
+                    target_1 = ema_est_tmrw + avg_up_pen
+                    target_2 = buy_level + (risk * 2)
+
+                    st.markdown(f"""
+                    **Hesaplamalar ve Strateji (Buy Limit & Hedefler):**
+                    * 📌 **Güncel EMA (13):** {ema_today:.2f} | **Yarınki Tahmini EMA:** {ema_est_tmrw:.2f}
+                    * 🟢 **Önerilen Alış Seviyesi (Buy Limit): {buy_level:.2f}** *(Ortalama {avg_pen:.2f} düşüş penetrasyonu ile)*
+                    * 🔴 **Zarar Kes (Stop-Loss): {stop_loss:.2f}** *(Alışın 1.5 ATR altı. Risk: {risk:.2f})*
+                    * 🎯 **Hedef 1 (Kısa Vade): {target_1:.2f}** *(Simetrik Yükseliş Penetrasyonu)*
+                    * 🚀 **Hedef 2 (Trend - 1:2 RR): {target_2:.2f}** *(Riske edilen tutarın 2 katı kazanç)*
+                    """)
+
+                    fig3 = go.Figure()
+                    fig3.add_trace(go.Candlestick(x=df_1h.index, open=df_1h["Open"], high=df_1h["High"], low=df_1h["Low"], close=df_1h["Close"], name="Price"))
+                    fig3.add_trace(go.Scatter(x=df_1h.index, y=ema_1h, name="EMA 13", line=dict(color='blue')))
+
+                    last_time = df_1h.index[-1]
+                    next_time = last_time + pd.Timedelta(hours=1)
+                    fig3.add_trace(go.Scatter(x=[next_time], y=[ema_est_tmrw], mode='markers', marker=dict(size=10, color='orange'), name="Tahmini EMA"))
+
+                    fig3.add_hline(y=target_2, line_dash="dash", line_color="darkgreen", annotation_text="Hedef 2 (1:2 RR)", annotation_position="top left")
+                    fig3.add_hline(y=target_1, line_dash="dashdot", line_color="cyan", annotation_text="Hedef 1 (Simetrik)", annotation_position="top left")
+                    fig3.add_hline(y=buy_level, line_dash="dash", line_color="lime", annotation_text="Limit Alış Seviyesi", annotation_position="bottom left")
+                    fig3.add_hline(y=stop_loss, line_dash="dot", line_color="red", annotation_text="Stop-Loss (1.5 ATR)", annotation_position="bottom left")
+
+                    fig3.update_layout(title="1 Saatlik Giriş/Çıkış Stratejisi (Alış, Hedef ve Stop)", height=450, xaxis_rangeslider_visible=False)
+                    st.plotly_chart(fig3, use_container_width=True)
+
+                    fig3_adx = go.Figure()
+                    fig3_adx.add_trace(go.Scatter(x=df_1h.index, y=adx_1h, name="ADX", line=dict(color='black', width=2.5)))
+                    fig3_adx.add_trace(go.Scatter(x=df_1h.index, y=pdi_1h, name="+DI", line=dict(color='green')))
+                    fig3_adx.add_trace(go.Scatter(x=df_1h.index, y=mdi_1h, name="-DI", line=dict(color='red')))
+                    fig3_adx.add_hline(y=25, line_dash="dash", line_color="gray", annotation_text="Trend Başlangıcı (25)")
+                    fig3_adx.add_hline(y=50, line_dash="dot", line_color="purple", annotation_text="Aşırı Güçlü Trend (50)")
+                    fig3_adx.add_hrect(y0=25, y1=100, fillcolor="rgba(0, 255, 0, 0.05)", layer="below", line_width=0)
+                    fig3_adx.add_hrect(y0=0, y1=25, fillcolor="rgba(255, 0, 0, 0.05)", layer="below", line_width=0)
+                    fig3_adx.update_layout(title="1 Saatlik ADX ve Yön Göstergeleri (+DI / -DI)", height=250)
+                    st.plotly_chart(fig3_adx, use_container_width=True)
+
+
+tab_dash, tab_triple, tab_indicator_stats, tab_future, tab_chart_patterns, tab_financials, tab_history_range, tab_index_center, tab_calendar, tab_social, tab_heatmap, tab_export, tab_scan = st.tabs(["📊 Dashboard", "📺 3 Ekranlı Sistem", "📈 İndikatör İstatistik", "🔮 Future Price", "📐 Grafik Formasyonları", "📘 Bilanço Analizi", "🕰️ Tarih Aralığı Analizi", "📉 BIST Endeks Merkezi", "🗓️ Ekonomik Takvim", "📣 X + YouTube Trends", "🔥 Sektörel Heatmap", "📄 Rapor (PDF/HTML)", "🔍 Tarama"])
 
 with tab_dash:
     if "app_errors" in st.session_state and st.session_state.app_errors:
@@ -7003,6 +7641,73 @@ with tab_history_range:
                 hp2.metric("POC Uzaklık %", f"{hist_poc_dist:+.2f}%" if np.isfinite(hist_poc_dist) else "N/A")
                 hp3.metric("Profil Bar Sayısı", f"{len(history_df)}")
                 st.plotly_chart(hist_vpvr_fig, use_container_width=True)
+
+
+with tab_index_center:
+    st.header("📉 BIST Endeks Merkezi")
+    st.caption("BIST 30, BIST 100 ve BIST Tüm endeksleri için dashboard benzeri teknik görünüm, 3 Ekranlı Sistem ve Future Price panelleri.")
+
+    index_map = _bist_index_mapping()
+    index_labels = list(index_map.keys())
+    default_index_label = "BIST 100" if "BIST 100" in index_labels else index_labels[0]
+
+    selected_index_label = st.selectbox(
+        "Endeks Seç",
+        options=index_labels,
+        index=index_labels.index(default_index_label),
+        key="bist_index_center_select",
+    )
+    selected_index_ticker = index_map[selected_index_label]
+
+    state_symbol_key = "bist_index_center_last_symbol"
+    if st.session_state.get(state_symbol_key) != selected_index_ticker:
+        st.session_state[state_symbol_key] = selected_index_ticker
+        for k in [
+            "bist_index_center_future_price_result",
+            "bist_index_center_future_price_horizon",
+            "bist_index_center_future_price_selected_model",
+            "bist_index_center_run_triple_screen",
+        ]:
+            st.session_state.pop(k, None)
+
+    with st.spinner(f"{selected_index_label} verileri hazırlanıyor..."):
+        index_ctx = _prepare_dashboard_context_for_symbol(
+            selected_index_ticker,
+            cfg=cfg,
+            current_interval=interval,
+            current_period=period,
+            end_date=custom_end_date,
+            force_latest=force_latest_candle,
+            live_override=use_live_last_override,
+            use_market_filter=use_bist_filter,
+            use_htf_filter=use_higher_tf_filter,
+            risk_free_rate=risk_free_annual,
+        )
+
+    idx_sub_dash, idx_sub_triple, idx_sub_future = st.tabs(["📊 Dashboard", "📺 3 Ekranlı Sistem", "🔮 Future Price"])
+
+    with idx_sub_dash:
+        _render_dashboard_like_context(index_ctx, selected_index_label, interval, period)
+
+    with idx_sub_triple:
+        _render_triple_screen_panel_for_symbol(
+            selected_index_ticker,
+            selected_index_label,
+            session_prefix="bist_index_center",
+            live_override=use_live_last_override,
+        )
+
+    with idx_sub_future:
+        if index_ctx.get("error"):
+            st.warning(index_ctx["error"])
+        else:
+            _render_future_price_panel_for_df(
+                index_ctx["df"],
+                selected_index_label,
+                interval,
+                period,
+                session_prefix="bist_index_center",
+            )
 
 with tab_triple:
     st.header("📺 Üçlü Ekran Trading Sistemi (Triple Screen)")
