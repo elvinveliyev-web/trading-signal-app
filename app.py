@@ -17,8 +17,10 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 import requests
-from sklearn.linear_model import Ridge, LinearRegression
+from sklearn.linear_model import Ridge, LinearRegression, RANSACRegressor
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.cluster import KMeans
+from scipy.stats import linregress
 
 # =============================
 # OPTIONAL PDF SUPPORT (ReportLab)
@@ -1183,22 +1185,43 @@ def analyze_sr_levels(df: pd.DataFrame, lookback: int = 200, tol=0.02) -> List[d
     hs, ls = _swing_points(h, l, left=3, right=3)
     raw_levels = [val for _, val in hs] + [val for _, val in ls]
     raw_levels += [float(c.tail(20).max()), float(c.tail(20).min())]
-    raw_levels = sorted(list(set([round(float(x), 2) for x in raw_levels if np.isfinite(x)])))
+    raw_levels = [float(x) for x in raw_levels if np.isfinite(x)]
 
     if not raw_levels:
         return []
 
-    clusters = []
-    for rl in raw_levels:
+    cluster_centers: List[float] = []
+
+    # 1D K-Means clustering (Gemini önerisi) — güvenilir yatay seviye piklerini daha net çıkarır
+    try:
+        unique_levels = sorted(set(round(x, 4) for x in raw_levels))
+        if len(unique_levels) >= 3:
+            n_clusters = int(min(max(3, len(unique_levels) // 3), 8, len(unique_levels)))
+            km = KMeans(n_clusters=n_clusters, n_init=10, random_state=42)
+            arr = np.array(unique_levels, dtype=float).reshape(-1, 1)
+            km.fit(arr)
+            cluster_centers.extend([float(x) for x in km.cluster_centers_.flatten()])
+    except Exception:
+        pass
+
+    # Fallback / hibrit: adaptif cluster mantığını da koru
+    adaptive_clusters = []
+    for rl in sorted(set(round(float(x), 2) for x in raw_levels)):
         placed = False
-        for cl in clusters:
+        for cl in adaptive_clusters:
             if cl["center"] != 0 and abs(rl - cl["center"]) / abs(cl["center"]) <= tol:
-                cl["points"].append(rl)
+                cl["points"].append(float(rl))
                 cl["center"] = float(np.mean(cl["points"]))
                 placed = True
                 break
         if not placed:
-            clusters.append({"center": float(rl), "points": [float(rl)]})
+            adaptive_clusters.append({"center": float(rl), "points": [float(rl)]})
+
+    cluster_centers.extend([float(cl["center"]) for cl in adaptive_clusters])
+    cluster_centers = sorted(set(round(x, 2) for x in cluster_centers if np.isfinite(x)))
+
+    if not cluster_centers:
+        return []
 
     avg_vol_normal = float(v.mean()) if not v.empty else 1.0
     if avg_vol_normal <= 0:
@@ -1207,8 +1230,7 @@ def analyze_sr_levels(df: pd.DataFrame, lookback: int = 200, tol=0.02) -> List[d
     details = []
     df_lookback = df.tail(lookback)
 
-    for cl in clusters:
-        level_px = float(cl["center"])
+    for level_px in cluster_centers:
         lower_bound = level_px * (1 - tol / 2)
         upper_bound = level_px * (1 + tol / 2)
 
@@ -1232,11 +1254,10 @@ def analyze_sr_levels(df: pd.DataFrame, lookback: int = 200, tol=0.02) -> List[d
         score_touches = min(num_touches * 10, 40)
         score_vol = min(max(vol_diff_pct / 2.0, 0), 35)
         score_dur = min(duration_bars / 2.0, 25)
-
         strength_pct = min(score_touches + score_vol + score_dur, 99.0)
 
         details.append({
-            "price": round(level_px, 2),
+            "price": round(float(level_px), 2),
             "duration_bars": int(duration_bars),
             "vol_at_level": float(vol_at_level),
             "vol_diff_pct": float(vol_diff_pct),
@@ -1245,7 +1266,6 @@ def analyze_sr_levels(df: pd.DataFrame, lookback: int = 200, tol=0.02) -> List[d
         })
 
     return sorted(details, key=lambda x: x["price"])
-
 
 
 def target_price_band(df: pd.DataFrame):
@@ -1303,6 +1323,134 @@ def target_price_band(df: pd.DataFrame):
 
 
 
+def _get_line_body_arrays(subset: pd.DataFrame) -> Tuple[pd.Series, pd.Series]:
+    body_low = subset[["Open", "Close"]].min(axis=1).astype(float) if {"Open", "Close"}.issubset(subset.columns) else subset["Close"].astype(float)
+    body_high = subset[["Open", "Close"]].max(axis=1).astype(float) if {"Open", "Close"}.issubset(subset.columns) else subset["Close"].astype(float)
+    return body_low, body_high
+
+
+def _count_line_touches(
+    subset: pd.DataFrame,
+    pivot_points: List[Tuple[pd.Timestamp, float]],
+    slope: float,
+    intercept: float,
+    touch_tol_pct: float = 0.01,
+) -> List[Tuple[pd.Timestamp, float, int, float]]:
+    touched = []
+    for tp, pp in pivot_points:
+        try:
+            xp = subset.index.get_loc(tp)
+        except Exception:
+            continue
+        y_hat = float(intercept) + float(slope) * float(xp)
+        denom = max(abs(float(pp)), 1e-9)
+        if abs(float(pp) - y_hat) / denom <= touch_tol_pct:
+            touched.append((tp, float(pp), int(xp), float(y_hat)))
+    return touched
+
+
+def _line_break_stats(
+    subset: pd.DataFrame,
+    slope: float,
+    intercept: float,
+    line_kind: str = "support",
+    start_x: int = 0,
+    break_tol_pct: float = 0.003,
+) -> Dict[str, Any]:
+    body_low, body_high = _get_line_body_arrays(subset)
+    x_arr = np.arange(len(subset), dtype=float)
+    y_line = float(intercept) + float(slope) * x_arr
+    seg = slice(max(0, int(start_x)), len(subset))
+
+    if line_kind == "support":
+        diff = body_low.iloc[seg].values - y_line[seg]
+        violations = diff < (-np.maximum(np.abs(y_line[seg]), 1e-9) * break_tol_pct)
+    else:
+        diff = y_line[seg] - body_high.iloc[seg].values
+        violations = diff < (-np.maximum(np.abs(y_line[seg]), 1e-9) * break_tol_pct)
+
+    violation_count = int(np.sum(violations))
+    worst_break = float(diff.min()) if len(diff) > 0 else 0.0
+    return {
+        "violation_count": violation_count,
+        "worst_break": worst_break,
+    }
+
+
+def _evaluate_line_candidate(
+    subset: pd.DataFrame,
+    pivot_points: List[Tuple[pd.Timestamp, float]],
+    slope: float,
+    intercept: float,
+    line_kind: str,
+    touch_tol_pct: float,
+    break_tol_pct: float,
+    source: str,
+    anchor_t1: Optional[pd.Timestamp] = None,
+    anchor_p1: Optional[float] = None,
+    min_required_touches: int = 3,
+    base_r2: Optional[float] = None,
+    extra_score: float = 0.0,
+) -> Optional[Dict[str, Any]]:
+    if subset is None or subset.empty or len(pivot_points) < 2:
+        return None
+
+    touched = _count_line_touches(subset, pivot_points, slope, intercept, touch_tol_pct=touch_tol_pct)
+    if len(touched) < max(2, min_required_touches):
+        return None
+
+    touched_x = np.array([x for _, _, x, _ in touched], dtype=float)
+    touched_y = np.array([p for _, p, _, _ in touched], dtype=float)
+
+    if len(np.unique(touched_x)) < 2:
+        return None
+
+    y_fit = float(intercept) + float(slope) * touched_x
+    ss_res = float(np.sum((touched_y - y_fit) ** 2))
+    ss_tot = float(np.sum((touched_y - np.mean(touched_y)) ** 2))
+    touch_r2 = 1.0 if ss_tot <= 1e-12 else max(0.0, 1.0 - (ss_res / ss_tot))
+    r2_final = float(max(base_r2 if base_r2 is not None else 0.0, touch_r2))
+
+    if source in {"linregress", "ransac"} and r2_final < 0.80:
+        return None
+
+    break_stats = _line_break_stats(
+        subset,
+        slope=slope,
+        intercept=intercept,
+        line_kind=line_kind,
+        start_x=int(np.min(touched_x)),
+        break_tol_pct=break_tol_pct,
+    )
+    if break_stats["violation_count"] > 0:
+        return None
+
+    recent_bonus = float(np.max(touched_x)) / max(1.0, float(len(subset) - 1))
+    score = (
+        len(touched) * 100.0
+        + r2_final * 60.0
+        + recent_bonus * 10.0
+        + float(extra_score)
+    )
+
+    first_touch = min(touched, key=lambda x: x[2])
+
+    return {
+        "x1": int(first_touch[2]),
+        "x2": int(np.max(touched_x)),
+        "t1": anchor_t1 if anchor_t1 is not None else first_touch[0],
+        "t2": max(touched, key=lambda x: x[2])[0],
+        "p1": float(anchor_p1) if anchor_p1 is not None else float(first_touch[1]),
+        "p2": float(max(touched, key=lambda x: x[2])[1]),
+        "slope": float(slope),
+        "intercept": float(intercept),
+        "touches": int(len(touched)),
+        "r2": float(r2_final),
+        "score": float(score),
+        "source": source,
+    }
+
+
 def _build_trendline_candidates(
     subset: pd.DataFrame,
     pivot_points: List[Tuple[pd.Timestamp, float]],
@@ -1318,16 +1466,13 @@ def _build_trendline_candidates(
     if len(pivots) < 2:
         return None
 
-    body_low = subset[["Open", "Close"]].min(axis=1).astype(float) if {"Open", "Close"}.issubset(subset.columns) else subset["Close"].astype(float)
-    body_high = subset[["Open", "Close"]].max(axis=1).astype(float) if {"Open", "Close"}.issubset(subset.columns) else subset["Close"].astype(float)
+    candidates: List[Dict[str, Any]] = []
 
-    best = None
-
+    # 1) Geçerli pivot kombinasyonlarını dene
     for i in range(len(pivots) - 1):
         for j in range(i + 1, len(pivots)):
             t1, p1 = pivots[i]
             t2, p2 = pivots[j]
-
             try:
                 x1 = subset.index.get_loc(t1)
                 x2 = subset.index.get_loc(t2)
@@ -1340,62 +1485,99 @@ def _build_trendline_candidates(
             slope = (float(p2) - float(p1)) / float(x2 - x1)
             intercept = float(p1) - slope * float(x1)
 
-            x_arr = np.arange(len(subset), dtype=float)
-            y_line = intercept + slope * x_arr
+            cand = _evaluate_line_candidate(
+                subset,
+                pivots,
+                slope=slope,
+                intercept=intercept,
+                line_kind=line_kind,
+                touch_tol_pct=touch_tol_pct,
+                break_tol_pct=break_tol_pct,
+                source="pivot_combo",
+                anchor_t1=t1,
+                anchor_p1=float(p1),
+                min_required_touches=3,
+            )
+            if cand is not None:
+                candidates.append(cand)
 
-            seg_slice = slice(x1, len(subset))
-            if line_kind == "support":
-                worst_break = float((body_low.iloc[seg_slice].values - y_line[seg_slice]).min())
-                if worst_break < (-abs(float(p1)) * break_tol_pct):
-                    continue
-            else:
-                worst_break = float((y_line[seg_slice] - body_high.iloc[seg_slice].values).min())
-                if worst_break < (-abs(float(p1)) * break_tol_pct):
-                    continue
+    # Son 5 majör pivot üzerinden SciPy linregress
+    reg_pivots = pivots[-5:] if len(pivots) >= 3 else pivots
+    if len(reg_pivots) >= 3:
+        try:
+            rx = np.array([float(subset.index.get_loc(t)) for t, _ in reg_pivots], dtype=float)
+            ry = np.array([float(p) for _, p in reg_pivots], dtype=float)
+            if len(np.unique(rx)) >= 2:
+                slope, intercept, r_value, p_value, std_err = linregress(rx, ry)
+                reg_r2 = float(max(0.0, r_value ** 2))
+                cand = _evaluate_line_candidate(
+                    subset,
+                    pivots,
+                    slope=float(slope),
+                    intercept=float(intercept),
+                    line_kind=line_kind,
+                    touch_tol_pct=touch_tol_pct,
+                    break_tol_pct=break_tol_pct,
+                    source="linregress",
+                    anchor_t1=reg_pivots[0][0],
+                    anchor_p1=float(reg_pivots[0][1]),
+                    min_required_touches=3,
+                    base_r2=reg_r2,
+                    extra_score=5.0,
+                )
+                if cand is not None:
+                    candidates.append(cand)
+        except Exception:
+            pass
 
-            touched = []
-            for tp, pp in pivots:
-                try:
-                    xp = subset.index.get_loc(tp)
-                except Exception:
-                    continue
-                y_hat = intercept + slope * float(xp)
-                denom = max(abs(float(pp)), 1e-9)
-                if abs(float(pp) - y_hat) / denom <= touch_tol_pct:
-                    touched.append((tp, float(pp), xp, y_hat))
+        # RANSAC ile aykırı pivotları filtrelemeye çalış
+        try:
+            rx = np.array([float(subset.index.get_loc(t)) for t, _ in reg_pivots], dtype=float).reshape(-1, 1)
+            ry = np.array([float(p) for _, p in reg_pivots], dtype=float)
+            if len(np.unique(rx.flatten())) >= 2:
+                ransac = RANSACRegressor(
+                    estimator=LinearRegression(),
+                    min_samples=max(2, min(3, len(reg_pivots))),
+                    random_state=42,
+                )
+                ransac.fit(rx, ry)
+                slope = float(ransac.estimator_.coef_[0])
+                intercept = float(ransac.estimator_.intercept_)
+                inlier_ratio = float(np.mean(ransac.inlier_mask_)) if hasattr(ransac, "inlier_mask_") and ransac.inlier_mask_ is not None else 0.0
+                y_pred = ransac.predict(rx)
+                ss_res = float(np.sum((ry - y_pred) ** 2))
+                ss_tot = float(np.sum((ry - np.mean(ry)) ** 2))
+                reg_r2 = 1.0 if ss_tot <= 1e-12 else max(0.0, 1.0 - (ss_res / ss_tot))
+                cand = _evaluate_line_candidate(
+                    subset,
+                    pivots,
+                    slope=slope,
+                    intercept=intercept,
+                    line_kind=line_kind,
+                    touch_tol_pct=touch_tol_pct,
+                    break_tol_pct=break_tol_pct,
+                    source="ransac",
+                    anchor_t1=reg_pivots[0][0],
+                    anchor_p1=float(reg_pivots[0][1]),
+                    min_required_touches=3,
+                    base_r2=reg_r2,
+                    extra_score=inlier_ratio * 15.0,
+                )
+                if cand is not None:
+                    cand["inlier_ratio"] = float(inlier_ratio)
+                    candidates.append(cand)
+        except Exception:
+            pass
 
-            if len(touched) < 2:
-                continue
+    if not candidates:
+        return None
 
-            touched_x = np.array([x for _, _, x, _ in touched], dtype=float)
-            touched_y = np.array([p for _, p, _, _ in touched], dtype=float)
-            y_fit = intercept + slope * touched_x
-
-            ss_res = float(np.sum((touched_y - y_fit) ** 2))
-            ss_tot = float(np.sum((touched_y - np.mean(touched_y)) ** 2))
-            r2 = 1.0 if ss_tot <= 1e-12 else max(0.0, 1.0 - (ss_res / ss_tot))
-
-            recent_bonus = float(touched_x.max()) / max(1.0, float(len(subset) - 1))
-            score = (len(touched) * 100.0) + (r2 * 40.0) + (recent_bonus * 10.0)
-
-            candidate = {
-                "x1": int(x1),
-                "x2": int(x2),
-                "t1": t1,
-                "t2": t2,
-                "p1": float(p1),
-                "p2": float(p2),
-                "slope": float(slope),
-                "intercept": float(intercept),
-                "touches": len(touched),
-                "r2": float(r2),
-                "score": float(score),
-            }
-
-            if best is None or candidate["score"] > best["score"]:
-                best = candidate
-
-    return best
+    candidates = sorted(
+        candidates,
+        key=lambda x: (x.get("touches", 0), x.get("r2", 0.0), x.get("score", 0.0)),
+        reverse=True,
+    )
+    return candidates[0]
 
 
 def add_support_resistance_trend_overlays(fig: go.Figure, plot_df: pd.DataFrame, lookback: int = 220) -> go.Figure:
@@ -1454,7 +1636,7 @@ def add_support_resistance_trend_overlays(fig: go.Figure, plot_df: pd.DataFrame,
                 x=[support_line["t1"], subset.index[-1]],
                 y=[support_line["p1"], float(y_last)],
                 mode="lines",
-                name="Destek Trendi",
+                name=f"Destek Trendi ({support_line.get('source','trend')})",
                 line=dict(color="green", dash="dash", width=3 if support_line["touches"] >= 3 else 2),
             ))
 
@@ -1473,147 +1655,13 @@ def add_support_resistance_trend_overlays(fig: go.Figure, plot_df: pd.DataFrame,
                 x=[resistance_line["t1"], subset.index[-1]],
                 y=[resistance_line["p1"], float(y_last)],
                 mode="lines",
-                name="Direnç Trendi",
+                name=f"Direnç Trendi ({resistance_line.get('source','trend')})",
                 line=dict(color="red", dash="dash", width=3 if resistance_line["touches"] >= 3 else 2),
             ))
     except Exception:
         pass
 
     return fig
-
-
-    use = plot_df.tail(min(len(plot_df), int(lookback))).copy()
-    if use.empty:
-        return fig
-
-    try:
-        base_px = float(use["Close"].iloc[-1])
-
-        sr_levels = analyze_sr_levels(use, lookback=min(len(use), 200), tol=0.02)
-        below = [lv for lv in sr_levels if lv["price"] < base_px]
-        above = [lv for lv in sr_levels if lv["price"] > base_px]
-
-        near_supports = sorted(below, key=lambda x: abs(base_px - x["price"]))[:2]
-        near_resistances = sorted(above, key=lambda x: abs(x["price"] - base_px))[:2]
-
-        for lv in near_supports:
-            fig.add_hline(
-                y=float(lv["price"]),
-                line_dash="dot",
-                line_color="green",
-                annotation_text=f"Destek {lv['price']:.2f}",
-                annotation_position="bottom left",
-            )
-
-        for lv in near_resistances:
-            fig.add_hline(
-                y=float(lv["price"]),
-                line_dash="dot",
-                line_color="red",
-                annotation_text=f"Direnç {lv['price']:.2f}",
-                annotation_position="top left",
-            )
-
-        subset = use.tail(min(len(use), 120))
-        swing_highs, swing_lows = _swing_points(subset["High"], subset["Low"], left=3, right=3)
-
-        if len(swing_lows) >= 2:
-            (t1, p1), (t2, p2) = swing_lows[-2], swing_lows[-1]
-            x1 = subset.index.get_loc(t1)
-            x2 = subset.index.get_loc(t2)
-            x_last = len(subset) - 1
-            if x2 > x1:
-                slope = (float(p2) - float(p1)) / (x2 - x1)
-                y_last = float(p2) + slope * (x_last - x2)
-                fig.add_trace(go.Scatter(
-                    x=[t1, subset.index[-1]],
-                    y=[float(p1), float(y_last)],
-                    mode="lines",
-                    name="Destek Trendi",
-                    line=dict(color="green", dash="dash", width=2),
-                ))
-
-        if len(swing_highs) >= 2:
-            (t1, p1), (t2, p2) = swing_highs[-2], swing_highs[-1]
-            x1 = subset.index.get_loc(t1)
-            x2 = subset.index.get_loc(t2)
-            x_last = len(subset) - 1
-            if x2 > x1:
-                slope = (float(p2) - float(p1)) / (x2 - x1)
-                y_last = float(p2) + slope * (x_last - x2)
-                fig.add_trace(go.Scatter(
-                    x=[t1, subset.index[-1]],
-                    y=[float(p1), float(y_last)],
-                    mode="lines",
-                    name="Direnç Trendi",
-                    line=dict(color="red", dash="dash", width=2),
-                ))
-    except Exception:
-        pass
-
-    return fig
-
-
-# =============================
-# Volume Profile / VPVR Helpers
-# =============================
-def compute_volume_profile(df: pd.DataFrame, bins: int = 24, lookback: int = 220) -> Tuple[pd.DataFrame, float]:
-    if df is None or df.empty or not {"High", "Low", "Close", "Volume"}.issubset(df.columns):
-        return pd.DataFrame(), np.nan
-
-    use = df.tail(min(len(df), int(lookback))).copy()
-    use = use.dropna(subset=["High", "Low", "Close", "Volume"])
-    if use.empty:
-        return pd.DataFrame(), np.nan
-
-    price_min = float(use["Low"].min())
-    price_max = float(use["High"].max())
-    if not np.isfinite(price_min) or not np.isfinite(price_max) or price_max <= price_min:
-        return pd.DataFrame(), np.nan
-
-    typical_price = ((use["High"] + use["Low"] + use["Close"]) / 3.0).astype(float)
-    volumes = pd.to_numeric(use["Volume"], errors="coerce").fillna(0.0).astype(float)
-
-    hist, edges = np.histogram(typical_price.values, bins=int(bins), range=(price_min, price_max), weights=volumes.values)
-    centers = (edges[:-1] + edges[1:]) / 2.0
-
-    vp_df = pd.DataFrame({"Price": centers, "Volume": hist.astype(float)})
-    vp_df = vp_df[vp_df["Volume"] > 0].copy()
-    if vp_df.empty:
-        return pd.DataFrame(), np.nan
-
-    poc_price = float(vp_df.loc[vp_df["Volume"].idxmax(), "Price"])
-    return vp_df.sort_values("Price"), poc_price
-
-
-def build_volume_profile_figure(df: pd.DataFrame, bins: int = 24, lookback: int = 220) -> Tuple[go.Figure, float]:
-    vp_df, poc_price = compute_volume_profile(df, bins=bins, lookback=lookback)
-    fig = go.Figure()
-
-    if vp_df.empty:
-        fig.update_layout(height=360, title="Hacim Profili (VPVR / POC)")
-        return fig, np.nan
-
-    fig.add_trace(go.Bar(
-        x=vp_df["Volume"],
-        y=vp_df["Price"],
-        orientation="h",
-        name="Volume Profile",
-    ))
-
-    if np.isfinite(poc_price):
-        fig.add_hline(y=poc_price, line_dash="dash", line_color="red", annotation_text=f"POC: {poc_price:.2f}")
-
-    fig.update_layout(
-        height=360,
-        title="Hacim Profili (VPVR / POC)",
-        xaxis_title="Hacim",
-        yaxis_title="Fiyat",
-        showlegend=False,
-        margin=dict(l=0, r=0, t=40, b=0),
-    )
-    return fig, poc_price
-
 
 # =============================
 # Live price & Short Info helpers
