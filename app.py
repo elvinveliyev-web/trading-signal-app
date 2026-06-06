@@ -1820,6 +1820,21 @@ def apply_live_last_override_to_df(df: pd.DataFrame, live_price: float) -> pd.Da
 
     return out
 
+@st.cache_data(ttl=30, show_spinner=False)
+def get_live_price(ticker: str) -> dict:
+    out = {"last_price": np.nan, "currency": "", "exchange": "", "asof": ""}
+    try:
+        t = yf.Ticker(ticker)
+        fi = getattr(t, "fast_info", None)
+        if fi:
+            out["last_price"] = safe_float(fi.get("last_price") or fi.get("lastPrice"))
+            out["currency"] = fi.get("currency") or ""
+            out["exchange"] = fi.get("exchange") or ""
+            out["asof"] = str(fi.get("last_trade_time") or fi.get("lastTradeDate") or "")
+    except Exception:
+        pass
+    return out
+
 @st.cache_data(ttl=12 * 3600, show_spinner=False)
 def get_short_info(ticker: str) -> dict:
     out = {"short_percent_float": np.nan, "short_ratio": np.nan}
