@@ -1177,7 +1177,7 @@ def analyze_sr_levels(df: pd.DataFrame, lookback: int = 200, tol=0.02) -> List[d
     c = df["Close"].tail(lookback).dropna()
     if len(c) < 10:
         return []
-        
+
     v = df["Volume"].tail(lookback) if "Volume" in df.columns else pd.Series(dtype=float)
 
     hs, ls = _swing_points(h, l, left=3, right=3)
@@ -1192,23 +1192,25 @@ def analyze_sr_levels(df: pd.DataFrame, lookback: int = 200, tol=0.02) -> List[d
     for rl in raw_levels:
         placed = False
         for cl in clusters:
-            if abs(rl - cl['center']) / cl['center'] <= tol:
-                cl['points'].append(rl)
+            if cl["center"] != 0 and abs(rl - cl["center"]) / abs(cl["center"]) <= tol:
+                cl["points"].append(rl)
+                cl["center"] = float(np.mean(cl["points"]))
                 placed = True
                 break
         if not placed:
-            clusters.append({'center': rl, 'points': [rl]})
+            clusters.append({"center": float(rl), "points": [float(rl)]})
 
     avg_vol_normal = float(v.mean()) if not v.empty else 1.0
-    if avg_vol_normal <= 0: avg_vol_normal = 1.0
+    if avg_vol_normal <= 0:
+        avg_vol_normal = 1.0
 
     details = []
     df_lookback = df.tail(lookback)
-    
+
     for cl in clusters:
-        level_px = cl['center']
-        lower_bound = level_px * (1 - tol/2)
-        upper_bound = level_px * (1 + tol/2)
+        level_px = float(cl["center"])
+        lower_bound = level_px * (1 - tol / 2)
+        upper_bound = level_px * (1 + tol / 2)
 
         touches = df_lookback[(df_lookback["High"] >= lower_bound) & (df_lookback["Low"] <= upper_bound)]
 
@@ -1227,9 +1229,9 @@ def analyze_sr_levels(df: pd.DataFrame, lookback: int = 200, tol=0.02) -> List[d
 
         vol_diff_pct = (vol_at_level / avg_vol_normal - 1.0) * 100.0
 
-        score_touches = min(num_touches * 10, 40) 
-        score_vol = min(max(vol_diff_pct / 2.0, 0), 35) 
-        score_dur = min(duration_bars / 2.0, 25) 
+        score_touches = min(num_touches * 10, 40)
+        score_vol = min(max(vol_diff_pct / 2.0, 0), 35)
+        score_dur = min(duration_bars / 2.0, 25)
 
         strength_pct = min(score_touches + score_vol + score_dur, 99.0)
 
@@ -1243,6 +1245,7 @@ def analyze_sr_levels(df: pd.DataFrame, lookback: int = 200, tol=0.02) -> List[d
         })
 
     return sorted(details, key=lambda x: x["price"])
+
 
 
 def target_price_band(df: pd.DataFrame):
@@ -1300,11 +1303,184 @@ def target_price_band(df: pd.DataFrame):
 
 
 
+def _build_trendline_candidates(
+    subset: pd.DataFrame,
+    pivot_points: List[Tuple[pd.Timestamp, float]],
+    line_kind: str = "support",
+    max_pivots: int = 7,
+    touch_tol_pct: float = 0.01,
+    break_tol_pct: float = 0.003,
+) -> Optional[Dict[str, Any]]:
+    if subset is None or subset.empty or len(pivot_points) < 2:
+        return None
+
+    pivots = pivot_points[-max_pivots:]
+    if len(pivots) < 2:
+        return None
+
+    body_low = subset[["Open", "Close"]].min(axis=1).astype(float) if {"Open", "Close"}.issubset(subset.columns) else subset["Close"].astype(float)
+    body_high = subset[["Open", "Close"]].max(axis=1).astype(float) if {"Open", "Close"}.issubset(subset.columns) else subset["Close"].astype(float)
+
+    best = None
+
+    for i in range(len(pivots) - 1):
+        for j in range(i + 1, len(pivots)):
+            t1, p1 = pivots[i]
+            t2, p2 = pivots[j]
+
+            try:
+                x1 = subset.index.get_loc(t1)
+                x2 = subset.index.get_loc(t2)
+            except Exception:
+                continue
+
+            if x2 <= x1:
+                continue
+
+            slope = (float(p2) - float(p1)) / float(x2 - x1)
+            intercept = float(p1) - slope * float(x1)
+
+            x_arr = np.arange(len(subset), dtype=float)
+            y_line = intercept + slope * x_arr
+
+            seg_slice = slice(x1, len(subset))
+            if line_kind == "support":
+                worst_break = float((body_low.iloc[seg_slice].values - y_line[seg_slice]).min())
+                if worst_break < (-abs(float(p1)) * break_tol_pct):
+                    continue
+            else:
+                worst_break = float((y_line[seg_slice] - body_high.iloc[seg_slice].values).min())
+                if worst_break < (-abs(float(p1)) * break_tol_pct):
+                    continue
+
+            touched = []
+            for tp, pp in pivots:
+                try:
+                    xp = subset.index.get_loc(tp)
+                except Exception:
+                    continue
+                y_hat = intercept + slope * float(xp)
+                denom = max(abs(float(pp)), 1e-9)
+                if abs(float(pp) - y_hat) / denom <= touch_tol_pct:
+                    touched.append((tp, float(pp), xp, y_hat))
+
+            if len(touched) < 2:
+                continue
+
+            touched_x = np.array([x for _, _, x, _ in touched], dtype=float)
+            touched_y = np.array([p for _, p, _, _ in touched], dtype=float)
+            y_fit = intercept + slope * touched_x
+
+            ss_res = float(np.sum((touched_y - y_fit) ** 2))
+            ss_tot = float(np.sum((touched_y - np.mean(touched_y)) ** 2))
+            r2 = 1.0 if ss_tot <= 1e-12 else max(0.0, 1.0 - (ss_res / ss_tot))
+
+            recent_bonus = float(touched_x.max()) / max(1.0, float(len(subset) - 1))
+            score = (len(touched) * 100.0) + (r2 * 40.0) + (recent_bonus * 10.0)
+
+            candidate = {
+                "x1": int(x1),
+                "x2": int(x2),
+                "t1": t1,
+                "t2": t2,
+                "p1": float(p1),
+                "p2": float(p2),
+                "slope": float(slope),
+                "intercept": float(intercept),
+                "touches": len(touched),
+                "r2": float(r2),
+                "score": float(score),
+            }
+
+            if best is None or candidate["score"] > best["score"]:
+                best = candidate
+
+    return best
+
+
 def add_support_resistance_trend_overlays(fig: go.Figure, plot_df: pd.DataFrame, lookback: int = 220) -> go.Figure:
     if fig is None:
         fig = go.Figure()
     if plot_df is None or plot_df.empty or not {"High", "Low", "Close"}.issubset(plot_df.columns):
         return fig
+
+    use = plot_df.tail(min(len(plot_df), int(lookback))).copy()
+    if use.empty:
+        return fig
+
+    try:
+        base_px = float(use["Close"].iloc[-1])
+
+        sr_levels = analyze_sr_levels(use, lookback=min(len(use), 200), tol=0.02)
+        below = [lv for lv in sr_levels if lv["price"] < base_px]
+        above = [lv for lv in sr_levels if lv["price"] > base_px]
+
+        near_supports = sorted(below, key=lambda x: abs(base_px - x["price"]))[:2]
+        near_resistances = sorted(above, key=lambda x: abs(x["price"] - base_px))[:2]
+
+        for lv in near_supports:
+            fig.add_hline(
+                y=float(lv["price"]),
+                line_dash="dot",
+                line_color="green",
+                annotation_text=f"Destek {lv['price']:.2f}",
+                annotation_position="bottom left",
+            )
+
+        for lv in near_resistances:
+            fig.add_hline(
+                y=float(lv["price"]),
+                line_dash="dot",
+                line_color="red",
+                annotation_text=f"Direnç {lv['price']:.2f}",
+                annotation_position="top left",
+            )
+
+        subset = use.tail(min(len(use), 140))
+        swing_highs, swing_lows = _swing_points(subset["High"], subset["Low"], left=3, right=3)
+
+        support_line = _build_trendline_candidates(
+            subset,
+            swing_lows,
+            line_kind="support",
+            max_pivots=7,
+            touch_tol_pct=0.01,
+            break_tol_pct=0.003,
+        )
+        if support_line is not None:
+            x_last = len(subset) - 1
+            y_last = support_line["intercept"] + support_line["slope"] * float(x_last)
+            fig.add_trace(go.Scatter(
+                x=[support_line["t1"], subset.index[-1]],
+                y=[support_line["p1"], float(y_last)],
+                mode="lines",
+                name="Destek Trendi",
+                line=dict(color="green", dash="dash", width=3 if support_line["touches"] >= 3 else 2),
+            ))
+
+        resistance_line = _build_trendline_candidates(
+            subset,
+            swing_highs,
+            line_kind="resistance",
+            max_pivots=7,
+            touch_tol_pct=0.01,
+            break_tol_pct=0.003,
+        )
+        if resistance_line is not None:
+            x_last = len(subset) - 1
+            y_last = resistance_line["intercept"] + resistance_line["slope"] * float(x_last)
+            fig.add_trace(go.Scatter(
+                x=[resistance_line["t1"], subset.index[-1]],
+                y=[resistance_line["p1"], float(y_last)],
+                mode="lines",
+                name="Direnç Trendi",
+                line=dict(color="red", dash="dash", width=3 if resistance_line["touches"] >= 3 else 2),
+            ))
+    except Exception:
+        pass
+
+    return fig
+
 
     use = plot_df.tail(min(len(plot_df), int(lookback))).copy()
     if use.empty:
