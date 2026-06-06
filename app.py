@@ -1173,6 +1173,7 @@ def _swing_points(high: pd.Series, low: pd.Series, left: int = 2, right: int = 2
             ls.append((low.index[i], float(low.iloc[i])))
     return hs, ls
 
+
 def analyze_sr_levels(df: pd.DataFrame, lookback: int = 200, tol=0.02) -> List[dict]:
     h = df["High"].tail(lookback).dropna()
     l = df["Low"].tail(lookback).dropna()
@@ -1192,19 +1193,20 @@ def analyze_sr_levels(df: pd.DataFrame, lookback: int = 200, tol=0.02) -> List[d
 
     cluster_centers: List[float] = []
 
-    # 1D K-Means clustering (Gemini önerisi) — güvenilir yatay seviye piklerini daha net çıkarır
+    # 1D K-Means clustering (Gemini önerisi)
+    # Düz tolerans yerine seviyelerin doğal dağılımına göre merkezleri çıkarmaya çalışır.
     try:
-        unique_levels = sorted(set(round(x, 4) for x in raw_levels))
-        if len(unique_levels) >= 3:
-            n_clusters = int(min(max(3, len(unique_levels) // 3), 8, len(unique_levels)))
+        arr = np.array(raw_levels, dtype=float).reshape(-1, 1)
+        unique_count = len(np.unique(arr.flatten()))
+        if unique_count >= 3:
+            n_clusters = int(min(max(3, round(np.sqrt(len(raw_levels)))), 8, unique_count))
             km = KMeans(n_clusters=n_clusters, n_init=10, random_state=42)
-            arr = np.array(unique_levels, dtype=float).reshape(-1, 1)
             km.fit(arr)
-            cluster_centers.extend([float(x) for x in km.cluster_centers_.flatten()])
+            cluster_centers.extend([float(x) for x in km.cluster_centers_.flatten() if np.isfinite(x)])
     except Exception:
         pass
 
-    # Fallback / hibrit: adaptif cluster mantığını da koru
+    # Fallback / hibrit: önceki tolerans bazlı mantığı da koru
     adaptive_clusters = []
     for rl in sorted(set(round(float(x), 2) for x in raw_levels)):
         placed = False
@@ -1218,7 +1220,22 @@ def analyze_sr_levels(df: pd.DataFrame, lookback: int = 200, tol=0.02) -> List[d
             adaptive_clusters.append({"center": float(rl), "points": [float(rl)]})
 
     cluster_centers.extend([float(cl["center"]) for cl in adaptive_clusters])
-    cluster_centers = sorted(set(round(x, 2) for x in cluster_centers if np.isfinite(x)))
+
+    # Yakın merkezleri tekrar birleştir
+    merged_centers: List[float] = []
+    for center in sorted(cluster_centers):
+        if not np.isfinite(center):
+            continue
+        if not merged_centers:
+            merged_centers.append(float(center))
+            continue
+        last_center = merged_centers[-1]
+        if last_center != 0 and abs(center - last_center) / abs(last_center) <= (tol / 2.0):
+            merged_centers[-1] = float((last_center + float(center)) / 2.0)
+        else:
+            merged_centers.append(float(center))
+
+    cluster_centers = sorted(set(round(x, 2) for x in merged_centers if np.isfinite(x)))
 
     if not cluster_centers:
         return []
@@ -1254,10 +1271,11 @@ def analyze_sr_levels(df: pd.DataFrame, lookback: int = 200, tol=0.02) -> List[d
         score_touches = min(num_touches * 10, 40)
         score_vol = min(max(vol_diff_pct / 2.0, 0), 35)
         score_dur = min(duration_bars / 2.0, 25)
+
         strength_pct = min(score_touches + score_vol + score_dur, 99.0)
 
         details.append({
-            "price": round(float(level_px), 2),
+            "price": round(level_px, 2),
             "duration_bars": int(duration_bars),
             "vol_at_level": float(vol_at_level),
             "vol_diff_pct": float(vol_diff_pct),
@@ -1266,6 +1284,7 @@ def analyze_sr_levels(df: pd.DataFrame, lookback: int = 200, tol=0.02) -> List[d
         })
 
     return sorted(details, key=lambda x: x["price"])
+
 
 
 def target_price_band(df: pd.DataFrame):
@@ -1438,6 +1457,27 @@ def _line_break_stats(
     }
 
 
+
+def _project_future_index(index: pd.Index, bars_ahead: int = 8) -> Tuple[Any, float]:
+    if len(index) == 0:
+        return None, float(bars_ahead)
+
+    future_x = float(max(0, len(index) - 1) + int(bars_ahead))
+
+    try:
+        if isinstance(index, pd.DatetimeIndex) and len(index) >= 2:
+            diffs = index.to_series().diff().dropna()
+            step = diffs.median() if not diffs.empty else pd.Timedelta(days=1)
+            if pd.isna(step) or step <= pd.Timedelta(0):
+                step = diffs.iloc[-1] if not diffs.empty else pd.Timedelta(days=1)
+            future_date = index[-1] + (step * int(bars_ahead))
+            return future_date, future_x
+    except Exception:
+        pass
+
+    return index[-1], future_x
+
+
 def _evaluate_line_candidate(
     subset: pd.DataFrame,
     pivot_points: List[Tuple[pd.Timestamp, float]],
@@ -1466,13 +1506,40 @@ def _evaluate_line_candidate(
     if len(np.unique(touched_x)) < 2:
         return None
 
-    y_fit = float(intercept) + float(slope) * touched_x
-    ss_res = float(np.sum((touched_y - y_fit) ** 2))
-    ss_tot = float(np.sum((touched_y - np.mean(touched_y)) ** 2))
-    touch_r2 = 1.0 if ss_tot <= 1e-12 else max(0.0, 1.0 - (ss_res / ss_tot))
-    r2_final = float(max(base_r2 if base_r2 is not None else 0.0, touch_r2))
+    # 1) Pivot temaslarına göre klasik R²
+    y_fit_touch = float(intercept) + float(slope) * touched_x
+    ss_res_touch = float(np.sum((touched_y - y_fit_touch) ** 2))
+    ss_tot_touch = float(np.sum((touched_y - np.mean(touched_y)) ** 2))
+    touch_r2 = 1.0 if ss_tot_touch <= 1e-12 else max(0.0, 1.0 - (ss_res_touch / ss_tot_touch))
 
-    if source in {"linregress", "ransac"} and r2_final < 0.80:
+    # 2) Gemini önerisi: sadece temas eden pivotlar değil, o aralıktaki TÜM fiyat barlarının
+    # çizgiye olan mesafesiyle de trend kalitesini ölç.
+    start_seg = int(np.min(touched_x))
+    end_seg = int(np.max(touched_x))
+    x_seg = np.arange(start_seg, end_seg + 1, dtype=float)
+    y_line_seg = float(intercept) + float(slope) * x_seg
+
+    body_low, body_high = _get_line_body_arrays(subset)
+    ref_seg = body_low.iloc[start_seg:end_seg + 1].astype(float).values if line_kind == "support" else body_high.iloc[start_seg:end_seg + 1].astype(float).values
+
+    if len(ref_seg) > 1 and np.isfinite(ref_seg).all():
+        ss_res_seg = float(np.sum((ref_seg - y_line_seg) ** 2))
+        ss_tot_seg = float(np.sum((ref_seg - np.mean(ref_seg)) ** 2))
+        segment_r2 = 1.0 if ss_tot_seg <= 1e-12 else max(0.0, 1.0 - (ss_res_seg / ss_tot_seg))
+        ref_scale = max(float(np.nanmax(ref_seg) - np.nanmin(ref_seg)), float(np.nanmean(np.abs(ref_seg))) * 0.01, 1e-9)
+        mean_dist = float(np.mean(np.abs(ref_seg - y_line_seg)))
+        segment_fit = max(0.0, 1.0 - (mean_dist / ref_scale))
+    else:
+        segment_r2 = 0.0
+        segment_fit = 0.0
+
+    r2_candidates = [touch_r2, segment_r2]
+    if base_r2 is not None and np.isfinite(base_r2):
+        r2_candidates.append(float(base_r2))
+    r2_final = float(max(r2_candidates))
+
+    # Regresyon / RANSAC çizgilerinde taban kalite filtresi
+    if source in {"linregress", "ransac"} and max(r2_final, segment_fit) < 0.80:
         return None
 
     break_stats = _line_break_stats(
@@ -1480,7 +1547,7 @@ def _evaluate_line_candidate(
         slope=slope,
         intercept=intercept,
         line_kind=line_kind,
-        start_x=int(np.min(touched_x)),
+        start_x=start_seg,
         break_tol_pct=break_tol_pct,
     )
     if break_stats["violation_count"] > 0:
@@ -1490,6 +1557,7 @@ def _evaluate_line_candidate(
     score = (
         len(touched) * 100.0
         + r2_final * 60.0
+        + segment_fit * 40.0
         + recent_bonus * 10.0
         + float(extra_score)
     )
@@ -1507,9 +1575,11 @@ def _evaluate_line_candidate(
         "intercept": float(intercept),
         "touches": int(len(touched)),
         "r2": float(r2_final),
+        "segment_fit": float(segment_fit),
         "score": float(score),
         "source": source,
     }
+
 
 
 def _build_trendline_candidates(
@@ -1641,6 +1711,7 @@ def _build_trendline_candidates(
     return candidates[0]
 
 
+
 def add_support_resistance_trend_overlays(fig: go.Figure, plot_df: pd.DataFrame, lookback: int = 220) -> go.Figure:
     if fig is None:
         fig = go.Figure()
@@ -1681,6 +1752,8 @@ def add_support_resistance_trend_overlays(fig: go.Figure, plot_df: pd.DataFrame,
 
         subset = use.tail(min(len(use), 140))
         swing_highs, swing_lows = _swing_points(subset["High"], subset["Low"], left=3, right=3)
+        projection_bars = 8
+        future_date, future_x = _project_future_index(subset.index, bars_ahead=projection_bars)
 
         support_line = _build_trendline_candidates(
             subset,
@@ -1690,12 +1763,11 @@ def add_support_resistance_trend_overlays(fig: go.Figure, plot_df: pd.DataFrame,
             touch_tol_pct=0.01,
             break_tol_pct=0.003,
         )
-        if support_line is not None:
-            x_last = len(subset) - 1
-            y_last = support_line["intercept"] + support_line["slope"] * float(x_last)
+        if support_line is not None and future_date is not None:
+            y_future = support_line["intercept"] + support_line["slope"] * float(future_x)
             fig.add_trace(go.Scatter(
-                x=[support_line["t1"], subset.index[-1]],
-                y=[support_line["p1"], float(y_last)],
+                x=[support_line["t1"], future_date],
+                y=[support_line["p1"], float(y_future)],
                 mode="lines",
                 name=f"Destek Trendi ({support_line.get('source','trend')})",
                 line=dict(color="green", dash="dash", width=3 if support_line["touches"] >= 3 else 2),
@@ -1709,12 +1781,11 @@ def add_support_resistance_trend_overlays(fig: go.Figure, plot_df: pd.DataFrame,
             touch_tol_pct=0.01,
             break_tol_pct=0.003,
         )
-        if resistance_line is not None:
-            x_last = len(subset) - 1
-            y_last = resistance_line["intercept"] + resistance_line["slope"] * float(x_last)
+        if resistance_line is not None and future_date is not None:
+            y_future = resistance_line["intercept"] + resistance_line["slope"] * float(future_x)
             fig.add_trace(go.Scatter(
-                x=[resistance_line["t1"], subset.index[-1]],
-                y=[resistance_line["p1"], float(y_last)],
+                x=[resistance_line["t1"], future_date],
+                y=[resistance_line["p1"], float(y_future)],
                 mode="lines",
                 name=f"Direnç Trendi ({resistance_line.get('source','trend')})",
                 line=dict(color="red", dash="dash", width=3 if resistance_line["touches"] >= 3 else 2),
@@ -1724,23 +1795,6 @@ def add_support_resistance_trend_overlays(fig: go.Figure, plot_df: pd.DataFrame,
 
     return fig
 
-# =============================
-# Live price & Short Info helpers
-# =============================
-@st.cache_data(ttl=30, show_spinner=False)
-def get_live_price(ticker: str) -> dict:
-    out = {"last_price": np.nan, "currency": "", "exchange": "", "asof": ""}
-    try:
-        t = yf.Ticker(ticker)
-        fi = getattr(t, "fast_info", None)
-        if fi:
-            out["last_price"] = safe_float(fi.get("last_price") or fi.get("lastPrice"))
-            out["currency"] = fi.get("currency") or ""
-            out["exchange"] = fi.get("exchange") or ""
-            out["asof"] = str(fi.get("last_trade_time") or fi.get("lastTradeDate") or "")
-    except Exception:
-        pass
-    return out
 
 
 def apply_live_last_override_to_df(df: pd.DataFrame, live_price: float) -> pd.DataFrame:
