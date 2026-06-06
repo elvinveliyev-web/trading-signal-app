@@ -7173,7 +7173,7 @@ with tab_dash:
     st.plotly_chart(fig_price, use_container_width=True)
 
     st.subheader("🛠️ Grafik Analiz Araçları")
-    tools_col1, tools_col2, tools_col3 = st.columns(3)
+    tools_col1, tools_col2, tools_col3, tools_col4 = st.columns(4)
     
     if tools_col1.button("Sadece Grafiği Analiz Et", use_container_width=True, help="Grafikteki tüm formasyon işaretlerini (Kanguru vb.) kaldırır."):
         st.session_state.show_chart_patterns = False
@@ -7185,6 +7185,10 @@ with tab_dash:
         
     if tools_col3.button("13 EMA Kanalını Aç / Kapat", use_container_width=True, help="Grafiğe 13 EMA High, Low ve Close kanallarını ekler veya kaldırır."):
         st.session_state.show_ema13_channel = not st.session_state.show_ema13_channel
+        st.rerun()
+
+    if tools_col4.button("Destek / Direnç Trendini Aç / Kapat", use_container_width=True, help="Grafiğe otomatik destek, direnç ve trend çizgilerini ekler veya kaldırır."):
+        st.session_state.show_sr_lines_dashboard = not st.session_state.show_sr_lines_dashboard
         st.rerun()
 
     st.subheader("📦 Hacim Profili (VPVR / POC)")
