@@ -1299,6 +1299,85 @@ def target_price_band(df: pd.DataFrame):
     }
 
 
+
+def add_support_resistance_trend_overlays(fig: go.Figure, plot_df: pd.DataFrame, lookback: int = 220) -> go.Figure:
+    if fig is None:
+        fig = go.Figure()
+    if plot_df is None or plot_df.empty or not {"High", "Low", "Close"}.issubset(plot_df.columns):
+        return fig
+
+    use = plot_df.tail(min(len(plot_df), int(lookback))).copy()
+    if use.empty:
+        return fig
+
+    try:
+        base_px = float(use["Close"].iloc[-1])
+
+        sr_levels = analyze_sr_levels(use, lookback=min(len(use), 200), tol=0.02)
+        below = [lv for lv in sr_levels if lv["price"] < base_px]
+        above = [lv for lv in sr_levels if lv["price"] > base_px]
+
+        near_supports = sorted(below, key=lambda x: abs(base_px - x["price"]))[:2]
+        near_resistances = sorted(above, key=lambda x: abs(x["price"] - base_px))[:2]
+
+        for lv in near_supports:
+            fig.add_hline(
+                y=float(lv["price"]),
+                line_dash="dot",
+                line_color="green",
+                annotation_text=f"Destek {lv['price']:.2f}",
+                annotation_position="bottom left",
+            )
+
+        for lv in near_resistances:
+            fig.add_hline(
+                y=float(lv["price"]),
+                line_dash="dot",
+                line_color="red",
+                annotation_text=f"Direnç {lv['price']:.2f}",
+                annotation_position="top left",
+            )
+
+        subset = use.tail(min(len(use), 120))
+        swing_highs, swing_lows = _swing_points(subset["High"], subset["Low"], left=3, right=3)
+
+        if len(swing_lows) >= 2:
+            (t1, p1), (t2, p2) = swing_lows[-2], swing_lows[-1]
+            x1 = subset.index.get_loc(t1)
+            x2 = subset.index.get_loc(t2)
+            x_last = len(subset) - 1
+            if x2 > x1:
+                slope = (float(p2) - float(p1)) / (x2 - x1)
+                y_last = float(p2) + slope * (x_last - x2)
+                fig.add_trace(go.Scatter(
+                    x=[t1, subset.index[-1]],
+                    y=[float(p1), float(y_last)],
+                    mode="lines",
+                    name="Destek Trendi",
+                    line=dict(color="green", dash="dash", width=2),
+                ))
+
+        if len(swing_highs) >= 2:
+            (t1, p1), (t2, p2) = swing_highs[-2], swing_highs[-1]
+            x1 = subset.index.get_loc(t1)
+            x2 = subset.index.get_loc(t2)
+            x_last = len(subset) - 1
+            if x2 > x1:
+                slope = (float(p2) - float(p1)) / (x2 - x1)
+                y_last = float(p2) + slope * (x_last - x2)
+                fig.add_trace(go.Scatter(
+                    x=[t1, subset.index[-1]],
+                    y=[float(p1), float(y_last)],
+                    mode="lines",
+                    name="Direnç Trendi",
+                    line=dict(color="red", dash="dash", width=2),
+                ))
+    except Exception:
+        pass
+
+    return fig
+
+
 # =============================
 # Volume Profile / VPVR Helpers
 # =============================
@@ -2448,6 +2527,12 @@ if "sentiment_items" not in st.session_state:
 if "show_ema13_channel" not in st.session_state:
     st.session_state.show_ema13_channel = False
 
+if "show_sr_lines_dashboard" not in st.session_state:
+    st.session_state.show_sr_lines_dashboard = False
+
+if "show_sr_lines_index_center" not in st.session_state:
+    st.session_state.show_sr_lines_index_center = False
+
 if "divergence_scan_results" not in st.session_state:
     st.session_state.divergence_scan_results = pd.DataFrame()
 
@@ -3160,6 +3245,9 @@ if st.session_state.show_chart_patterns:
             textfont=dict(color="red", size=10, family="Arial Black"),
             marker=dict(symbol="triangle-down", size=10, color="red", line=dict(width=1, color="DarkSlateGrey"))
         ))
+
+if st.session_state.get("show_sr_lines_dashboard", False):
+    fig_price = add_support_resistance_trend_overlays(fig_price, df)
 
 fig_price.update_layout(
     height=600,
@@ -6093,7 +6181,7 @@ def _slice_df_by_date_range(df_in: pd.DataFrame, start_date: datetime.date, end_
     end_ts = pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
     return df_in.loc[(df_in.index >= start_ts) & (df_in.index <= end_ts)].copy()
 
-def build_history_range_price_figure(plot_df: pd.DataFrame, show_patterns: bool = True, show_ema13: bool = False) -> go.Figure:
+def build_history_range_price_figure(plot_df: pd.DataFrame, show_patterns: bool = True, show_ema13: bool = False, show_sr_lines: bool = False) -> go.Figure:
     fig = go.Figure()
     if plot_df is None or plot_df.empty:
         fig.update_layout(height=850, title="Geçmiş Tarih Aralığı Grafiği")
@@ -6188,6 +6276,9 @@ def build_history_range_price_figure(plot_df: pd.DataFrame, show_patterns: bool 
                 textfont=dict(color="red", size=10, family="Arial Black"),
                 marker=dict(symbol="triangle-down", size=10, color="red", line=dict(width=1, color="DarkSlateGrey"))
             ))
+
+    if show_sr_lines:
+        fig = add_support_resistance_trend_overlays(fig, plot_df)
 
     fig.update_layout(
         height=850,
@@ -6359,6 +6450,7 @@ def _prepare_dashboard_context_for_symbol(
         feat,
         show_patterns=st.session_state.get("show_chart_patterns", True),
         show_ema13=st.session_state.get("show_ema13_channel", False),
+        show_sr_lines=st.session_state.get("show_sr_lines_index_center", False),
     )
     indicator_figs_local = build_history_range_indicator_figures(feat, benchmark_df_local, benchmark_symbol_local)
     vpvr_fig_local, poc_price_local = build_volume_profile_figure(feat, bins=28, lookback=min(len(feat), 220))
@@ -6445,6 +6537,17 @@ def _render_dashboard_like_context(ctx: Dict[str, Any], display_name: str, inter
 
     st.subheader("📊 Fiyat + EMA + Bollinger + Sinyaller")
     st.plotly_chart(ctx["price_fig"], use_container_width=True)
+
+    st.subheader("🛠️ Grafik Analiz Araçları")
+    idx_tools_col1 = st.columns(1)[0]
+    if idx_tools_col1.button(
+        "Destek / Direnç Trendini Aç / Kapat",
+        key=f"idx_sr_toggle_{display_name}",
+        use_container_width=True,
+        help="Grafiğe otomatik destek, direnç ve trend çizgilerini ekler veya kaldırır.",
+    ):
+        st.session_state.show_sr_lines_index_center = not st.session_state.show_sr_lines_index_center
+        st.rerun()
 
     figs = ctx["indicator_figs"]
     st.subheader("📉 RSI / MACD / ATR%")
