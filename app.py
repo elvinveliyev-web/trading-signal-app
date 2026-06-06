@@ -20,6 +20,7 @@ import requests
 from sklearn.linear_model import Ridge, LinearRegression, RANSACRegressor
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.cluster import KMeans
+from sklearn.model_selection import TimeSeriesSplit
 from scipy.stats import linregress
 
 # =============================
@@ -129,6 +130,10 @@ def fmt_num(x: float, nd=2) -> str:
 # =============================
 def ema(s: pd.Series, span: int) -> pd.Series:
     return s.ewm(span=span, adjust=False).mean()
+
+
+def sma(s: pd.Series, window: int) -> pd.Series:
+    return s.rolling(int(window), min_periods=int(window)).mean()
 
 
 def rsi(close: pd.Series, period: int = 14) -> pd.Series:
@@ -624,8 +629,13 @@ def detect_speculation(df: pd.DataFrame) -> Dict[str, Any]:
 def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     df = df.copy()
 
-    df["EMA50"] = ema(df["Close"], int(cfg["ema_fast"]))
-    df["EMA200"] = ema(df["Close"], int(cfg["ema_slow"]))
+    fast_len = int(cfg["ema_fast"])
+    slow_len = int(cfg["ema_slow"])
+
+    df["EMA50"] = ema(df["Close"], fast_len)
+    df["EMA200"] = ema(df["Close"], slow_len)
+    df["SMA_FAST"] = sma(df["Close"], fast_len)
+    df["SMA_SLOW"] = sma(df["Close"], slow_len)
     df["RSI"] = rsi(df["Close"], int(cfg["rsi_period"]))
     df["MACD"], df["MACD_signal"], df["MACD_hist"] = macd(df["Close"], 12, 26, 9)
     df["BB_mid"], df["BB_upper"], df["BB_lower"] = bollinger(df["Close"], int(cfg["bb_period"]), float(cfg["bb_std"]))
@@ -780,6 +790,7 @@ def signal_with_checkpoints(
 # =============================
 # Backtest (long-only) + advanced exits
 # =============================
+
 def backtest_long_only(
     df: pd.DataFrame,
     cfg: dict,
@@ -805,61 +816,72 @@ def backtest_long_only(
     slippage = cfg["slippage_bps"] / 10000.0
     time_stop_bars = cfg.get("time_stop_bars", 10)
     tp_mult = cfg.get("take_profit_mult", 2.0)
-    
-    risk_pct = float(cfg.get("risk_per_trade", 0.01)) 
+    risk_pct = float(cfg.get("risk_per_trade", 0.01))
 
     for i in range(len(df)):
         row = df.iloc[i]
         date = df.index[i]
-        price = float(row["Close"])
+
+        close_px = float(row["Close"])
+        open_px = float(row["Open"]) if pd.notna(row.get("Open", np.nan)) else close_px
+        high_px = float(row["High"]) if pd.notna(row.get("High", np.nan)) else close_px
+        low_px = float(row["Low"]) if pd.notna(row.get("Low", np.nan)) else close_px
+
+        atr_pct = float((row.get("ATR", np.nan) / close_px)) if pd.notna(row.get("ATR", np.nan)) and close_px > 0 else 0.0
+        vol_ratio = float(row.get("VOL_RATIO", np.nan)) if pd.notna(row.get("VOL_RATIO", np.nan)) else 1.0
+        dynamic_penalty = max(0.0, min(0.004, atr_pct * 0.25 + max(0.0, (1.0 - vol_ratio)) * 0.001))
+        eff_slippage = slippage + dynamic_penalty
 
         if shares > 0 and pd.notna(row["ATR"]) and row["ATR"] > 0:
-            new_stop = price - cfg["atr_stop_mult"] * float(row["ATR"])
+            new_stop = close_px - cfg["atr_stop_mult"] * float(row["ATR"])
             stop = max(stop, new_stop) if pd.notna(stop) else new_stop
 
         if shares == 0 and entry_sig.iloc[i] == 1:
             atrv = float(row.get("ATR", np.nan))
             if pd.notna(atrv) and atrv > 0:
                 risk_amount = cash * risk_pct
-                
+                exec_entry_px = open_px * (1 + eff_slippage)
+
                 is_kangaroo = int(row.get("KANGAROO_BULL", 0)) == 1
                 if is_kangaroo:
-                    stop_price = float(row["Low"]) - (0.5 * atrv)
-                    stop_dist = price - stop_price
+                    stop_price = low_px - (0.5 * atrv)
+                    stop_dist = exec_entry_px - stop_price
                 else:
                     stop_dist = cfg["atr_stop_mult"] * atrv
-                    stop_price = price - stop_dist
-                
-                potential_shares = risk_amount / stop_dist
-                max_shares = cash / (price * (1 + slippage + commission))
-                shares_to_buy = min(potential_shares, max_shares)
-                
-                if shares_to_buy > 0.001: 
-                    shares = shares_to_buy
-                    entry_price = price * (1 + slippage)
-                    fee = (shares * entry_price) * commission
-                    cash -= ((shares * entry_price) + fee)
-                    
-                    stop = stop_price  
-                    target_price = entry_price + (tp_mult * stop_dist)
-                    trades.append({
-                        "entry_date": date, 
-                        "entry_price": entry_price, 
-                        "equity_before": cash + (shares * price)
-                    })
+                    stop_price = exec_entry_px - stop_dist
 
-        position_value = shares * price * (1 - slippage)
-        equity = cash + position_value
+                if stop_dist > 0:
+                    potential_shares = risk_amount / stop_dist
+                    max_shares = cash / (exec_entry_px * (1 + commission))
+                    shares_to_buy = min(potential_shares, max_shares)
+
+                    if shares_to_buy > 0.001:
+                        shares = shares_to_buy
+                        entry_price = exec_entry_px
+                        fee = (shares * entry_price) * commission
+                        cash -= ((shares * entry_price) + fee)
+
+                        stop = stop_price
+                        target_price = entry_price + (tp_mult * stop_dist)
+                        bars_held = 0
+                        half_sold = False
+
+                        trades.append({
+                            "entry_date": date,
+                            "entry_price": entry_price,
+                            "equity_before": cash + (shares * close_px),
+                        })
 
         if shares > 0:
             bars_held += 1
-            stop_hit = pd.notna(stop) and (price <= stop)
-            target_hit = (not half_sold) and pd.notna(target_price) and (price >= target_price)
-            time_stop_hit = (bars_held >= time_stop_bars) and (price < entry_price)
+
+            stop_hit = pd.notna(stop) and (low_px <= stop)
+            target_hit = (not half_sold) and pd.notna(target_price) and (high_px >= target_price)
+            time_stop_hit = (bars_held >= time_stop_bars) and (close_px < entry_price)
 
             if target_hit:
                 sell_shares = shares * 0.5
-                sell_price = price * (1 - slippage)
+                sell_price = float(target_price)
                 gross = sell_shares * sell_price
                 fee = gross * commission
                 cash += (gross - fee)
@@ -868,24 +890,22 @@ def backtest_long_only(
                 stop = max(stop, entry_price)
 
                 if len(trades) > 0:
-                    trades[-1]["pnl"] = cash + (shares * price * (1 - slippage)) - trades[-1]["equity_before"]
+                    trades[-1]["pnl"] = cash + (shares * close_px * (1 - eff_slippage)) - trades[-1]["equity_before"]
 
             if exit_sig.iloc[i] == 1 or stop_hit or time_stop_hit:
-                sell_price = price * (1 - slippage)
+                if stop_hit:
+                    sell_price = float(stop)
+                    reason = "STOP"
+                else:
+                    sell_price = open_px * (1 - eff_slippage)
+                    reason = "TIME_STOP" if time_stop_hit else "RULE_EXIT"
+
                 gross = shares * sell_price
                 fee = gross * commission
                 cash += (gross - fee)
 
                 trades[-1]["exit_date"] = date
                 trades[-1]["exit_price"] = sell_price
-
-                if stop_hit:
-                    reason = "STOP"
-                elif time_stop_hit:
-                    reason = "TIME_STOP"
-                else:
-                    reason = "RULE_EXIT"
-
                 trades[-1]["exit_reason"] = reason
                 trades[-1]["pnl"] = cash - trades[-1]["equity_before"]
 
@@ -896,7 +916,7 @@ def backtest_long_only(
                 bars_held = 0
                 half_sold = False
 
-        position_value = shares * price * (1 - slippage)
+        position_value = shares * close_px * (1 - eff_slippage)
         equity = cash + position_value
         equity_curve.append((date, equity))
 
@@ -952,7 +972,6 @@ def backtest_long_only(
             tdf["pnl"] = np.nan
         if "exit_date" not in tdf.columns:
             tdf["exit_date"] = pd.NaT
-
         tdf["pnl"] = tdf["pnl"].astype(float)
         tdf["return_%"] = (tdf["pnl"] / tdf["equity_before"]) * 100
         tdf["holding_days"] = (pd.to_datetime(tdf["exit_date"]) - pd.to_datetime(tdf["entry_date"])).dt.days
@@ -1002,41 +1021,6 @@ def backtest_long_only(
     }
     return eq, tdf, metrics
 
-
-# =============================
-# Fundamentals
-# =============================
-def _fix_debt_to_equity(x: float) -> float:
-    if pd.notna(x) and x > 10:
-        return x / 100.0
-    return x
-
-
-@st.cache_data(ttl=12 * 3600, show_spinner=False)
-def fetch_fundamentals_generic(ticker: str, market: str) -> dict:
-    t = yf.Ticker(ticker)
-    try:
-        info = t.info or {}
-    except Exception:
-        info = {}
-
-    FUND_KEYS = [
-        "marketCap", "trailingPE", "forwardPE", "pegRatio",
-        "priceToSalesTrailing12Months", "priceToBook", "returnOnEquity",
-        "profitMargins", "operatingMargins", "debtToEquity",
-        "revenueGrowth", "earningsGrowth", "freeCashflow", "currentPrice"
-    ]
-    
-    out = {k: safe_float(info.get(k)) for k in FUND_KEYS}
-
-    out["ticker"] = ticker
-    out["market"] = market
-    out["sector"] = info.get("sector", "")
-    out["industry"] = info.get("industry", "")
-    out["longName"] = info.get("longName", "") or info.get("shortName", "")
-    
-    out["debtToEquity"] = _fix_debt_to_equity(out["debtToEquity"])
-    return out
 
 
 def fundamental_score_row(row: dict, mode: str, thresholds: dict) -> Tuple[float, dict, bool]:
@@ -1174,6 +1158,7 @@ def _swing_points(high: pd.Series, low: pd.Series, left: int = 2, right: int = 2
     return hs, ls
 
 
+
 def analyze_sr_levels(df: pd.DataFrame, lookback: int = 200, tol=0.02) -> List[dict]:
     h = df["High"].tail(lookback).dropna()
     l = df["Low"].tail(lookback).dropna()
@@ -1182,19 +1167,20 @@ def analyze_sr_levels(df: pd.DataFrame, lookback: int = 200, tol=0.02) -> List[d
         return []
 
     v = df["Volume"].tail(lookback) if "Volume" in df.columns else pd.Series(dtype=float)
+    atr_ref = atr(df["High"], df["Low"], df["Close"], 14).tail(lookback)
+    atr_pct_med = float((atr_ref / c.reindex(atr_ref.index)).replace([np.inf, -np.inf], np.nan).median()) if len(atr_ref) > 0 else np.nan
+    adaptive_tol = float(np.clip(np.nanmedian([tol, (atr_pct_med * 1.2) if pd.notna(atr_pct_med) else tol]), 0.008, 0.04))
 
     hs, ls = _swing_points(h, l, left=3, right=3)
     raw_levels = [val for _, val in hs] + [val for _, val in ls]
     raw_levels += [float(c.tail(20).max()), float(c.tail(20).min())]
     raw_levels = [float(x) for x in raw_levels if np.isfinite(x)]
-
     if not raw_levels:
         return []
 
-    cluster_centers: List[float] = []
+    candidate_centers: List[float] = []
 
-    # 1D K-Means clustering (Gemini önerisi)
-    # Düz tolerans yerine seviyelerin doğal dağılımına göre merkezleri çıkarmaya çalışır.
+    # 1) 1D KMeans: doğal kümelenme yakalama
     try:
         arr = np.array(raw_levels, dtype=float).reshape(-1, 1)
         unique_count = len(np.unique(arr.flatten()))
@@ -1202,41 +1188,54 @@ def analyze_sr_levels(df: pd.DataFrame, lookback: int = 200, tol=0.02) -> List[d
             n_clusters = int(min(max(3, round(np.sqrt(len(raw_levels)))), 8, unique_count))
             km = KMeans(n_clusters=n_clusters, n_init=10, random_state=42)
             km.fit(arr)
-            cluster_centers.extend([float(x) for x in km.cluster_centers_.flatten() if np.isfinite(x)])
+            candidate_centers.extend([float(x) for x in km.cluster_centers_.flatten() if np.isfinite(x)])
     except Exception:
         pass
 
-    # Fallback / hibrit: önceki tolerans bazlı mantığı da koru
+    # 2) Histogram peak yaklaşımı: KMeans tek başına mükemmel değil
+    try:
+        bins = int(min(max(8, round(np.sqrt(len(raw_levels)) * 2)), 24))
+        hist, edges = np.histogram(np.array(raw_levels, dtype=float), bins=bins)
+        for i, val in enumerate(hist):
+            if val <= 0:
+                continue
+            left_ok = (i == 0) or (hist[i] >= hist[i - 1])
+            right_ok = (i == len(hist) - 1) or (hist[i] >= hist[i + 1])
+            if left_ok and right_ok:
+                center = float((edges[i] + edges[i + 1]) / 2.0)
+                if np.isfinite(center):
+                    candidate_centers.append(center)
+    except Exception:
+        pass
+
+    # 3) Fallback: tolerans bazlı eski mantık, ama dinamik merkezli
     adaptive_clusters = []
     for rl in sorted(set(round(float(x), 2) for x in raw_levels)):
         placed = False
         for cl in adaptive_clusters:
-            if cl["center"] != 0 and abs(rl - cl["center"]) / abs(cl["center"]) <= tol:
+            if cl["center"] != 0 and abs(rl - cl["center"]) / abs(cl["center"]) <= adaptive_tol:
                 cl["points"].append(float(rl))
                 cl["center"] = float(np.mean(cl["points"]))
                 placed = True
                 break
         if not placed:
             adaptive_clusters.append({"center": float(rl), "points": [float(rl)]})
+    candidate_centers.extend([float(cl["center"]) for cl in adaptive_clusters])
 
-    cluster_centers.extend([float(cl["center"]) for cl in adaptive_clusters])
-
-    # Yakın merkezleri tekrar birleştir
+    # 4) Çok yakın merkezleri merge et
+    candidate_centers = sorted([x for x in candidate_centers if np.isfinite(x)])
     merged_centers: List[float] = []
-    for center in sorted(cluster_centers):
-        if not np.isfinite(center):
-            continue
+    for center in candidate_centers:
         if not merged_centers:
             merged_centers.append(float(center))
             continue
-        last_center = merged_centers[-1]
-        if last_center != 0 and abs(center - last_center) / abs(last_center) <= (tol / 2.0):
-            merged_centers[-1] = float((last_center + float(center)) / 2.0)
+        prev = merged_centers[-1]
+        if prev != 0 and abs(center - prev) / abs(prev) <= (adaptive_tol * 0.6):
+            merged_centers[-1] = float((prev + center) / 2.0)
         else:
             merged_centers.append(float(center))
 
     cluster_centers = sorted(set(round(x, 2) for x in merged_centers if np.isfinite(x)))
-
     if not cluster_centers:
         return []
 
@@ -1248,11 +1247,9 @@ def analyze_sr_levels(df: pd.DataFrame, lookback: int = 200, tol=0.02) -> List[d
     df_lookback = df.tail(lookback)
 
     for level_px in cluster_centers:
-        lower_bound = level_px * (1 - tol / 2)
-        upper_bound = level_px * (1 + tol / 2)
-
+        lower_bound = level_px * (1 - adaptive_tol / 2)
+        upper_bound = level_px * (1 + adaptive_tol / 2)
         touches = df_lookback[(df_lookback["High"] >= lower_bound) & (df_lookback["Low"] <= upper_bound)]
-
         num_touches = len(touches)
         if num_touches == 0:
             continue
@@ -1267,11 +1264,9 @@ def analyze_sr_levels(df: pd.DataFrame, lookback: int = 200, tol=0.02) -> List[d
             vol_at_level = avg_vol_normal
 
         vol_diff_pct = (vol_at_level / avg_vol_normal - 1.0) * 100.0
-
         score_touches = min(num_touches * 10, 40)
         score_vol = min(max(vol_diff_pct / 2.0, 0), 35)
         score_dur = min(duration_bars / 2.0, 25)
-
         strength_pct = min(score_touches + score_vol + score_dur, 99.0)
 
         details.append({
@@ -1478,6 +1473,30 @@ def _project_future_index(index: pd.Index, bars_ahead: int = 8) -> Tuple[Any, fl
     return index[-1], future_x
 
 
+
+def _adaptive_trendline_params(subset: pd.DataFrame, line_kind: str = "support") -> Dict[str, Any]:
+    if subset is None or subset.empty:
+        return {"touch_tol_pct": 0.012, "break_tol_pct": 0.004, "max_pivots": 7, "min_required_touches": 3}
+
+    atr_pct_series = (subset.get("ATR", pd.Series(index=subset.index, dtype=float)) / subset["Close"]).replace([np.inf, -np.inf], np.nan)
+    atr_pct_med = float(atr_pct_series.median()) if atr_pct_series.notna().any() else 0.02
+    base_touch = float(np.clip(max(0.008, atr_pct_med * 1.2), 0.008, 0.02))
+    base_break = float(np.clip(base_touch * 0.35, 0.002, 0.008))
+
+    min_touches = 3
+    if len(subset) < 80 or atr_pct_med > 0.04:
+        min_touches = 2
+
+    max_pivots = int(min(max(6, round(len(subset) / 20)), 10))
+    return {
+        "touch_tol_pct": base_touch,
+        "break_tol_pct": base_break,
+        "max_pivots": max_pivots,
+        "min_required_touches": min_touches,
+    }
+
+
+
 def _evaluate_line_candidate(
     subset: pd.DataFrame,
     pivot_points: List[Tuple[pd.Timestamp, float]],
@@ -1497,23 +1516,23 @@ def _evaluate_line_candidate(
         return None
 
     touched = _count_line_touches(subset, pivot_points, slope, intercept, touch_tol_pct=touch_tol_pct)
-    if len(touched) < max(2, min_required_touches):
+    adaptive_min_touches = min_required_touches
+    if source in {"linregress", "ransac"} and len(subset) >= 18:
+        adaptive_min_touches = min(adaptive_min_touches, 2)
+
+    if len(touched) < max(2, adaptive_min_touches):
         return None
 
     touched_x = np.array([x for _, _, x, _ in touched], dtype=float)
     touched_y = np.array([p for _, p, _, _ in touched], dtype=float)
-
     if len(np.unique(touched_x)) < 2:
         return None
 
-    # 1) Pivot temaslarına göre klasik R²
     y_fit_touch = float(intercept) + float(slope) * touched_x
     ss_res_touch = float(np.sum((touched_y - y_fit_touch) ** 2))
     ss_tot_touch = float(np.sum((touched_y - np.mean(touched_y)) ** 2))
     touch_r2 = 1.0 if ss_tot_touch <= 1e-12 else max(0.0, 1.0 - (ss_res_touch / ss_tot_touch))
 
-    # 2) Gemini önerisi: sadece temas eden pivotlar değil, o aralıktaki TÜM fiyat barlarının
-    # çizgiye olan mesafesiyle de trend kalitesini ölç.
     start_seg = int(np.min(touched_x))
     end_seg = int(np.max(touched_x))
     x_seg = np.arange(start_seg, end_seg + 1, dtype=float)
@@ -1536,10 +1555,9 @@ def _evaluate_line_candidate(
     r2_candidates = [touch_r2, segment_r2]
     if base_r2 is not None and np.isfinite(base_r2):
         r2_candidates.append(float(base_r2))
-    r2_final = float(max(r2_candidates))
+    r2_final = float(np.mean(r2_candidates)) if r2_candidates else 0.0
 
-    # Regresyon / RANSAC çizgilerinde taban kalite filtresi
-    if source in {"linregress", "ransac"} and max(r2_final, segment_fit) < 0.80:
+    if source in {"linregress", "ransac"} and max(r2_final, segment_fit) < 0.70:
         return None
 
     break_stats = _line_break_stats(
@@ -1553,17 +1571,19 @@ def _evaluate_line_candidate(
     if break_stats["violation_count"] > 0:
         return None
 
+    span_ratio = (int(np.max(touched_x)) - int(np.min(touched_x))) / max(1.0, float(len(subset) - 1))
     recent_bonus = float(np.max(touched_x)) / max(1.0, float(len(subset) - 1))
+
     score = (
-        len(touched) * 100.0
-        + r2_final * 60.0
-        + segment_fit * 40.0
-        + recent_bonus * 10.0
+        len(touched) * 70.0
+        + r2_final * 35.0
+        + segment_fit * 35.0
+        + span_ratio * 20.0
+        + recent_bonus * 8.0
         + float(extra_score)
     )
 
     first_touch = min(touched, key=lambda x: x[2])
-
     return {
         "x1": int(first_touch[2]),
         "x2": int(np.max(touched_x)),
@@ -1582,6 +1602,7 @@ def _evaluate_line_candidate(
 
 
 
+
 def _build_trendline_candidates(
     subset: pd.DataFrame,
     pivot_points: List[Tuple[pd.Timestamp, float]],
@@ -1593,13 +1614,18 @@ def _build_trendline_candidates(
     if subset is None or subset.empty or len(pivot_points) < 2:
         return None
 
-    pivots = pivot_points[-max_pivots:]
+    params = _adaptive_trendline_params(subset, line_kind=line_kind)
+    use_touch_tol = float(params["touch_tol_pct"])
+    use_break_tol = float(params["break_tol_pct"])
+    use_max_pivots = int(max(max_pivots, params["max_pivots"]))
+    min_required_touches = int(params["min_required_touches"])
+
+    pivots = pivot_points[-use_max_pivots:]
     if len(pivots) < 2:
         return None
 
     candidates: List[Dict[str, Any]] = []
 
-    # 1) Geçerli pivot kombinasyonlarını dene
     for i in range(len(pivots) - 1):
         for j in range(i + 1, len(pivots)):
             t1, p1 = pivots[i]
@@ -1609,7 +1635,6 @@ def _build_trendline_candidates(
                 x2 = subset.index.get_loc(t2)
             except Exception:
                 continue
-
             if x2 <= x1:
                 continue
 
@@ -1617,85 +1642,53 @@ def _build_trendline_candidates(
             intercept = float(p1) - slope * float(x1)
 
             cand = _evaluate_line_candidate(
-                subset,
-                pivots,
-                slope=slope,
-                intercept=intercept,
-                line_kind=line_kind,
-                touch_tol_pct=touch_tol_pct,
-                break_tol_pct=break_tol_pct,
-                source="pivot_combo",
-                anchor_t1=t1,
-                anchor_p1=float(p1),
-                min_required_touches=3,
+                subset, pivots,
+                slope=slope, intercept=intercept, line_kind=line_kind,
+                touch_tol_pct=use_touch_tol, break_tol_pct=use_break_tol,
+                source="pivot_combo", anchor_t1=t1, anchor_p1=float(p1),
+                min_required_touches=min_required_touches,
             )
             if cand is not None:
                 candidates.append(cand)
 
-    # Son 5 majör pivot üzerinden SciPy linregress
     reg_pivots = pivots[-5:] if len(pivots) >= 3 else pivots
     if len(reg_pivots) >= 3:
         try:
             rx = np.array([float(subset.index.get_loc(t)) for t, _ in reg_pivots], dtype=float)
             ry = np.array([float(p) for _, p in reg_pivots], dtype=float)
-            if len(np.unique(rx)) >= 2:
-                slope, intercept, r_value, p_value, std_err = linregress(rx, ry)
-                reg_r2 = float(max(0.0, r_value ** 2))
-                cand = _evaluate_line_candidate(
-                    subset,
-                    pivots,
-                    slope=float(slope),
-                    intercept=float(intercept),
-                    line_kind=line_kind,
-                    touch_tol_pct=touch_tol_pct,
-                    break_tol_pct=break_tol_pct,
-                    source="linregress",
-                    anchor_t1=reg_pivots[0][0],
-                    anchor_p1=float(reg_pivots[0][1]),
-                    min_required_touches=3,
-                    base_r2=reg_r2,
-                    extra_score=5.0,
-                )
-                if cand is not None:
-                    candidates.append(cand)
+            slope_lr, intercept_lr, r_value, _, _ = linregress(rx, ry)
+            base_r2 = float((r_value ** 2)) if np.isfinite(r_value) else np.nan
+            extra_score = max(0.0, (base_r2 - 0.5) * 20.0) if pd.notna(base_r2) else 0.0
+            cand = _evaluate_line_candidate(
+                subset, pivots,
+                slope=float(slope_lr), intercept=float(intercept_lr), line_kind=line_kind,
+                touch_tol_pct=use_touch_tol, break_tol_pct=use_break_tol,
+                source="linregress", anchor_t1=reg_pivots[0][0], anchor_p1=float(reg_pivots[0][1]),
+                min_required_touches=min_required_touches, base_r2=base_r2, extra_score=extra_score,
+            )
+            if cand is not None:
+                candidates.append(cand)
         except Exception:
             pass
 
-        # RANSAC ile aykırı pivotları filtrelemeye çalış
         try:
             rx = np.array([float(subset.index.get_loc(t)) for t, _ in reg_pivots], dtype=float).reshape(-1, 1)
             ry = np.array([float(p) for _, p in reg_pivots], dtype=float)
-            if len(np.unique(rx.flatten())) >= 2:
-                ransac = RANSACRegressor(
-                    estimator=LinearRegression(),
-                    min_samples=max(2, min(3, len(reg_pivots))),
-                    random_state=42,
-                )
-                ransac.fit(rx, ry)
-                slope = float(ransac.estimator_.coef_[0])
-                intercept = float(ransac.estimator_.intercept_)
-                inlier_ratio = float(np.mean(ransac.inlier_mask_)) if hasattr(ransac, "inlier_mask_") and ransac.inlier_mask_ is not None else 0.0
-                y_pred = ransac.predict(rx)
-                ss_res = float(np.sum((ry - y_pred) ** 2))
-                ss_tot = float(np.sum((ry - np.mean(ry)) ** 2))
-                reg_r2 = 1.0 if ss_tot <= 1e-12 else max(0.0, 1.0 - (ss_res / ss_tot))
+            ransac = RANSACRegressor(random_state=42)
+            ransac.fit(rx, ry)
+            slope_rc = float(ransac.estimator_.coef_[0]) if hasattr(ransac.estimator_, "coef_") else np.nan
+            intercept_rc = float(ransac.estimator_.intercept_) if hasattr(ransac.estimator_, "intercept_") else np.nan
+            if np.isfinite(slope_rc) and np.isfinite(intercept_rc):
+                base_r2 = float(ransac.score(rx, ry))
+                extra_score = max(0.0, (base_r2 - 0.5) * 20.0) if pd.notna(base_r2) else 0.0
                 cand = _evaluate_line_candidate(
-                    subset,
-                    pivots,
-                    slope=slope,
-                    intercept=intercept,
-                    line_kind=line_kind,
-                    touch_tol_pct=touch_tol_pct,
-                    break_tol_pct=break_tol_pct,
-                    source="ransac",
-                    anchor_t1=reg_pivots[0][0],
-                    anchor_p1=float(reg_pivots[0][1]),
-                    min_required_touches=3,
-                    base_r2=reg_r2,
-                    extra_score=inlier_ratio * 15.0,
+                    subset, pivots,
+                    slope=slope_rc, intercept=intercept_rc, line_kind=line_kind,
+                    touch_tol_pct=use_touch_tol, break_tol_pct=use_break_tol,
+                    source="ransac", anchor_t1=reg_pivots[0][0], anchor_p1=float(reg_pivots[0][1]),
+                    min_required_touches=min_required_touches, base_r2=base_r2, extra_score=extra_score,
                 )
                 if cand is not None:
-                    cand["inlier_ratio"] = float(inlier_ratio)
                     candidates.append(cand)
         except Exception:
             pass
@@ -1705,10 +1698,11 @@ def _build_trendline_candidates(
 
     candidates = sorted(
         candidates,
-        key=lambda x: (x.get("touches", 0), x.get("r2", 0.0), x.get("score", 0.0)),
+        key=lambda x: (x.get("score", 0.0), x.get("touches", 0), x.get("segment_fit", 0.0), x.get("r2", 0.0)),
         reverse=True,
     )
     return candidates[0]
+
 
 
 
@@ -1733,61 +1727,33 @@ def add_support_resistance_trend_overlays(fig: go.Figure, plot_df: pd.DataFrame,
         near_resistances = sorted(above, key=lambda x: abs(x["price"] - base_px))[:2]
 
         for lv in near_supports:
-            fig.add_hline(
-                y=float(lv["price"]),
-                line_dash="dot",
-                line_color="green",
-                annotation_text=f"Destek {lv['price']:.2f}",
-                annotation_position="bottom left",
-            )
-
+            fig.add_hline(y=float(lv["price"]), line_dash="dot", line_color="green", annotation_text=f"Destek {lv['price']:.2f}", annotation_position="bottom left")
         for lv in near_resistances:
-            fig.add_hline(
-                y=float(lv["price"]),
-                line_dash="dot",
-                line_color="red",
-                annotation_text=f"Direnç {lv['price']:.2f}",
-                annotation_position="top left",
-            )
+            fig.add_hline(y=float(lv["price"]), line_dash="dot", line_color="red", annotation_text=f"Direnç {lv['price']:.2f}", annotation_position="top left")
 
         subset = use.tail(min(len(use), 140))
         swing_highs, swing_lows = _swing_points(subset["High"], subset["Low"], left=3, right=3)
-        projection_bars = 8
-        future_date, future_x = _project_future_index(subset.index, bars_ahead=projection_bars)
+        future_date, future_x = _project_future_index(subset.index, bars_ahead=8)
 
-        support_line = _build_trendline_candidates(
-            subset,
-            swing_lows,
-            line_kind="support",
-            max_pivots=7,
-            touch_tol_pct=0.01,
-            break_tol_pct=0.003,
-        )
+        support_line = _build_trendline_candidates(subset, swing_lows, line_kind="support")
         if support_line is not None and future_date is not None:
             y_future = support_line["intercept"] + support_line["slope"] * float(future_x)
             fig.add_trace(go.Scatter(
                 x=[support_line["t1"], future_date],
                 y=[support_line["p1"], float(y_future)],
                 mode="lines",
-                name=f"Destek Trendi ({support_line.get('source','trend')})",
+                name="Destek Trendi",
                 line=dict(color="green", dash="dash", width=3 if support_line["touches"] >= 3 else 2),
             ))
 
-        resistance_line = _build_trendline_candidates(
-            subset,
-            swing_highs,
-            line_kind="resistance",
-            max_pivots=7,
-            touch_tol_pct=0.01,
-            break_tol_pct=0.003,
-        )
+        resistance_line = _build_trendline_candidates(subset, swing_highs, line_kind="resistance")
         if resistance_line is not None and future_date is not None:
             y_future = resistance_line["intercept"] + resistance_line["slope"] * float(future_x)
             fig.add_trace(go.Scatter(
                 x=[resistance_line["t1"], future_date],
                 y=[resistance_line["p1"], float(y_future)],
                 mode="lines",
-                name=f"Direnç Trendi ({resistance_line.get('source','trend')})",
+                name="Direnç Trendi",
                 line=dict(color="red", dash="dash", width=3 if resistance_line["touches"] >= 3 else 2),
             ))
     except Exception:
@@ -1819,6 +1785,230 @@ def apply_live_last_override_to_df(df: pd.DataFrame, live_price: float) -> pd.Da
         return df
 
     return out
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def build_sector_peer_snapshot(universe_tuple: Tuple[str, ...], market: str) -> pd.DataFrame:
+    if not universe_tuple:
+        return pd.DataFrame()
+
+    rows = []
+
+    def _one(raw_ticker: str):
+        norm = normalize_ticker(raw_ticker, market)
+        try:
+            row = fetch_fundamentals_generic(norm, market)
+            row["raw_ticker"] = raw_ticker
+            return row
+        except Exception:
+            return None
+
+    max_workers = min(12, max(4, len(universe_tuple) // 8)) if len(universe_tuple) > 8 else min(4, len(universe_tuple))
+    max_workers = max(1, max_workers)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = [ex.submit(_one, raw) for raw in universe_tuple]
+        for fut in as_completed(futures):
+            try:
+                res = fut.result()
+                if res:
+                    rows.append(res)
+            except Exception:
+                pass
+
+    df_peers = pd.DataFrame(rows)
+    if df_peers.empty:
+        return df_peers
+
+    for col in ["trailingPE", "priceToBook", "forwardPE", "marketCap"]:
+        if col in df_peers.columns:
+            df_peers[col] = pd.to_numeric(df_peers[col], errors="coerce")
+
+    return df_peers
+
+
+def get_sector_relative_value_summary(ticker: str, market: str, universe: List[str]) -> Dict[str, Any]:
+    out = {"label": "N/A", "delta_pct": np.nan, "detail": "Sektör karşılaştırması yapılamadı."}
+    if not universe:
+        return out
+
+    peers = build_sector_peer_snapshot(tuple(universe), market)
+    if peers.empty:
+        return out
+
+    target_row = peers[peers["ticker"] == ticker]
+    if target_row.empty:
+        return out
+
+    target_row = target_row.iloc[0]
+    sector = str(target_row.get("sector", "") or "").strip()
+    if not sector:
+        return out
+
+    sector_peers = peers[(peers["sector"].fillna("").astype(str).str.strip() == sector) & (peers["ticker"] != ticker)].copy()
+    if sector_peers.empty:
+        return out
+
+    target_pe = safe_float(target_row.get("trailingPE"))
+    target_pb = safe_float(target_row.get("priceToBook"))
+    sec_pe = pd.to_numeric(sector_peers.get("trailingPE"), errors="coerce").replace([np.inf, -np.inf], np.nan)
+    sec_pb = pd.to_numeric(sector_peers.get("priceToBook"), errors="coerce").replace([np.inf, -np.inf], np.nan)
+
+    comps = []
+    if pd.notna(target_pe) and sec_pe.notna().sum() >= 3:
+        sec_pe_med = float(sec_pe.median())
+        if np.isfinite(sec_pe_med) and sec_pe_med > 0:
+            comps.append((target_pe / sec_pe_med - 1.0) * 100.0)
+    if pd.notna(target_pb) and sec_pb.notna().sum() >= 3:
+        sec_pb_med = float(sec_pb.median())
+        if np.isfinite(sec_pb_med) and sec_pb_med > 0:
+            comps.append((target_pb / sec_pb_med - 1.0) * 100.0)
+
+    if not comps:
+        return out
+
+    delta_pct = float(np.mean(comps))
+    if delta_pct >= 5:
+        label = "Pahalı"
+        detail = f"Sektör ortalamasına göre %{abs(delta_pct):.1f} daha pahalı"
+    elif delta_pct <= -5:
+        label = "Ucuz"
+        detail = f"Sektör ortalamasına göre %{abs(delta_pct):.1f} daha ucuz"
+    else:
+        label = "Nötr"
+        detail = f"Sektör ortalamasına göre fark %{abs(delta_pct):.1f}"
+
+    out.update({"label": label, "delta_pct": delta_pct, "detail": f"{sector} | {detail}"})
+    return out
+
+
+def backtest_monte_carlo(eq: pd.Series, n_sims: int = 300, bars: Optional[int] = None) -> Dict[str, Any]:
+    if eq is None or len(eq) < 5:
+        return {"error": "Monte Carlo için yeterli sermaye eğrisi yok."}
+
+    ret = pd.Series(eq).pct_change().dropna()
+    if ret.empty:
+        return {"error": "Monte Carlo için yeterli getiri serisi yok."}
+
+    horizon = int(bars) if bars else int(len(ret))
+    horizon = max(5, min(horizon, len(ret)))
+    source = ret.tail(min(len(ret), max(40, horizon))).astype(float).values
+
+    sims = []
+    final_returns = []
+    max_dds = []
+
+    for _ in range(int(n_sims)):
+        sampled = np.random.choice(source, size=horizon, replace=True)
+        path = np.cumprod(1.0 + sampled)
+        sims.append(path)
+        final_returns.append(float(path[-1] - 1.0))
+        peak = np.maximum.accumulate(path)
+        dd = (path / peak) - 1.0
+        max_dds.append(float(np.min(dd)))
+
+    sims_arr = np.asarray(sims, dtype=float)
+    p10 = np.nanpercentile(sims_arr, 10, axis=0)
+    p50 = np.nanpercentile(sims_arr, 50, axis=0)
+    p90 = np.nanpercentile(sims_arr, 90, axis=0)
+
+    fig = go.Figure()
+    x = list(range(1, horizon + 1))
+    fig.add_trace(go.Scatter(x=x, y=p10, name="P10", mode="lines", line=dict(dash="dot")))
+    fig.add_trace(go.Scatter(x=x, y=p50, name="Median", mode="lines"))
+    fig.add_trace(go.Scatter(x=x, y=p90, name="P90", mode="lines", line=dict(dash="dot")))
+    fig.update_layout(height=320, title="Monte Carlo Simülasyonu (Bootstrap)", xaxis_title="Bar", yaxis_title="Birikimli Getiri Katsayısı")
+
+    return {
+        "figure": fig,
+        "median_return_pct": float(np.nanmedian(final_returns) * 100.0),
+        "p10_return_pct": float(np.nanpercentile(final_returns, 10) * 100.0),
+        "p90_return_pct": float(np.nanpercentile(final_returns, 90) * 100.0),
+        "median_max_dd_pct": float(np.nanmedian(max_dds) * 100.0),
+    }
+
+
+def donchian_channels(high: pd.Series, low: pd.Series, window: int = 20) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    upper = high.rolling(int(window), min_periods=int(window)).max()
+    lower = low.rolling(int(window), min_periods=int(window)).min()
+    mid = (upper + lower) / 2.0
+    return upper, mid, lower
+
+
+def trend_with_pattern_entry_signals(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out["TWP_SMA50"] = sma(out["Close"], 50)
+    out["TWP_SMA200"] = sma(out["Close"], 200)
+    out["TWP_TREND_UP"] = (out["TWP_SMA50"] > out["TWP_SMA200"]).fillna(False)
+    out["TWP_TREND_DOWN"] = (out["TWP_SMA50"] < out["TWP_SMA200"]).fillna(False)
+
+    bull_patterns = (
+        out.get("PATTERN_ENGULFING_BULL", False).astype(bool)
+        | out.get("PATTERN_HAMMER", False).astype(bool)
+        | out.get("PATTERN_PIERCING", False).astype(bool)
+        | out.get("KANGAROO_BULL", 0).astype(bool)
+    )
+    bear_patterns = (
+        out.get("PATTERN_ENGULFING_BEAR", False).astype(bool)
+        | out.get("PATTERN_SHOOTING_STAR", False).astype(bool)
+        | out.get("PATTERN_DARK_CLOUD", False).astype(bool)
+        | out.get("KANGAROO_BEAR", 0).astype(bool)
+    )
+
+    out["TWP_LONG_ENTRY"] = out["TWP_TREND_UP"] & bull_patterns & (out["Close"] > out.get("EMA50", out["Close"]))
+    out["TWP_SHORT_ENTRY"] = out["TWP_TREND_DOWN"] & bear_patterns & (out["Close"] < out.get("EMA50", out["Close"]))
+    return out
+
+
+def donchian_5_20_system(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out["D520_SMA5"] = sma(out["Close"], 5)
+    out["D520_SMA20"] = sma(out["Close"], 20)
+    out["D520_LONG"] = (out["D520_SMA5"] > out["D520_SMA20"]).fillna(False)
+    out["D520_SHORT"] = (out["D520_SMA5"] < out["D520_SMA20"]).fillna(False)
+    out["D520_BUY_SIG"] = out["D520_LONG"] & (~out["D520_LONG"].shift(1).fillna(False))
+    out["D520_SELL_SIG"] = out["D520_SHORT"] & (~out["D520_SHORT"].shift(1).fillna(False))
+    return out
+
+
+def richard_dennis_system(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out["RD_UPPER20"], out["RD_MID20"], out["RD_LOWER20"] = donchian_channels(out["High"], out["Low"], 20)
+    out["RD_EXIT_UPPER10"], _, out["RD_EXIT_LOWER10"] = donchian_channels(out["High"], out["Low"], 10)
+    out["RD_LONG_ENTRY"] = (out["Close"] > out["RD_UPPER20"].shift(1)).fillna(False)
+    out["RD_LONG_EXIT"] = (out["Close"] < out["RD_EXIT_LOWER10"].shift(1)).fillna(False)
+    out["RD_SHORT_ENTRY"] = (out["Close"] < out["RD_LOWER20"].shift(1)).fillna(False)
+    out["RD_SHORT_EXIT"] = (out["Close"] > out["RD_EXIT_UPPER10"].shift(1)).fillna(False)
+    return out
+
+
+def build_system_overlay_chart(
+    df: pd.DataFrame,
+    title: str,
+    line_specs: List[Tuple[str, str]],
+    marker_specs: Optional[List[Tuple[str, str, str]]] = None,
+) -> go.Figure:
+    fig = go.Figure()
+    fig.add_trace(go.Candlestick(
+        x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Fiyat"
+    ))
+    for col, label in line_specs:
+        if col in df.columns:
+            fig.add_trace(go.Scatter(x=df.index, y=df[col], mode="lines", name=label))
+    marker_specs = marker_specs or []
+    for col, label, symbol in marker_specs:
+        if col in df.columns:
+            filt = pd.Series(df[col]).fillna(False).astype(bool)
+            if filt.any():
+                fig.add_trace(go.Scatter(
+                    x=df.index[filt],
+                    y=df["Close"][filt],
+                    mode="markers",
+                    name=label,
+                    marker=dict(symbol=symbol, size=10),
+                ))
+    fig.update_layout(height=620, title=title, xaxis_rangeslider_visible=False)
+    return fig
 
 @st.cache_data(ttl=30, show_spinner=False)
 def get_live_price(ticker: str) -> dict:
@@ -3945,13 +4135,17 @@ def _future_feature_importance(model_name: str, fitted_model, feature_cols: List
     return out.head(15).reset_index(drop=True)
 
 
+
 def _future_prepare_dataset(df: pd.DataFrame, horizon_bars: int):
     features = build_future_price_features(df)
-    target = pd.to_numeric(df["Close"].shift(-horizon_bars), errors="coerce").rename("TARGET")
-    dataset = pd.concat([features, target], axis=1).replace([np.inf, -np.inf], np.nan).dropna()
-    feature_cols = [c for c in dataset.columns if c != "TARGET"]
+    target_ret = ((pd.to_numeric(df["Close"].shift(-horizon_bars), errors="coerce") / pd.to_numeric(df["Close"], errors="coerce")) - 1.0).rename("TARGET_RET")
+    base_close = pd.to_numeric(df["Close"], errors="coerce").rename("BASE_CLOSE")
+    dataset = pd.concat([features, target_ret, base_close], axis=1).replace([np.inf, -np.inf], np.nan).dropna()
+    feature_cols = [c for c in dataset.columns if c not in ["TARGET_RET", "BASE_CLOSE"]]
     latest_features = features[feature_cols].replace([np.inf, -np.inf], np.nan).dropna()
-    return dataset, feature_cols, latest_features
+    latest_base_close = float(pd.to_numeric(df["Close"], errors="coerce").iloc[-1]) if not df.empty else np.nan
+    return dataset, feature_cols, latest_features, latest_base_close
+
 
 
 def _future_direction_probabilities(current_price: float, predicted_price: float, residuals: np.ndarray):
@@ -3983,102 +4177,109 @@ def _future_confidence_score(mape: float, direction_acc: float, band_width_pct: 
     return float(max(0.0, min(100.0, score)))
 
 
+
 def future_price_single_model_eval(df: pd.DataFrame, horizon_bars: int, model_name: str, use_walkforward: bool = False) -> Dict[str, Any]:
-    dataset, feature_cols, latest_features = _future_prepare_dataset(df, horizon_bars)
+    dataset, feature_cols, latest_features, latest_base_close = _future_prepare_dataset(df, horizon_bars)
     if dataset.empty:
         return {"error": "Model veri seti oluşturulamadı."}
 
-    min_rows_needed = max(80, horizon_bars * 8)
+    min_rows_needed = max(100, horizon_bars * 10)
     if len(dataset) < min_rows_needed:
         return {"error": f"Yeterli eğitim verisi yok. En az yaklaşık {min_rows_needed} satır gerekli, mevcut: {len(dataset)}."}
 
     test_size = min(max(20, len(dataset) // 5), 60)
     split_idx = len(dataset) - test_size
-    if split_idx < 40:
+    if split_idx < 50:
         return {"error": "Eğitim/test ayrımı için yeterli veri yok."}
 
-    y_test = dataset.iloc[split_idx:]["TARGET"].astype(float).values
+    y_test_ret = dataset.iloc[split_idx:]["TARGET_RET"].astype(float).values
     test_index = dataset.index[split_idx:]
-    current_close_test = df.loc[test_index, "Close"].astype(float).values
+    current_close_test = dataset.iloc[split_idx:]["BASE_CLOSE"].astype(float).values
+    actual_future_prices = current_close_test * (1.0 + y_test_ret)
 
     if use_walkforward:
-        wf_preds = []
-        for ds_idx in range(split_idx, len(dataset)):
-            X_hist = dataset.iloc[:ds_idx][feature_cols].astype(float)
-            y_hist = dataset.iloc[:ds_idx]["TARGET"].astype(float)
-            X_one = dataset.iloc[[ds_idx]][feature_cols].astype(float)
-            pred_one, _, _ = _future_fit_predict(model_name, X_hist, y_hist, X_one)
-            wf_preds.append(float(pred_one[0]))
-        y_pred_test = np.asarray(wf_preds, dtype=float)
+        n_splits = min(5, max(3, len(dataset) // max(25, test_size // 2)))
+        if split_idx < n_splits + 20:
+            n_splits = 3
+        tscv = TimeSeriesSplit(n_splits=n_splits)
+        wf_preds_ret = np.full(len(dataset), np.nan, dtype=float)
+        for train_idx, test_idx in tscv.split(dataset):
+            X_hist = dataset.iloc[train_idx][feature_cols].astype(float)
+            y_hist = dataset.iloc[train_idx]["TARGET_RET"].astype(float)
+            X_test_fold = dataset.iloc[test_idx][feature_cols].astype(float)
+            pred_fold, _, _ = _future_fit_predict(model_name, X_hist, y_hist, X_test_fold)
+            wf_preds_ret[test_idx] = np.asarray(pred_fold, dtype=float)
+        y_pred_ret_test = wf_preds_ret[split_idx:]
+        valid_mask = np.isfinite(y_pred_ret_test)
+        if valid_mask.sum() < max(10, test_size // 2):
+            wf_preds = []
+            for ds_idx in range(split_idx, len(dataset)):
+                X_hist = dataset.iloc[:ds_idx][feature_cols].astype(float)
+                y_hist = dataset.iloc[:ds_idx]["TARGET_RET"].astype(float)
+                X_one = dataset.iloc[[ds_idx]][feature_cols].astype(float)
+                pred_one, _, _ = _future_fit_predict(model_name, X_hist, y_hist, X_one)
+                wf_preds.append(float(pred_one[0]))
+            y_pred_ret_test = np.asarray(wf_preds, dtype=float)
+            valid_mask = np.isfinite(y_pred_ret_test)
+        current_close_test = current_close_test[valid_mask]
+        y_test_ret = y_test_ret[valid_mask]
+        actual_future_prices = actual_future_prices[valid_mask]
+        y_pred_ret_test = y_pred_ret_test[valid_mask]
     else:
         X_train = dataset.iloc[:split_idx][feature_cols].astype(float)
-        y_train = dataset.iloc[:split_idx]["TARGET"].astype(float)
+        y_train = dataset.iloc[:split_idx]["TARGET_RET"].astype(float)
         X_test = dataset.iloc[split_idx:][feature_cols].astype(float)
-        y_pred_test, _, _ = _future_fit_predict(model_name, X_train, y_train, X_test)
-        y_pred_test = np.asarray(y_pred_test, dtype=float)
+        y_pred_ret_test, _, _ = _future_fit_predict(model_name, X_train, y_train, X_test)
+        y_pred_ret_test = np.asarray(y_pred_ret_test, dtype=float)
 
-    metrics = _future_metrics(y_test, y_pred_test, current_close_test)
+    y_pred_test = current_close_test * (1.0 + y_pred_ret_test)
+    metrics = _future_metrics(actual_future_prices, y_pred_test, current_close_test)
+
+    residuals = actual_future_prices - y_pred_test
+    resid_std = float(np.nanstd(residuals)) if len(residuals) > 1 else np.nan
 
     X_full = dataset[feature_cols].astype(float)
-    y_full = dataset["TARGET"].astype(float)
-    if latest_features.empty:
-        return {"error": "Son bar için özellikler oluşturulamadı."}
+    y_full = dataset["TARGET_RET"].astype(float)
+    pred_latest_ret, fitted_model, aux = _future_fit_predict(model_name, X_full, y_full, latest_features.tail(1).astype(float))
+    predicted_return = float(pred_latest_ret[0])
+    predicted_price = float(latest_base_close * (1.0 + predicted_return))
+    delta_pct = float(predicted_return * 100.0)
 
-    latest_row = latest_features.iloc[[-1]][feature_cols].astype(float)
-    latest_pred, fitted_full_model, aux_full = _future_fit_predict(model_name, X_full, y_full, latest_row)
-    predicted_price = float(np.asarray(latest_pred)[0])
-    last_feature_index = latest_features.index[-1]
-    current_price = float(df.loc[last_feature_index, "Close"])
-    delta_pct = float((predicted_price / current_price - 1.0) * 100.0) if current_price != 0 else np.nan
+    lower_price = predicted_price - 1.28 * resid_std if np.isfinite(resid_std) else np.nan
+    upper_price = predicted_price + 1.28 * resid_std if np.isfinite(resid_std) else np.nan
+    band_width_pct = float(((upper_price - lower_price) / latest_base_close) * 100.0) if np.isfinite(lower_price) and np.isfinite(upper_price) and latest_base_close != 0 else np.nan
 
-    residuals = (y_test - y_pred_test).astype(float) if len(y_test) > 0 else np.array([], dtype=float)
-    if len(residuals) > 0:
-        q10 = float(np.quantile(residuals, 0.10))
-        q90 = float(np.quantile(residuals, 0.90))
-        predicted_low = float(predicted_price + q10)
-        predicted_high = float(predicted_price + q90)
-        residual_std = float(np.std(residuals))
-    else:
-        predicted_low = np.nan
-        predicted_high = np.nan
-        residual_std = np.nan
+    up_prob, down_prob, flat_prob = _future_direction_probabilities(latest_base_close, predicted_price, residuals)
+    confidence_score = _future_confidence_score(metrics.get("mape", np.nan), metrics.get("direction_acc", np.nan), band_width_pct)
 
-    band_width_pct = float(((predicted_high - predicted_low) / current_price) * 100.0) if pd.notna(predicted_low) and pd.notna(predicted_high) and current_price != 0 else np.nan
-    up_prob, down_prob, flat_prob = _future_direction_probabilities(current_price, predicted_price, residuals)
-    confidence_score = _future_confidence_score(metrics["mape"], metrics["direction_acc"], band_width_pct)
-    feature_importance_df = _future_feature_importance(model_name, fitted_full_model, feature_cols, aux_full)
-
-    recent_actual = df["Close"].tail(120).copy()
-    test_actual_series = pd.Series(y_test, index=test_index, name="Actual")
-    test_pred_series = pd.Series(y_pred_test, index=test_index, name="Predicted")
+    importance_df = _future_feature_importance(model_name, fitted_model, feature_cols, aux)
 
     return {
-        "error": None,
-        "model_name": model_name,
+        "model": model_name,
         "predicted_price": predicted_price,
-        "predicted_low": predicted_low,
-        "predicted_high": predicted_high,
-        "current_price": current_price,
+        "predicted_return_pct": float(predicted_return * 100.0),
         "delta_pct": delta_pct,
-        "horizon_bars": int(horizon_bars),
-        "train_rows": int(split_idx),
-        "test_rows": int(len(dataset) - split_idx),
-        "mae": metrics["mae"],
-        "rmse": metrics["rmse"],
-        "mape": metrics["mape"],
-        "direction_acc": metrics["direction_acc"],
+        "mae": metrics.get("mae", np.nan),
+        "rmse": metrics.get("rmse", np.nan),
+        "mape": metrics.get("mape", np.nan),
+        "direction_acc": metrics.get("direction_acc", np.nan),
+        "resid_std": resid_std,
+        "lower_price": lower_price,
+        "upper_price": upper_price,
+        "band_width_pct": band_width_pct,
         "up_prob": up_prob,
         "down_prob": down_prob,
         "flat_prob": flat_prob,
-        "band_width_pct": band_width_pct,
         "confidence_score": confidence_score,
-        "last_feature_index": str(last_feature_index),
-        "recent_actual": recent_actual,
-        "test_actual_series": test_actual_series,
-        "test_pred_series": test_pred_series,
-        "feature_importance_df": feature_importance_df,
-        "residual_std": residual_std,
+        "test_index": test_index,
+        "y_true": actual_future_prices,
+        "y_pred": y_pred_test,
+        "current_close_test": current_close_test,
+        "feature_importance": importance_df,
+        "latest_base_close": latest_base_close,
     }
+
+
 
 
 def future_price_horizon_benchmark(df: pd.DataFrame, model_name: str, requested_horizon: int) -> pd.DataFrame:
@@ -4089,22 +4290,18 @@ def future_price_horizon_benchmark(df: pd.DataFrame, model_name: str, requested_
             continue
         quick = future_price_single_model_eval(df, hz, model_name, use_walkforward=True)
         if quick.get("error"):
-            rows.append({
-                "Horizon": hz,
-                "MAPE %": np.nan,
-                "MAE": np.nan,
-                "Yön %": np.nan,
-                "Durum": "Veri yetersiz",
-            })
-        else:
-            rows.append({
-                "Horizon": hz,
-                "MAPE %": quick.get("mape", np.nan),
-                "MAE": quick.get("mae", np.nan),
-                "Yön %": quick.get("direction_acc", np.nan),
-                "Durum": "Hazır",
-            })
+            continue
+        rows.append({
+            "Ufuk (bar)": hz,
+            "MAPE %": quick.get("mape", np.nan),
+            "RMSE": quick.get("rmse", np.nan),
+            "Yön %": quick.get("direction_acc", np.nan),
+            "Getiri %": quick.get("predicted_return_pct", np.nan),
+            "Tahmin": quick.get("predicted_price", np.nan),
+        })
     return pd.DataFrame(rows)
+
+
 
 
 def future_price_ml_forecast(df: pd.DataFrame, horizon_bars: int) -> Dict[str, Any]:
@@ -4129,13 +4326,14 @@ def future_price_ml_forecast(df: pd.DataFrame, horizon_bars: int) -> Dict[str, A
             "Yön %": model_result.get("direction_acc", np.nan),
             "Güven %": model_result.get("confidence_score", np.nan),
             "Tahmin": model_result.get("predicted_price", np.nan),
+            "Getiri %": model_result.get("predicted_return_pct", np.nan),
             "Değişim %": model_result.get("delta_pct", np.nan),
         })
 
     compare_df = pd.DataFrame(compare_rows)
     compare_df["_rank_mape"] = compare_df["MAPE %"].fillna(np.inf)
     compare_df["_rank_rmse"] = compare_df["RMSE"].fillna(np.inf)
-    compare_df = compare_df.sort_values(["_rank_mape", "_rank_rmse", "Güven %"], ascending=[True, True, False]).reset_index(drop=True)
+    compare_df = compare_df.sort_values(["_rank_mape", "_rank_rmse", "Yön %", "Güven %"], ascending=[True, True, False, False]).reset_index(drop=True)
     best_model_name = str(compare_df.iloc[0]["Model"])
     compare_df["En İyi"] = np.where(compare_df["Model"] == best_model_name, "⭐ En İyi", "")
     compare_df = compare_df.drop(columns=["_rank_mape", "_rank_rmse"])
@@ -4143,44 +4341,19 @@ def future_price_ml_forecast(df: pd.DataFrame, horizon_bars: int) -> Dict[str, A
     best_model_result = model_results[best_model_name]
     horizon_quality_df = future_price_horizon_benchmark(df, best_model_name, horizon_bars)
 
-    trend_regime = "Yükseliş" if ("EMA50" in df.columns and "EMA200" in df.columns and df["EMA50"].iloc[-1] > df["EMA200"].iloc[-1]) else "Düşüş / Nötr"
-    atr_pct_last = float(df["ATR_PCT"].iloc[-1]) if "ATR_PCT" in df.columns and pd.notna(df["ATR_PCT"].iloc[-1]) else np.nan
-    atr_pct_med = float(df["ATR_PCT"].dropna().median()) if "ATR_PCT" in df.columns and not df["ATR_PCT"].dropna().empty else np.nan
-    if pd.notna(atr_pct_last) and pd.notna(atr_pct_med):
-        vol_regime = "Yüksek Volatilite" if atr_pct_last > atr_pct_med * 1.25 else "Normal / Düşük Volatilite"
-    else:
-        vol_regime = "Bilinmiyor"
+    trend_regime = "Yükseliş" if ("EMA50" in df.columns and "EMA200" in df.columns and df["EMA50"].iloc[-1] > df["EMA200"].iloc[-1]) else "Nötr/Aşağı"
+    current_price = float(df["Close"].iloc[-1])
 
     return {
-        "error": None,
-        "models": model_results,
-        "compare_df": compare_df,
         "best_model_name": best_model_name,
-        "current_price": best_model_result.get("current_price", np.nan),
-        "horizon_bars": int(horizon_bars),
+        "best_model_result": best_model_result,
+        "compare_df": compare_df,
         "horizon_quality_df": horizon_quality_df,
+        "current_price": current_price,
         "trend_regime": trend_regime,
-        "vol_regime": vol_regime,
     }
 
 
-
-# =============================
-# X / YOUTUBE TRENDS HELPERS
-# =============================
-POSITIVE_SENTIMENT_TERMS = [
-    "kar", "kâr", "temettu", "temettü", "geri alım", "buyback", "yatırım", "anlaşma", "anlasma",
-    "ihale", "onay", "teşvik", "tesvik", "rekor", "büyüme", "buyume", "ortaklık", "ortaklik",
-    "upgrade", "profit", "dividend", "deal", "investment", "partnership", "approval", "growth",
-    "strong", "bullish", "surprise", "beat", "pozitif", "olumlu", "başarı", "basari", "kazanç", "kazanc",
-]
-
-NEGATIVE_SENTIMENT_TERMS = [
-    "zarar", "dava", "ceza", "soruşturma", "sorusturma", "iflas", "kriz", "downgrade", "borç", "borc",
-    "bedelli", "satış", "satis", "iptal", "inceleme", "yasak", "loss", "lawsuit", "fine", "investigation",
-    "debt", "bankruptcy", "fraud", "sanction", "risk", "bearish", "negative", "drop", "selloff", "negatif",
-    "olumsuz", "şok", "sok", "zayıf", "zayif",
-]
 
 def classify_text_polarity(text_value: str) -> str:
     txt = str(text_value or "").lower()
@@ -6861,6 +7034,14 @@ def _render_dashboard_like_context(ctx: Dict[str, Any], display_name: str, inter
     c7.metric("Sinyal", rec_local)
     c8.metric("ATR%", f"{latest_local['ATR_PCT']*100:.2f}%" if pd.notna(latest_local.get("ATR_PCT", np.nan)) else "N/A")
 
+    sma_fast_local = latest_local.get("SMA_FAST", np.nan)
+    sma_slow_local = latest_local.get("SMA_SLOW", np.nan)
+    sma_rel_local = "Üstünde" if pd.notna(sma_fast_local) and pd.notna(sma_slow_local) and sma_fast_local > sma_slow_local else ("Altında" if pd.notna(sma_fast_local) and pd.notna(sma_slow_local) else "N/A")
+    sma_bias_local = "LONG ✅" if sma_rel_local == "Üstünde" else ("SHORT ⚠️" if sma_rel_local == "Altında" else "N/A")
+    sm1, sm2 = st.columns(2)
+    sm1.metric("SMA Hızlı/Yavaş", sma_rel_local, delta=sma_bias_local)
+    sm2.metric("ATR Rejimi", "Yüksek" if pd.notna(latest_local.get("ATR_PCT", np.nan)) and latest_local.get("ATR_PCT", 0) > 0.04 else "Normal")
+
     st.subheader("📊 Aşırı Alım / Spekülasyon Göstergeleri")
     ob1, ob2, ob3, ob4 = st.columns(4)
     ob1.metric("Aşırı Alım Skoru", f"{spec_local['overbought_score']}/100")
@@ -6946,6 +7127,15 @@ def _render_dashboard_like_context(ctx: Dict[str, Any], display_name: str, inter
     eq_fig_local.add_trace(go.Scatter(x=ctx["eq"].index, y=ctx["eq"].values, name="Equity"))
     eq_fig_local.update_layout(height=320, title=f"{display_name} Backtest Sermaye Eğrisi", yaxis_title="Sermaye", xaxis_title="Tarih")
     st.plotly_chart(eq_fig_local, use_container_width=True)
+
+    mc_local = backtest_monte_carlo(ctx["eq"], n_sims=250)
+    if not mc_local.get("error"):
+        im1, im2, im3, im4 = st.columns(4)
+        im1.metric("MC Median", f"{mc_local['median_return_pct']:.2f}%")
+        im2.metric("MC P10", f"{mc_local['p10_return_pct']:.2f}%")
+        im3.metric("MC P90", f"{mc_local['p90_return_pct']:.2f}%")
+        im4.metric("MC Median DD", f"{mc_local['median_max_dd_pct']:.2f}%")
+        st.plotly_chart(mc_local["figure"], use_container_width=True)
 
     with st.expander("Trade listesi", expanded=False):
         st.dataframe(ctx["tdf"], use_container_width=True, height=240)
@@ -7368,7 +7558,7 @@ def _render_triple_screen_panel_for_symbol(
                     st.plotly_chart(fig3_adx, use_container_width=True)
 
 
-tab_dash, tab_triple, tab_indicator_stats, tab_future, tab_chart_patterns, tab_financials, tab_history_range, tab_index_center, tab_calendar, tab_social, tab_heatmap, tab_export, tab_scan = st.tabs(["📊 Dashboard", "📺 3 Ekranlı Sistem", "📈 İndikatör İstatistik", "🔮 Future Price", "📐 Grafik Formasyonları", "📘 Bilanço Analizi", "🕰️ Tarih Aralığı Analizi", "📉 BIST Endeks Merkezi", "🗓️ Ekonomik Takvim", "📣 X + YouTube Trends", "🔥 Sektörel Heatmap", "📄 Rapor (PDF/HTML)", "🔍 Tarama"])
+tab_dash, tab_triple, tab_indicator_stats, tab_future, tab_chart_patterns, tab_trend_donchian, tab_financials, tab_history_range, tab_index_center, tab_calendar, tab_social, tab_heatmap, tab_export, tab_scan = st.tabs(["📊 Dashboard", "📺 3 Ekranlı Sistem", "📈 İndikatör İstatistik", "🔮 Future Price", "📐 Grafik Formasyonları", "📡 Trend + Donchian", "📘 Bilanço Analizi", "🕰️ Tarih Aralığı Analizi", "📉 BIST Endeks Merkezi", "🗓️ Ekonomik Takvim", "📣 X + YouTube Trends", "🔥 Sektörel Heatmap", "📄 Rapor (PDF/HTML)", "🔍 Tarama"])
 
 with tab_dash:
     if "app_errors" in st.session_state and st.session_state.app_errors:
@@ -7428,6 +7618,17 @@ with tab_dash:
     c6.metric("Sinyal", rec)
     c7.metric("Piyasa Filtresi", "BULL ✅" if checkpoints.get("Market Filter OK", True) else "BEAR ❌")
     c8.metric("Haftalık Trend", "BULL ✅" if checkpoints.get("Higher TF Filter OK", True) else "BEAR ❌")
+
+    sector_rel = get_sector_relative_value_summary(ticker, market, universe)
+    sma_fast_last = latest.get("SMA_FAST", np.nan)
+    sma_slow_last = latest.get("SMA_SLOW", np.nan)
+    sma_rel = "Üstünde" if pd.notna(sma_fast_last) and pd.notna(sma_slow_last) and sma_fast_last > sma_slow_last else ("Altında" if pd.notna(sma_fast_last) and pd.notna(sma_slow_last) else "N/A")
+    sma_bias = "LONG ✅" if sma_rel == "Üstünde" else ("SHORT ⚠️" if sma_rel == "Altında" else "N/A")
+
+    extra_m1, extra_m2 = st.columns(2)
+    extra_m1.metric("Sektöre Göre Değer", sector_rel["label"], delta=(f"{sector_rel['delta_pct']:.1f}%" if pd.notna(sector_rel["delta_pct"]) else None))
+    extra_m1.caption(sector_rel["detail"])
+    extra_m2.metric("SMA Hızlı/Yavaş", sma_rel, delta=sma_bias)
     
     st.subheader("🕯️ Fiyat Aksiyonu (Price Action) Mum Formasyonları - Son Bar")
     
@@ -7586,6 +7787,18 @@ with tab_dash:
 
     with st.expander("Equity curve (Sermaye Eğrisi)", expanded=False):
         st.plotly_chart(fig_eq, use_container_width=True)
+
+    st.subheader("🎲 Monte Carlo Simülasyonu")
+    mc_res = backtest_monte_carlo(eq, n_sims=300)
+    if mc_res.get("error"):
+        st.info(mc_res["error"])
+    else:
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        mc1.metric("Median Sonuç", f"{mc_res['median_return_pct']:.2f}%")
+        mc2.metric("P10", f"{mc_res['p10_return_pct']:.2f}%")
+        mc3.metric("P90", f"{mc_res['p90_return_pct']:.2f}%")
+        mc4.metric("Median Max DD", f"{mc_res['median_max_dd_pct']:.2f}%")
+        st.plotly_chart(mc_res["figure"], use_container_width=True)
 
     if sentiment_summary:
         st.subheader("📰 Haber Duygu Analizi (Google News + Gemini)")
@@ -8953,6 +9166,85 @@ with tab_social:
                 st.dataframe(yt_show.sort_values("Published At", ascending=False), use_container_width=True, height=360)
             else:
                 st.info("YouTube araması veri döndürmedi.")
+
+
+with tab_trend_donchian:
+    st.header("📡 Trend + Donchian Sistemleri")
+    st.caption("Bu sekmede trend ve breakout sistemleri özetlenir. 'Trend with Patt Entry' için kamuya açık birebir orijinal kurallar doğrulanamadığı için pratik trend + price action yaklaşımı kullanılmıştır.")
+
+    twp_tab, dc_tab, d520_tab, rd_tab = st.tabs(["📈 Trend with Patt Entry", "📦 Donchian Kanalları", "5&20", "Richard Dennis"])
+
+    with twp_tab:
+        st.subheader("Trend with Patt Entry (pratik yaklaşım)")
+        st.info("Bilgi notu: Bu versiyon 50/200 SMA trend yönünü ve price action giriş mumlarını birlikte okur. Trend yukarıysa boğa patternleri long, trend aşağıysa ayı patternleri short filtresi olarak kullanılır.")
+        twp_df = trend_with_pattern_entry_signals(df.copy())
+        twp_last = twp_df.iloc[-1]
+        t1, t2, t3, t4 = st.columns(4)
+        trend_dir = "Yukarı" if bool(twp_last.get("TWP_TREND_UP", False)) else ("Aşağı" if bool(twp_last.get("TWP_TREND_DOWN", False)) else "Nötr")
+        t1.metric("Trend", trend_dir)
+        t2.metric("Long Setup", "VAR ✅" if bool(twp_last.get("TWP_LONG_ENTRY", False)) else "YOK")
+        t3.metric("Short Setup", "VAR ⚠️" if bool(twp_last.get("TWP_SHORT_ENTRY", False)) else "YOK")
+        t4.metric("SMA50 / SMA200", "Üstünde" if pd.notna(twp_last.get("TWP_SMA50", np.nan)) and pd.notna(twp_last.get("TWP_SMA200", np.nan)) and twp_last["TWP_SMA50"] > twp_last["TWP_SMA200"] else "Altında")
+        fig_twp = build_system_overlay_chart(
+            twp_df.tail(220),
+            "Trend with Patt Entry",
+            [("TWP_SMA50", "SMA 50"), ("TWP_SMA200", "SMA 200")],
+            [("TWP_LONG_ENTRY", "Long Entry", "triangle-up"), ("TWP_SHORT_ENTRY", "Short Entry", "triangle-down")],
+        )
+        st.plotly_chart(fig_twp, use_container_width=True)
+
+    with dc_tab:
+        st.subheader("Donchian Kanalları")
+        st.info("Bilgi notu: Donchian kanalları seçilen periyottaki en yüksek tepe ve en düşük dipten oluşur. Fiyat üst banda yaklaşınca güç, alt banda yaklaşınca zayıflık okunur; orta bant denge bölgesidir.")
+        dc_df = df.copy()
+        dc_df["DC_UPPER20"], dc_df["DC_MID20"], dc_df["DC_LOWER20"] = donchian_channels(dc_df["High"], dc_df["Low"], 20)
+        dc_last = dc_df.iloc[-1]
+        d1, d2, d3, d4 = st.columns(4)
+        d1.metric("Üst Bant", fmt_num(dc_last.get("DC_UPPER20", np.nan)))
+        d2.metric("Orta Bant", fmt_num(dc_last.get("DC_MID20", np.nan)))
+        d3.metric("Alt Bant", fmt_num(dc_last.get("DC_LOWER20", np.nan)))
+        d4.metric("Konum", "Üst Banda Yakın" if pd.notna(dc_last.get("DC_UPPER20", np.nan)) and pd.notna(dc_last.get("DC_LOWER20", np.nan)) and abs(dc_last["Close"] - dc_last["DC_UPPER20"]) < abs(dc_last["Close"] - dc_last["DC_LOWER20"]) else "Alt Banda Yakın")
+        fig_dc = build_system_overlay_chart(dc_df.tail(220), "Donchian Kanalı (20)", [("DC_UPPER20", "Üst 20"), ("DC_MID20", "Orta 20"), ("DC_LOWER20", "Alt 20")], [])
+        st.plotly_chart(fig_dc, use_container_width=True)
+
+    with d520_tab:
+        st.subheader("Donchian 5&20 / MA 5-20 Sistemi")
+        st.info("Bilgi notu: Bu pratik sürüm kısa vadeli 5 SMA ile 20 SMA kesişimine bakar. 5 SMA, 20 SMA'nın üstüne çıktığında long; altına indiğinde short eğilimi oluşur.")
+        d520_df = donchian_5_20_system(df.copy())
+        d520_last = d520_df.iloc[-1]
+        k1, k2, k3, k4 = st.columns(4)
+        state_520 = "LONG ✅" if bool(d520_last.get("D520_LONG", False)) else ("SHORT ⚠️" if bool(d520_last.get("D520_SHORT", False)) else "Nötr")
+        k1.metric("Durum", state_520)
+        k2.metric("SMA5", fmt_num(d520_last.get("D520_SMA5", np.nan)))
+        k3.metric("SMA20", fmt_num(d520_last.get("D520_SMA20", np.nan)))
+        k4.metric("Son Sinyal", "AL" if bool(d520_last.get("D520_BUY_SIG", False)) else ("SAT" if bool(d520_last.get("D520_SELL_SIG", False)) else "YOK"))
+        fig_520 = build_system_overlay_chart(
+            d520_df.tail(220),
+            "5 / 20 Sistem",
+            [("D520_SMA5", "SMA 5"), ("D520_SMA20", "SMA 20")],
+            [("D520_BUY_SIG", "AL", "triangle-up"), ("D520_SELL_SIG", "SAT", "triangle-down")],
+        )
+        st.plotly_chart(fig_520, use_container_width=True)
+
+    with rd_tab:
+        st.subheader("Richard Dennis / Turtle benzeri breakout sistemi")
+        st.info("Bilgi notu: Bu sürüm Richard Dennis yaklaşımını pratik şekilde uygular: 20 günlük Donchian breakout giriş, 10 günlük ters kanal kırılımı çıkış filtresi olarak kullanılır.")
+        rd_df = richard_dennis_system(df.copy())
+        rd_last = rd_df.iloc[-1]
+        r1, r2, r3, r4 = st.columns(4)
+        state_rd = "LONG ✅" if bool(rd_last.get("RD_LONG_ENTRY", False)) else ("SHORT ⚠️" if bool(rd_last.get("RD_SHORT_ENTRY", False)) else "İzle")
+        r1.metric("Durum", state_rd)
+        r2.metric("20G Üst", fmt_num(rd_last.get("RD_UPPER20", np.nan)))
+        r3.metric("20G Alt", fmt_num(rd_last.get("RD_LOWER20", np.nan)))
+        r4.metric("Çıkış Filtresi", "Aktif" if bool(rd_last.get("RD_LONG_EXIT", False) or rd_last.get("RD_SHORT_EXIT", False)) else "Pasif")
+        fig_rd = build_system_overlay_chart(
+            rd_df.tail(220),
+            "Richard Dennis / Turtle",
+            [("RD_UPPER20", "Üst 20"), ("RD_LOWER20", "Alt 20"), ("RD_EXIT_UPPER10", "Çıkış Üst 10"), ("RD_EXIT_LOWER10", "Çıkış Alt 10")],
+            [("RD_LONG_ENTRY", "Long Entry", "triangle-up"), ("RD_SHORT_ENTRY", "Short Entry", "triangle-down"), ("RD_LONG_EXIT", "Long Exit", "x"), ("RD_SHORT_EXIT", "Short Exit", "x")],
+        )
+        st.plotly_chart(fig_rd, use_container_width=True)
+
 
 with tab_financials:
     st.header("📘 Bilanço Analizi")
