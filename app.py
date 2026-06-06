@@ -1322,6 +1322,67 @@ def target_price_band(df: pd.DataFrame):
     }
 
 
+# =============================
+# Volume Profile / VPVR Helpers
+# =============================
+def compute_volume_profile(df: pd.DataFrame, bins: int = 24, lookback: int = 220) -> Tuple[pd.DataFrame, float]:
+    if df is None or df.empty or not {"High", "Low", "Close", "Volume"}.issubset(df.columns):
+        return pd.DataFrame(), np.nan
+
+    use = df.tail(min(len(df), int(lookback))).copy()
+    use = use.dropna(subset=["High", "Low", "Close", "Volume"])
+    if use.empty:
+        return pd.DataFrame(), np.nan
+
+    price_min = float(use["Low"].min())
+    price_max = float(use["High"].max())
+    if not np.isfinite(price_min) or not np.isfinite(price_max) or price_max <= price_min:
+        return pd.DataFrame(), np.nan
+
+    typical_price = ((use["High"] + use["Low"] + use["Close"]) / 3.0).astype(float)
+    volumes = pd.to_numeric(use["Volume"], errors="coerce").fillna(0.0).astype(float)
+
+    hist, edges = np.histogram(typical_price.values, bins=int(bins), range=(price_min, price_max), weights=volumes.values)
+    centers = (edges[:-1] + edges[1:]) / 2.0
+
+    vp_df = pd.DataFrame({"Price": centers, "Volume": hist.astype(float)})
+    vp_df = vp_df[vp_df["Volume"] > 0].copy()
+    if vp_df.empty:
+        return pd.DataFrame(), np.nan
+
+    poc_price = float(vp_df.loc[vp_df["Volume"].idxmax(), "Price"])
+    return vp_df.sort_values("Price"), poc_price
+
+
+def build_volume_profile_figure(df: pd.DataFrame, bins: int = 24, lookback: int = 220) -> Tuple[go.Figure, float]:
+    vp_df, poc_price = compute_volume_profile(df, bins=bins, lookback=lookback)
+    fig = go.Figure()
+
+    if vp_df.empty:
+        fig.update_layout(height=360, title="Hacim Profili (VPVR / POC)")
+        return fig, np.nan
+
+    fig.add_trace(go.Bar(
+        x=vp_df["Volume"],
+        y=vp_df["Price"],
+        orientation="h",
+        name="Volume Profile",
+    ))
+
+    if np.isfinite(poc_price):
+        fig.add_hline(y=poc_price, line_dash="dash", line_color="red", annotation_text=f"POC: {poc_price:.2f}")
+
+    fig.update_layout(
+        height=360,
+        title="Hacim Profili (VPVR / POC)",
+        xaxis_title="Hacim",
+        yaxis_title="Fiyat",
+        showlegend=False,
+        margin=dict(l=0, r=0, t=40, b=0),
+    )
+    return fig, poc_price
+
+
 
 def _get_line_body_arrays(subset: pd.DataFrame) -> Tuple[pd.Series, pd.Series]:
     body_low = subset[["Open", "Close"]].min(axis=1).astype(float) if {"Open", "Close"}.issubset(subset.columns) else subset["Close"].astype(float)
