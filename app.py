@@ -4535,6 +4535,7 @@ def future_price_single_model_eval(df: pd.DataFrame, horizon_bars: int, model_na
         "current_close_test": current_close_test,
         "feature_importance": importance_df,
         "latest_base_close": latest_base_close,
+        "last_feature_index": str(latest_features.index[-1]) if len(latest_features.index) > 0 else "N/A",
         "train_rows": int(split_idx),
         "test_rows": int(len(y_test_ret)),
     }
@@ -7612,7 +7613,7 @@ def _render_future_price_panel_for_df(
             st.dataframe(horizon_quality_df, use_container_width=True, height=220)
 
         st.info(
-            f"Seçili model `{selected_model_name}` son kullanılabilir barı `{selected_model['last_feature_index']}` üzerinden tahmin üretti. "
+            f"Seçili model `{selected_model_name}` son kullanılabilir barı `{selected_model.get('last_feature_index', 'N/A')}` üzerinden tahmin üretti. "
             "Bu çıktı eğitim amaçlıdır; kesin fiyat bilgisi değildir. Sayfadaki ⭐ işaretli model, mevcut karşılaştırmada en düşük hata ile öne çıkmıştır."
         )
     elif fp_result and fp_result.get("error"):
@@ -9240,7 +9241,7 @@ with tab_future:
                 st.dataframe(horizon_quality_df, use_container_width=True, height=220)
 
             st.info(
-                f"Seçili model `{selected_model_name}` son kullanılabilir barı `{selected_model['last_feature_index']}` üzerinden tahmin üretti. "
+                f"Seçili model `{selected_model_name}` son kullanılabilir barı `{selected_model.get('last_feature_index', 'N/A')}` üzerinden tahmin üretti. "
                 "Bu çıktı eğitim amaçlıdır; kesin fiyat bilgisi değildir. Sayfadaki ⭐ işaretli model, mevcut karşılaştırmada en düşük hata ile öne çıkmıştır."
             )
         elif fp_result and fp_result.get("error"):
