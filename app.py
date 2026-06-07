@@ -193,11 +193,57 @@ def _ensure_help_badge_css():
     st.session_state["_edu_help_css_loaded"] = True
     st.markdown("""
     <style>
-    .edu-help-wrap {display:flex; flex-wrap:wrap; gap:8px; margin:6px 0 12px 0;}
-    .edu-help-badge {position:relative; display:inline-flex; align-items:center; gap:6px; border:1px solid rgba(120,120,120,.35); border-radius:999px; padding:4px 10px; font-size:12px; line-height:1.2; cursor:help; background:rgba(125,125,125,.08);}
-    .edu-help-q {width:18px; height:18px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; font-weight:700; font-size:11px; border:1px solid rgba(120,120,120,.45); background:rgba(255,255,255,.08);}
-    .edu-help-tip {visibility:hidden; opacity:0; transition:opacity .15s ease; position:absolute; left:0; top:120%; z-index:9999; width:min(540px, 80vw); white-space:normal; padding:10px 12px; border-radius:10px; background:#111827; color:#f9fafb; border:1px solid rgba(255,255,255,.12); box-shadow:0 8px 24px rgba(0,0,0,.25); font-size:12px; line-height:1.45;}
-    .edu-help-badge:hover .edu-help-tip {visibility:visible; opacity:1;}
+    .edu-help-wrap {
+        display:flex;
+        flex-wrap:wrap;
+        gap:8px;
+        margin:6px 0 12px 0;
+        align-items:flex-start;
+    }
+    .edu-help-badge {
+        border:1px solid rgba(120,120,120,.35);
+        border-radius:999px;
+        background:rgba(125,125,125,.08);
+        overflow:visible;
+    }
+    .edu-help-summary {
+        list-style:none;
+        cursor:pointer;
+        display:inline-flex;
+        align-items:center;
+        gap:6px;
+        padding:4px 10px;
+        font-size:12px;
+        line-height:1.2;
+        user-select:none;
+    }
+    .edu-help-summary::-webkit-details-marker {display:none;}
+    .edu-help-q {
+        width:18px;
+        height:18px;
+        border-radius:50%;
+        display:inline-flex;
+        align-items:center;
+        justify-content:center;
+        font-weight:700;
+        font-size:11px;
+        border:1px solid rgba(120,120,120,.45);
+        background:rgba(255,255,255,.08);
+        flex:0 0 auto;
+    }
+    .edu-help-tip {
+        width:min(820px, 88vw);
+        white-space:normal;
+        padding:12px 14px;
+        margin:0 8px 10px 8px;
+        border-radius:12px;
+        background:#111827;
+        color:#f9fafb;
+        border:1px solid rgba(255,255,255,.12);
+        box-shadow:0 8px 24px rgba(0,0,0,.25);
+        font-size:12px;
+        line-height:1.55;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -212,11 +258,14 @@ def render_help_badges(items: List[Any], title: str = ""):
         tip = APP_EDUCATION_TEXTS.get(key, "")
         if not tip:
             continue
+        safe_label = html.escape(label)
+        safe_tip = html.escape(tip).replace("\n", "<br><br>")
         badges.append(
-            f'<span class="edu-help-badge">{html.escape(label)}<span class="edu-help-q">?</span><span class="edu-help-tip">{html.escape(tip)}</span></span>'
+            '<details class="edu-help-badge">'
+            f'<summary class="edu-help-summary">{safe_label}<span class="edu-help-q">?</span></summary>'
+            f'<div class="edu-help-tip">{safe_tip}</div>'
+            '</details>'
         )
-    if title:
-        st.markdown(f"**{html.escape(title)}**", unsafe_allow_html=True)
     if badges:
         st.markdown('<div class="edu-help-wrap">' + "".join(badges) + '</div>', unsafe_allow_html=True)
 
@@ -8653,6 +8702,7 @@ with tab_education:
 
 with tab_index_center:
     st.header("📉 BIST Endeks Merkezi")
+    render_help_badges([("ema","EMA"),("rsi","RSI"),("macd","MACD"),("atr_pct","ATR%"),("vpvr","VPVR"),("poc","POC"),("triple_screen","Triple Screen"),("future_price","Future Price")])
     st.caption("BIST 30, BIST 100 ve BIST Tüm endeksleri için dashboard benzeri teknik görünüm, 3 Ekranlı Sistem ve Future Price panelleri.")
 
     index_map = _bist_index_mapping()
@@ -8695,9 +8745,11 @@ with tab_index_center:
     idx_sub_dash, idx_sub_triple, idx_sub_future = st.tabs(["📊 Dashboard", "📺 3 Ekranlı Sistem", "🔮 Future Price"])
 
     with idx_sub_dash:
+        render_help_badges([("ema","EMA"),("bollinger","Bollinger"),("rsi","RSI"),("macd","MACD"),("atr_pct","ATR%"),("volume_ratio","Hacim Oranı"),("obv","OBV"),("vpvr","VPVR"),("poc","POC"),("support_resistance","Destek/Direnç")])
         _render_dashboard_like_context(index_ctx, selected_index_label, interval, period)
 
     with idx_sub_triple:
+        render_help_badges([("triple_screen","Triple Screen"),("macd","MACD"),("ema","EMA"),("adx","ADX"),("rsi","RSI"),("stochastic","Stokastik"),("force_index","Force Index"),("elder_ray","Elder-Ray"),("divergence","Uyumsuzluk")])
         _render_triple_screen_panel_for_symbol(
             selected_index_ticker,
             selected_index_label,
@@ -8706,6 +8758,7 @@ with tab_index_center:
         )
 
     with idx_sub_future:
+        render_help_badges([("future_price","Future Price"),("mae","MAE"),("rmse","RMSE"),("mape","MAPE"),("direction_acc","Yön Doğruluğu"),("confidence","Güven Skoru"),("train_test","Eğitim/Test"),("trend_regime","Trend Rejimi"),("vol_regime","Volatilite Rejimi")])
         if index_ctx.get("error"):
             st.warning(index_ctx["error"])
         else:
@@ -8995,6 +9048,7 @@ with tab_triple:
 
 with tab_indicator_stats:
     st.header("📈 İndikatör İstatistik")
+    render_help_badges([("divergence","Uyumsuzluk"),("rsi","RSI"),("macd","MACD"),("adx","ADX"),("elder_ray","Elder-Ray"),("force_index","Force Index"),("stochastic","Stokastik")])
     st.caption("Seçilen hisse ve indikatör için geçmiş oluşumları tarar; kaç kez oluştuğunu, kaç kez çalıştığını, trendin ters yöne dönene kadar ortalama kaç gün sürdüğünü ve oluşum sonrası yüzde kaç yükselip/düştüğünü istatistiksel olarak verir.")
 
     if not st.session_state.ta_ran:
@@ -9251,6 +9305,7 @@ with tab_future:
 
 with tab_chart_patterns:
     st.header("📐 Grafik Formasyonları")
+    render_help_badges([("support_resistance","Destek/Direnç"),("risk_reward","Risk/Ödül"),("ema","EMA"),("volume_ratio","Hacim Oranı")])
     st.caption("Seçtiğin zaman dilimlerinde seçili hisseyi klasik grafik formasyonları için tarar. Tespit edilen formasyonlar yeşil işaretlenir; tıkladığında grafikte mavi alan ile gösterilir.")
 
     if not st.session_state.ta_ran:
@@ -9343,6 +9398,7 @@ with tab_chart_patterns:
 
 with tab_social:
     st.header("📣 X + YouTube Trends")
+    render_help_badges([("volume_ratio","İlgi Yoğunluğu"),("trend_regime","Trend Bağlamı")])
     social_tab_x, social_tab_youtube = st.tabs(["𝕏 X Trends", "▶️ YouTube Trends"])
 
     with social_tab_x:
@@ -9523,14 +9579,14 @@ with tab_social:
 
 with tab_trend_donchian:
     st.header("📡 Trend + Donchian Sistemleri")
-    render_help_badges([("trend_patt","Trend with Patt Entry"),("donchian","Donchian"),("donchian_520","5&20"),("richard_dennis","Richard Dennis")], "Trend sistemleri eğitim katmanı")
+    render_help_badges([("trend_patt","Trend with Patt Entry"),("donchian","Donchian"),("donchian_520","5&20"),("richard_dennis","Richard Dennis")])
     st.caption("Bu sekmede trend ve breakout sistemleri özetlenir. 'Trend with Patt Entry' için kamuya açık birebir orijinal kurallar doğrulanamadığı için pratik trend + price action yaklaşımı kullanılmıştır.")
 
     twp_tab, dc_tab, d520_tab, rd_tab = st.tabs(["📈 Trend with Patt Entry", "📦 Donchian Kanalları", "5&20", "Richard Dennis"])
 
     with twp_tab:
         st.subheader("Trend with Patt Entry (pratik yaklaşım)")
-        st.info("Bilgi notu: Bu versiyon 50/200 SMA trend yönünü ve price action giriş mumlarını birlikte okur. Trend yukarıysa boğa patternleri long, trend aşağıysa ayı patternleri short filtresi olarak kullanılır.")
+        render_help_badges([("trend_patt","Trend with Patt Entry"),("sma_bias","SMA Bias"),("sma_fast","Hızlı SMA"),("sma_slow","Yavaş SMA")])
         twp_df = trend_with_pattern_entry_signals(df.copy())
         twp_last = twp_df.iloc[-1]
         t1, t2, t3, t4 = st.columns(4)
@@ -9549,7 +9605,7 @@ with tab_trend_donchian:
 
     with dc_tab:
         st.subheader("Donchian Kanalları")
-        st.info("Bilgi notu: Donchian kanalları seçilen periyottaki en yüksek tepe ve en düşük dipten oluşur. Fiyat üst banda yaklaşınca güç, alt banda yaklaşınca zayıflık okunur; orta bant denge bölgesidir.")
+        render_help_badges([("donchian","Donchian Kanalları")])
         dc_df = df.copy()
         dc_df["DC_UPPER20"], dc_df["DC_MID20"], dc_df["DC_LOWER20"] = donchian_channels(dc_df["High"], dc_df["Low"], 20)
         dc_last = dc_df.iloc[-1]
@@ -9563,7 +9619,7 @@ with tab_trend_donchian:
 
     with d520_tab:
         st.subheader("Donchian 5&20 / MA 5-20 Sistemi")
-        st.info("Bilgi notu: Bu pratik sürüm kısa vadeli 5 SMA ile 20 SMA kesişimine bakar. 5 SMA, 20 SMA'nın üstüne çıktığında long; altına indiğinde short eğilimi oluşur.")
+        render_help_badges([("donchian_520","Donchian 5&20"),("sma_bias","SMA Bias"),("sma_fast","Hızlı SMA"),("sma_slow","Yavaş SMA")])
         d520_df = donchian_5_20_system(df.copy())
         d520_last = d520_df.iloc[-1]
         k1, k2, k3, k4 = st.columns(4)
@@ -9582,7 +9638,7 @@ with tab_trend_donchian:
 
     with rd_tab:
         st.subheader("Richard Dennis / Turtle benzeri breakout sistemi")
-        st.info("Bilgi notu: Bu sürüm Richard Dennis yaklaşımını pratik şekilde uygular: 20 günlük Donchian breakout giriş, 10 günlük ters kanal kırılımı çıkış filtresi olarak kullanılır.")
+        render_help_badges([("richard_dennis","Richard Dennis / Turtle"),("donchian","Donchian Kanalları")])
         rd_df = richard_dennis_system(df.copy())
         rd_last = rd_df.iloc[-1]
         r1, r2, r3, r4 = st.columns(4)
