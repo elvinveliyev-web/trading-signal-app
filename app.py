@@ -4,6 +4,7 @@ import json
 import time
 import base64
 import datetime
+import html
 import xml.etree.ElementTree as ET
 from io import BytesIO
 from typing import Optional, Dict, Any, List, Tuple
@@ -125,9 +126,113 @@ def fmt_num(x: float, nd=2) -> str:
         return "N/A"
 
 
+
+APP_EDUCATION_TEXTS: Dict[str, str] = {
+    "rsi": "RSI, fiyat hareketinin hızını ve gücünü 0-100 aralığında ölçen momentum göstergesidir. 70 üzeri veya 30 altı tek başına emir değildir; güçlü trendlerde uzun süre aşırı bölgede kalabilir. En iyi kullanım, trend filtresi, destek/direnç ve uyumsuzluklarla birlikte okumaktır.",
+    "macd": "MACD, kısa ve uzun EMA farkından türetilen trend-momentum göstergesidir. Histogramın sıfır üstüne geçmesi ivme artışı, sıfır altına inmesi zayıflama anlamına gelebilir. Yatay piyasalarda sık yalancı sinyal üretebildiğinden tek başına değil, bağlam içinde kullanılmalıdır.",
+    "atr_pct": "ATR%, oynaklığı fiyatın yüzdesi olarak gösterir. Yüksek ATR% daha geniş günlük salınım, daha büyük stop ve daha yüksek risk anlamına gelir. Pozisyon boyutu ve risk yönetiminde çok önemlidir.",
+    "bollinger": "Bollinger Bantları fiyatın ortalama etrafındaki standart sapma zarfıdır. Fiyatın banda değmesi otomatik dönüş anlamına gelmez; trend güçlü ise fiyat bandın kenarında yürüyebilir. Band genişliği ve fiyat davranışı birlikte okunmalıdır.",
+    "bb_width": "Bollinger Genişliği, sıkışma mı genişleme mi olduğunu gösterir. Düşük genişlik enerji birikimi, hızla yükselen genişlik ise hareketin açıldığını anlatır.",
+    "stoch_rsi": "Stochastic RSI, RSI'ın kendi aralığındaki konumunu ölçerek klasik RSI'dan daha hızlı tepki verir. Bu hız avantaj olduğu kadar gürültü riskini de artırır.",
+    "volume_ratio": "Hacim oranı, son hacmin kendi ortalamasına göre ne kadar güçlü olduğunu gösterir. 1'in üzeri normalin üstü ilgi, çok yüksek değerler ise kırılım, panik veya spekülatif hareket olasılığı anlamına gelebilir.",
+    "obv": "OBV, fiyat yönünü hacimle çarparak kümülatif para akışı sezgisi verir. Fiyat yatayken OBV yükseliyorsa birikim, fiyat yükselirken OBV zayıfsa hareketin iç gücü sorgulanabilir.",
+    "ema": "EMA, son barlara daha yüksek ağırlık veren hareketli ortalamadır. Kısa EMA'nın uzun EMA üzerinde olması çoğunlukla yukarı yapıya, altında olması aşağı yapıya işaret eder.",
+    "adx": "ADX trendin yönünü değil gücünü ölçer. Yüksek ADX güçlü trend, düşük ADX yatay/kararsız piyasa anlamına gelebilir.",
+    "stochastic": "Stokastik osilatör, fiyatın seçilen periyottaki yüksek-düşük aralığı içinde nereye kapandığını gösterir. Hızlı sinyal üretir ama trend piyasalarında çok erken karşı sinyal verebilir.",
+    "force_index": "Force Index, fiyat değişimini hacimle birleştirir ve hareketin ne kadar güçle desteklendiğini gösterir.",
+    "elder_ray": "Elder-Ray, EMA çevresindeki boğa ve ayı baskısını Bull Power ve Bear Power ile gösterir. Uyumsuzluk analizinde özellikle değerlidir.",
+    "divergence": "Uyumsuzluk, fiyat yeni dip/tepe yaparken indikatörün aynı şeyi yapmaması durumudur. Hareketin yorulduğunu veya dönüş ihtimalini düşündürebilir; ancak tek başına yeterli sinyal değildir.",
+    "vpvr": "VPVR, hacmi zaman ekseni yerine fiyat seviyelerine dağıtır. Böylece hangi seviyede ne kadar maliyet biriktiğini ve kurumsal ilginin nerede yoğunlaştığını gösterir.",
+    "poc": "POC, hacim profilindeki en yüksek hacim düğümüdür; yani incelenen pencerede en çok işlemin geçtiği fiyat bölgesidir.",
+    "poc_distance": "POC Uzaklık %, mevcut fiyatın ana hacim merkezinden ne kadar saptığını gösterir. Bu uzaklık hem güç hem kısa vadeli geri test riski anlamına gelebilir.",
+    "support_resistance": "Destek/direnç, fiyatın daha önce tepki verdiği veya zorlandığı seviyelerdir. En iyi seviyeler çok dokunulan, hacim alan ve zaman içinde çalışan bölgelerdir.",
+    "target_band": "Hedef fiyat bandı, ATR ve önemli seviyelerden türetilen olası hareket alanıdır. Bu band kesin tahmin değil, senaryo planlaması ve risk/ödül hesabı için yol haritasıdır.",
+    "backtest": "Backtest, stratejinin geçmişte yaklaşık nasıl davranacağını gösterir. Komisyon ve slippage eklense bile gerçek piyasayı birebir kopyalamaz.",
+    "monte_carlo": "Monte Carlo simülasyonu, getirilerin farklı sıralamalar altında nasıl davranabileceğini göstererek tek equity eğrisinin ötesine geçer.",
+    "sharpe": "Sharpe oranı, riske göre düzeltilmiş getiriyi ölçer. Daha yüksek Sharpe daha verimli getiri anlamına gelebilir.",
+    "sortino": "Sortino, sadece aşağı yönlü oynaklığı ceza olarak gördüğü için Sharpe'dan daha seçici olabilir.",
+    "calmar": "Calmar oranı, yıllık getiriyi maksimum drawdown ile karşılaştırır.",
+    "ulcer": "Ulcer Index, yalnızca oynaklığı değil, sermaye düşüşlerinin derinlik ve süresini de hissettirir.",
+    "kelly": "Kelly yüzdesi, teorik optimal pozisyon büyüklüğünü tahmin eder. Pratikte tam Kelly çoğu zaman fazla agresiftir.",
+    "beta": "Beta, varlığın veya stratejinin benchmark'a göre ne kadar hassas hareket ettiğini gösterir.",
+    "information_ratio": "Information Ratio, benchmark'a göre ek getirinin ne kadar istikrarlı üretildiğini ölçer.",
+    "future_price": "Future Price modülü, seçilen zaman dilimi için ileri bar kapanışı tahmin etmeye çalışan çoklu model katmanıdır. Bu bir kehanet değil, karar destek katmanıdır.",
+    "mae": "MAE, modelin ortalama mutlak hata büyüklüğüdür. Daha düşük MAE daha tutarlı tahmin anlamına gelir.",
+    "rmse": "RMSE, büyük hataları daha sert cezalandıran hata ölçüsüdür.",
+    "mape": "MAPE, hatayı yüzde bazında ifade ederek farklı fiyat seviyelerindeki varlıkları kıyaslamayı kolaylaştırır.",
+    "direction_acc": "Yön doğruluğu, modelin fiyatın tam seviyesinden çok yönünü doğru tahmin etme başarısını ölçer.",
+    "confidence": "Güven skoru, modelin hata ve olasılık davranışlarından türetilen bileşik bir kalite puanıdır.",
+    "train_test": "Eğitim/Test satır sayısı, modelin kaç örnekle öğrenip kaç örnek üzerinde sınandığını gösterir.",
+    "trend_regime": "Trend rejimi, yapının daha çok yükseliş, düşüş veya nötr karakterde olup olmadığını özetler.",
+    "vol_regime": "Volatilite rejimi, piyasanın sakin mi gergin mi olduğunu gösterir.",
+    "triple_screen": "Triple Screen, büyük zaman diliminde trendi, orta zaman diliminde düzeltmeyi ve küçük zaman diliminde tetikleyiciyi birlikte okur.",
+    "roe": "ROE, şirketin özkaynağını ne kadar verimli kullandığını gösterir.",
+    "revenue_growth": "Net satış büyümesi, şirketin üst satırının ne kadar hızlı genişlediğini gösterir.",
+    "ebitda": "FAVÖK/EBITDA, şirketin esas faaliyet üretim gücünü görmeye yarar.",
+    "ebitda_margin": "FAVÖK marjı, satışların ne kadarının operasyonel kazanca döndüğünü gösterir.",
+    "debt_equity": "Borç/Özsermaye oranı, büyümenin ne kadarının kaldıraçla finanse edildiğini gösterir.",
+    "current_ratio": "Cari oran, kısa vadeli yükümlülüklerin dönen varlıklarla karşılanabilme gücünü ölçer.",
+    "net_margin": "Net kâr marjı, tüm giderler sonrası satışların ne kadarının kâra dönüştüğünü gösterir.",
+    "fcf": "Serbest nakit akışı, şirketin yatırım harcamaları sonrası kasada bıraktığı gerçek nakit üretimidir.",
+    "pe": "F/K oranı, piyasanın şirket kârını kaç katla fiyatladığını gösterir.",
+    "pb": "PD/DD, piyasa değerinin defter değerine oranıdır.",
+    "net_debt_ebitda": "Net Borç / FAVÖK, şirketin borcunu faaliyet gücüyle ne kadar rahat taşıdığını gösterir.",
+    "altman_z": "Altman Z-Skoru, bilanço ve gelir tablosundan türetilen iflas/stres risk göstergesidir.",
+    "piotroski_f": "Piotroski F-Skoru, kârlılık, kaldıraç ve verimlilikten oluşan kalite puanıdır.",
+    "dcf": "DCF, gelecekteki nakit akımlarını bugüne indirerek teorik içsel değer tahmini yapar.",
+    "sector_relative": "Sektöre göre pahalı/ucuz göstergesi, şirket çarpanlarının sektör ortalamasına göre primli mi iskontolu mu olduğunu gösterir.",
+    "trend_patt": "Trend with Patt Entry yaklaşımı, ana yönü trend filtresiyle belirleyip giriş zamanlamasını uygun pattern ile yapmaya çalışır.",
+    "donchian": "Donchian Kanalları, belirli periyottaki en yüksek ve en düşük seviyeleri kanal olarak gösterir.",
+    "donchian_520": "Donchian 5&20 yaklaşımı, kısa ve uzun kanal bilgisini birlikte okuyarak erken tetik ile daha sağlam trend teyidini birleştirir.",
+    "richard_dennis": "Richard Dennis / Turtle mantığı, sistematik trend takibi ve kırılım temelli girişlere dayanır."
+}
+
+def _ensure_help_badge_css():
+    if st.session_state.get("_edu_help_css_loaded"):
+        return
+    st.session_state["_edu_help_css_loaded"] = True
+    st.markdown("""
+    <style>
+    .edu-help-wrap {display:flex; flex-wrap:wrap; gap:8px; margin:6px 0 12px 0;}
+    .edu-help-badge {position:relative; display:inline-flex; align-items:center; gap:6px; border:1px solid rgba(120,120,120,.35); border-radius:999px; padding:4px 10px; font-size:12px; line-height:1.2; cursor:help; background:rgba(125,125,125,.08);}
+    .edu-help-q {width:18px; height:18px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; font-weight:700; font-size:11px; border:1px solid rgba(120,120,120,.45); background:rgba(255,255,255,.08);}
+    .edu-help-tip {visibility:hidden; opacity:0; transition:opacity .15s ease; position:absolute; left:0; top:120%; z-index:9999; width:min(540px, 80vw); white-space:normal; padding:10px 12px; border-radius:10px; background:#111827; color:#f9fafb; border:1px solid rgba(255,255,255,.12); box-shadow:0 8px 24px rgba(0,0,0,.25); font-size:12px; line-height:1.45;}
+    .edu-help-badge:hover .edu-help-tip {visibility:visible; opacity:1;}
+    </style>
+    """, unsafe_allow_html=True)
+
+def render_help_badges(items: List[Any], title: str = ""):
+    _ensure_help_badge_css()
+    badges = []
+    for item in items:
+        if isinstance(item, (tuple, list)) and len(item) >= 2:
+            key = str(item[0]); label = str(item[1])
+        else:
+            key = str(item); label = str(item)
+        tip = APP_EDUCATION_TEXTS.get(key, "")
+        if not tip:
+            continue
+        badges.append(
+            f'<span class="edu-help-badge">{html.escape(label)}<span class="edu-help-q">?</span><span class="edu-help-tip">{html.escape(tip)}</span></span>'
+        )
+    if title:
+        st.markdown(f"**{html.escape(title)}**", unsafe_allow_html=True)
+    if badges:
+        st.markdown('<div class="edu-help-wrap">' + "".join(badges) + '</div>', unsafe_allow_html=True)
+
+
 # =============================
 # Indicators
 # =============================
+
+with st.sidebar:
+    st.markdown("### 📚 Eğitim Merkezi")
+    st.caption("Soru işaretlerinin üzerine gelerek uygulamadaki temel göstergeler, sistemler ve risk metrikleri hakkında kapsamlı bilgi görebilirsin.")
+    try:
+        render_help_badges([("rsi","RSI"),("macd","MACD"),("atr_pct","ATR%"),("bollinger","Bollinger"),("stoch_rsi","Stoch RSI"),("volume_ratio","Hacim"),("obv","OBV"),("ema","EMA"),("adx","ADX"),("elder_ray","Elder-Ray"),("vpvr","VPVR"),("poc","POC"),("future_price","Future Price"),("backtest","Backtest"),("roe","ROE"),("dcf","DCF"),("donchian","Donchian")], "")
+    except Exception:
+        pass
+
 def ema(s: pd.Series, span: int) -> pd.Series:
     return s.ewm(span=span, adjust=False).mean()
 
@@ -4344,13 +4449,19 @@ def future_price_ml_forecast(df: pd.DataFrame, horizon_bars: int) -> Dict[str, A
     trend_regime = "Yükseliş" if ("EMA50" in df.columns and "EMA200" in df.columns and df["EMA50"].iloc[-1] > df["EMA200"].iloc[-1]) else "Nötr/Aşağı"
     current_price = float(df["Close"].iloc[-1])
 
+    atr_pct_now = safe_float(df["ATR_PCT"].iloc[-1]) if "ATR_PCT" in df.columns and len(df) > 0 else np.nan
+    vol_regime = "Yüksek" if np.isfinite(atr_pct_now) and atr_pct_now > 0.04 else ("Normal" if np.isfinite(atr_pct_now) else "N/A")
+
     return {
         "best_model_name": best_model_name,
         "best_model_result": best_model_result,
+        "models": model_results,
         "compare_df": compare_df,
         "horizon_quality_df": horizon_quality_df,
+        "horizon_bars": int(horizon_bars),
         "current_price": current_price,
         "trend_regime": trend_regime,
+        "vol_regime": vol_regime,
     }
 
 
@@ -7024,6 +7135,7 @@ def _render_dashboard_like_context(ctx: Dict[str, Any], display_name: str, inter
     poc_price_local = ctx["poc_price"]
 
     st.subheader(f"📊 {display_name} Dashboard")
+    render_help_badges([("ema","EMA"),("bollinger","Bollinger"),("rsi","RSI"),("macd","MACD"),("atr_pct","ATR%"),("volume_ratio","Hacim"),("obv","OBV"),("vpvr","VPVR"),("poc","POC"),("support_resistance","Destek/Direnç")], "Dashboard eğitim katmanı")
     c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
     c1.metric("Endeks", display_name)
     c2.metric("Interval", interval_label)
@@ -7043,6 +7155,7 @@ def _render_dashboard_like_context(ctx: Dict[str, Any], display_name: str, inter
     sm2.metric("ATR Rejimi", "Yüksek" if pd.notna(latest_local.get("ATR_PCT", np.nan)) and latest_local.get("ATR_PCT", 0) > 0.04 else "Normal")
 
     st.subheader("📊 Aşırı Alım / Spekülasyon Göstergeleri")
+    render_help_badges([("rsi","RSI"),("bollinger","Bollinger"),("stoch_rsi","Stochastic RSI"),("volume_ratio","Hacim Oranı"),("atr_pct","ATR%")])
     ob1, ob2, ob3, ob4 = st.columns(4)
     ob1.metric("Aşırı Alım Skoru", f"{spec_local['overbought_score']}/100")
     ob2.metric("Aşırı Satım Skoru", f"{spec_local['oversold_score']}/100")
@@ -7054,6 +7167,7 @@ def _render_dashboard_like_context(ctx: Dict[str, Any], display_name: str, inter
             st.write(f"• {v}")
 
     st.subheader("✅ Kontrol Noktaları (Son Bar)")
+    render_help_badges([("ema","EMA"),("rsi","RSI"),("macd","MACD"),("obv","OBV"),("atr_pct","ATR%"),("bollinger","Bollinger")])
     cp_cols = st.columns(3)
     cp_items = list(checkpoints_local.items())
     for i, (k, v) in enumerate(cp_items):
@@ -7061,6 +7175,7 @@ def _render_dashboard_like_context(ctx: Dict[str, Any], display_name: str, inter
             st.metric(k, "✅" if v else "❌")
 
     st.subheader("🎯 Hedef Fiyat Bandı (Senaryo)")
+    render_help_badges([("target_band","Hedef Bandı"),("support_resistance","Destek/Direnç")])
     base_px = float(tp_local["base"])
     rr_str = fmt_rr(rr_info_local.get("rr"))
     bull = tp_local.get("bull")
@@ -7086,6 +7201,7 @@ def _render_dashboard_like_context(ctx: Dict[str, Any], display_name: str, inter
 
     figs = ctx["indicator_figs"]
     st.subheader("📉 RSI / MACD / ATR%")
+    render_help_badges([("rsi","RSI"),("macd","MACD"),("atr_pct","ATR%")])
     colA, colB, colC = st.columns(3)
     with colA:
         st.plotly_chart(figs["rsi"], use_container_width=True)
@@ -7095,6 +7211,7 @@ def _render_dashboard_like_context(ctx: Dict[str, Any], display_name: str, inter
         st.plotly_chart(figs["atr"], use_container_width=True)
 
     st.subheader("📊 Stochastic RSI / Bollinger Genişliği / Hacim Oranı")
+    render_help_badges([("stoch_rsi","Stochastic RSI"),("bb_width","Bollinger Genişliği"),("volume_ratio","Hacim Oranı")])
     colD, colE, colF = st.columns(3)
     with colD:
         st.plotly_chart(figs["stoch"], use_container_width=True)
@@ -7104,6 +7221,7 @@ def _render_dashboard_like_context(ctx: Dict[str, Any], display_name: str, inter
         st.plotly_chart(figs["volratio"], use_container_width=True)
 
     st.subheader("📊 Hacim ve Trend Karşılaştırmaları")
+    render_help_badges([("obv","OBV"),("volume_ratio","Hacim"),("ema","Trend")])
     colV1, colV2, colV3 = st.columns(3)
     with colV1:
         st.plotly_chart(figs["vol_market"], use_container_width=True)
@@ -7113,6 +7231,7 @@ def _render_dashboard_like_context(ctx: Dict[str, Any], display_name: str, inter
         st.plotly_chart(figs["obv"], use_container_width=True)
 
     st.subheader("🧪 Backtest Özeti (Long-only + Scale Out + Time Stop)")
+    render_help_badges([("backtest","Backtest"),("monte_carlo","Monte Carlo"),("sharpe","Sharpe"),("sortino","Sortino"),("calmar","Calmar"),("ulcer","Ulcer"),("kelly","Kelly"),("beta","Beta"),("information_ratio","Info Ratio")])
     m1, m2, m3, m4, m5, m6, m7, m8 = st.columns(8)
     m1.metric("Total Return", f"{metrics_local['Total Return']*100:.1f}%")
     m2.metric("Ann Return", f"{metrics_local['Annualized Return']*100:.1f}%")
@@ -7141,6 +7260,7 @@ def _render_dashboard_like_context(ctx: Dict[str, Any], display_name: str, inter
         st.dataframe(ctx["tdf"], use_container_width=True, height=240)
 
     st.subheader("📦 Hacim Profili (VPVR / POC)")
+    render_help_badges([("vpvr","VPVR"),("poc","POC"),("poc_distance","POC Uzaklık %")])
     vp1, vp2, vp3 = st.columns(3)
     vp1.metric("POC", f"{poc_price_local:.2f}" if np.isfinite(poc_price_local) else "N/A")
     close_ref_local = float(df_local["Close"].iloc[-1]) if not df_local.empty else np.nan
@@ -7159,6 +7279,7 @@ def _render_future_price_panel_for_df(
 ):
     st.header("🔮 Future Price")
     st.caption("Makine öğrenmesi tabanlı çoklu model karşılaştırması ile seçili sembolün mevcut zaman diliminde ileri bar kapanış fiyat tahmini üretir.")
+    render_help_badges([("future_price","Future Price"),("mae","MAE"),("rmse","RMSE"),("mape","MAPE"),("direction_acc","Yön Doğruluğu"),("confidence","Güven Skoru"),("train_test","Eğitim/Test"),("trend_regime","Trend Rejimi"),("vol_regime","Volatilite Rejimi")], "Future Price eğitim katmanı")
 
     if local_df is None or local_df.empty:
         st.info("Future Price için önce veri hazırlanmalıdır.")
@@ -7200,11 +7321,18 @@ def _render_future_price_panel_for_df(
             key=f"{session_prefix}_future_price_selected_model",
             help="Sayfadaki tüm modeller görünür. Buradan seçtiğin modele göre grafik, olasılıklar ve önem sıralaması güncellenir.",
         )
-        selected_model = fp_result["models"][selected_model_name]
+        models_map = fp_result.get("models", {})
+        if not isinstance(models_map, dict):
+            models_map = {}
+        selected_model = models_map.get(selected_model_name, fp_result.get("best_model_result", {}))
+        if not selected_model:
+            st.warning("Seçilen modelin detay kaydı bulunamadı; en iyi modelin sonucu gösteriliyor.")
+            selected_model = fp_result.get("best_model_result", {})
+        horizon_value = int(fp_result.get("horizon_bars", future_horizon))
 
         fp_c1, fp_c2, fp_c3, fp_c4, fp_c5 = st.columns(5)
         fp_c1.metric("Mevcut Kapanış", f"{selected_model['current_price']:.2f}")
-        fp_c2.metric(f"{int(fp_result['horizon_bars'])} Bar Sonrası Tahmin", f"{selected_model['predicted_price']:.2f}")
+        fp_c2.metric(f"{int(horizon_value)} Bar Sonrası Tahmin", f"{selected_model['predicted_price']:.2f}")
         fp_c3.metric("Tahmini Değişim", f"{selected_model['delta_pct']:+.2f}%")
         fp_c4.metric("Tahmin Bandı", f"{selected_model['predicted_low']:.2f} - {selected_model['predicted_high']:.2f}" if pd.notna(selected_model['predicted_low']) and pd.notna(selected_model['predicted_high']) else "N/A")
         fp_c5.metric("Güven Skoru", f"{selected_model['confidence_score']:.1f}%" if pd.notna(selected_model['confidence_score']) else "N/A")
@@ -7299,6 +7427,7 @@ def _render_triple_screen_panel_for_symbol(
 ):
     st.header("📺 Üçlü Ekran Trading Sistemi (Triple Screen)")
     st.caption(f"{display_name} için Dr. Alexander Elder'in 3 Ekranlı sistemine dayanan trend, osilatör ve giriş seviyesi analizi.")
+    render_help_badges([("triple_screen","Triple Screen"),("macd","MACD"),("ema","EMA"),("adx","ADX"),("rsi","RSI"),("stochastic","Stokastik"),("force_index","Force Index"),("elder_ray","Elder-Ray"),("divergence","Uyumsuzluk")], "Triple Screen eğitim katmanı")
 
     run_key = f"{session_prefix}_run_triple_screen"
     if st.button("Üçlü Ekran Verilerini Getir ve Analiz Et", key=f"{session_prefix}_run_triple_btn"):
@@ -8202,6 +8331,7 @@ with tab_scan:
 
 with tab_history_range:
     st.header("🕰️ Tarih Aralığı Analizi")
+    render_help_badges([("ema","EMA"),("rsi","RSI"),("macd","MACD"),("atr_pct","ATR%"),("stoch_rsi","Stochastic RSI"),("bb_width","Bollinger Genişliği"),("volume_ratio","Hacim Oranı"),("backtest","Backtest"),("vpvr","VPVR"),("poc","POC")], "Tarih aralığı teknik rehberi")
     st.caption("Yüklü veri penceresi içinden geçmiş bir tarih aralığı seçerek büyük boy grafik ve ilgili teknik panelleri görüntüleyebilirsin. Daha eski tarihleri görmek için sol menüden periyodu genişlet.")
 
     if df is None or df.empty:
@@ -8802,11 +8932,18 @@ with tab_future:
                 key="future_price_selected_model",
                 help="Sayfadaki tüm modeller görünür. Buradan seçtiğin modele göre grafik, olasılıklar ve önem sıralaması güncellenir.",
             )
-            selected_model = fp_result["models"][selected_model_name]
+            models_map = fp_result.get("models", {})
+            if not isinstance(models_map, dict):
+                models_map = {}
+            selected_model = models_map.get(selected_model_name, fp_result.get("best_model_result", {}))
+            if not selected_model:
+                st.warning("Seçilen modelin detay kaydı bulunamadı; en iyi modelin sonucu gösteriliyor.")
+                selected_model = fp_result.get("best_model_result", {})
+            horizon_value = int(fp_result.get("horizon_bars", future_horizon))
 
             fp_c1, fp_c2, fp_c3, fp_c4, fp_c5 = st.columns(5)
             fp_c1.metric("Mevcut Kapanış", f"{selected_model['current_price']:.2f}")
-            fp_c2.metric(f"{int(fp_result['horizon_bars'])} Bar Sonrası Tahmin", f"{selected_model['predicted_price']:.2f}")
+            fp_c2.metric(f"{int(horizon_value)} Bar Sonrası Tahmin", f"{selected_model['predicted_price']:.2f}")
             fp_c3.metric("Tahmini Değişim", f"{selected_model['delta_pct']:+.2f}%")
             fp_c4.metric("Tahmin Bandı", f"{selected_model['predicted_low']:.2f} - {selected_model['predicted_high']:.2f}" if pd.notna(selected_model['predicted_low']) and pd.notna(selected_model['predicted_high']) else "N/A")
             fp_c5.metric("Güven Skoru", f"{selected_model['confidence_score']:.1f}%" if pd.notna(selected_model['confidence_score']) else "N/A")
@@ -9170,6 +9307,7 @@ with tab_social:
 
 with tab_trend_donchian:
     st.header("📡 Trend + Donchian Sistemleri")
+    render_help_badges([("trend_patt","Trend with Patt Entry"),("donchian","Donchian"),("donchian_520","5&20"),("richard_dennis","Richard Dennis")], "Trend sistemleri eğitim katmanı")
     st.caption("Bu sekmede trend ve breakout sistemleri özetlenir. 'Trend with Patt Entry' için kamuya açık birebir orijinal kurallar doğrulanamadığı için pratik trend + price action yaklaşımı kullanılmıştır.")
 
     twp_tab, dc_tab, d520_tab, rd_tab = st.tabs(["📈 Trend with Patt Entry", "📦 Donchian Kanalları", "5&20", "Richard Dennis"])
@@ -9248,6 +9386,7 @@ with tab_trend_donchian:
 
 with tab_financials:
     st.header("📘 Bilanço Analizi")
+    render_help_badges([("roe","ROE"),("revenue_growth","Net Satış Büyümesi"),("ebitda","FAVÖK"),("ebitda_margin","FAVÖK Marjı"),("debt_equity","Borç/Özsermaye"),("current_ratio","Cari Oran"),("net_margin","Net Kar Marjı"),("fcf","Serbest Nakit Akışı"),("pe","F/K"),("pb","PD/DD"),("net_debt_ebitda","Net Borç/FAVÖK"),("altman_z","Altman Z"),("piotroski_f","Piotroski F"),("dcf","DCF"),("sector_relative","Sektöre Göre Pahalı/Ucuz")], "Finansal analiz eğitim katmanı")
     st.caption("Seçilen hissenin çeyreklik veya senelik son 4 bilanço dönemini gösterir. Çeyreklik modda kıyas türü olarak bir önceki dönem (legacy), bir önceki çeyrek veya geçen yılın aynı çeyreği seçilebilir; senelik modda bir önceki yıl baz alınır. Daha iyi yönde değişim yeşil, kötü yönde değişim kırmızı görünür.")
 
     fin_symbol_options = [naked_ticker(x) for x in universe] if universe else [naked_ticker(ticker)]
