@@ -4361,6 +4361,7 @@ def future_price_single_model_eval(df: pd.DataFrame, horizon_bars: int, model_na
 
     return {
         "model": model_name,
+        "current_price": float(latest_base_close),
         "predicted_price": predicted_price,
         "predicted_return_pct": float(predicted_return * 100.0),
         "delta_pct": delta_pct,
@@ -4371,6 +4372,8 @@ def future_price_single_model_eval(df: pd.DataFrame, horizon_bars: int, model_na
         "resid_std": resid_std,
         "lower_price": lower_price,
         "upper_price": upper_price,
+        "predicted_low": lower_price,
+        "predicted_high": upper_price,
         "band_width_pct": band_width_pct,
         "up_prob": up_prob,
         "down_prob": down_prob,
@@ -4382,6 +4385,8 @@ def future_price_single_model_eval(df: pd.DataFrame, horizon_bars: int, model_na
         "current_close_test": current_close_test,
         "feature_importance": importance_df,
         "latest_base_close": latest_base_close,
+        "train_rows": int(split_idx),
+        "test_rows": int(len(y_test_ret)),
     }
 
 
@@ -4465,6 +4470,39 @@ def future_price_ml_forecast(df: pd.DataFrame, horizon_bars: int) -> Dict[str, A
     }
 
 
+
+
+def _fp_safe_value(model_row: Dict[str, Any], fp_result: Dict[str, Any], key: str, default=np.nan):
+    if isinstance(model_row, dict):
+        if key in model_row and pd.notna(model_row.get(key)):
+            return model_row.get(key)
+        alias_map = {
+            "current_price": ["latest_base_close"],
+            "predicted_low": ["lower_price"],
+            "predicted_high": ["upper_price"],
+        }
+        for alt_key in alias_map.get(key, []):
+            if alt_key in model_row and pd.notna(model_row.get(alt_key)):
+                return model_row.get(alt_key)
+    if isinstance(fp_result, dict):
+        if key in fp_result and pd.notna(fp_result.get(key)):
+            return fp_result.get(key)
+        alias_map_result = {
+            "current_price": ["current_price"],
+        }
+        for alt_key in alias_map_result.get(key, []):
+            if alt_key in fp_result and pd.notna(fp_result.get(alt_key)):
+                return fp_result.get(alt_key)
+    return default
+
+
+def _fp_fmt_num(value, nd=2, suffix=""):
+    try:
+        if value is None or (isinstance(value, float) and not np.isfinite(value)):
+            return "N/A"
+        return f"{float(value):.{nd}f}{suffix}"
+    except Exception:
+        return "N/A"
 
 def classify_text_polarity(text_value: str) -> str:
     txt = str(text_value or "").lower()
@@ -7330,18 +7368,30 @@ def _render_future_price_panel_for_df(
             selected_model = fp_result.get("best_model_result", {})
         horizon_value = int(fp_result.get("horizon_bars", future_horizon))
 
+        fp_current_price = _fp_safe_value(selected_model, fp_result, "current_price", np.nan)
+        fp_pred_price = _fp_safe_value(selected_model, fp_result, "predicted_price", np.nan)
+        fp_delta_pct = _fp_safe_value(selected_model, fp_result, "delta_pct", np.nan)
+        fp_pred_low = _fp_safe_value(selected_model, fp_result, "predicted_low", np.nan)
+        fp_pred_high = _fp_safe_value(selected_model, fp_result, "predicted_high", np.nan)
+        fp_confidence = _fp_safe_value(selected_model, fp_result, "confidence_score", np.nan)
+        fp_mae = _fp_safe_value(selected_model, fp_result, "mae", np.nan)
+        fp_rmse = _fp_safe_value(selected_model, fp_result, "rmse", np.nan)
+        fp_mape = _fp_safe_value(selected_model, fp_result, "mape", np.nan)
+        fp_train_rows = _fp_safe_value(selected_model, fp_result, "train_rows", np.nan)
+        fp_test_rows = _fp_safe_value(selected_model, fp_result, "test_rows", np.nan)
+
         fp_c1, fp_c2, fp_c3, fp_c4, fp_c5 = st.columns(5)
-        fp_c1.metric("Mevcut Kapanış", f"{selected_model['current_price']:.2f}")
-        fp_c2.metric(f"{int(horizon_value)} Bar Sonrası Tahmin", f"{selected_model['predicted_price']:.2f}")
-        fp_c3.metric("Tahmini Değişim", f"{selected_model['delta_pct']:+.2f}%")
-        fp_c4.metric("Tahmin Bandı", f"{selected_model['predicted_low']:.2f} - {selected_model['predicted_high']:.2f}" if pd.notna(selected_model['predicted_low']) and pd.notna(selected_model['predicted_high']) else "N/A")
-        fp_c5.metric("Güven Skoru", f"{selected_model['confidence_score']:.1f}%" if pd.notna(selected_model['confidence_score']) else "N/A")
+        fp_c1.metric("Mevcut Kapanış", _fp_fmt_num(fp_current_price, 2))
+        fp_c2.metric(f"{int(horizon_value)} Bar Sonrası Tahmin", _fp_fmt_num(fp_pred_price, 2))
+        fp_c3.metric("Tahmini Değişim", _fp_fmt_num(fp_delta_pct, 2, "%") if pd.notna(fp_delta_pct) else "N/A")
+        fp_c4.metric("Tahmin Bandı", f"{_fp_fmt_num(fp_pred_low, 2)} - {_fp_fmt_num(fp_pred_high, 2)}" if pd.notna(fp_pred_low) and pd.notna(fp_pred_high) else "N/A")
+        fp_c5.metric("Güven Skoru", _fp_fmt_num(fp_confidence, 1, "%") if pd.notna(fp_confidence) else "N/A")
 
         fp_m1, fp_m2, fp_m3, fp_m4 = st.columns(4)
-        fp_m1.metric("MAE", f"{selected_model['mae']:.4f}" if pd.notna(selected_model['mae']) else "N/A")
-        fp_m2.metric("RMSE", f"{selected_model['rmse']:.4f}" if pd.notna(selected_model['rmse']) else "N/A")
-        fp_m3.metric("MAPE", f"%{selected_model['mape']:.2f}" if pd.notna(selected_model['mape']) else "N/A")
-        fp_m4.metric("Eğitim/Test Satırı", f"{selected_model['train_rows']}/{selected_model['test_rows']}")
+        fp_m1.metric("MAE", _fp_fmt_num(fp_mae, 4))
+        fp_m2.metric("RMSE", _fp_fmt_num(fp_rmse, 4))
+        fp_m3.metric("MAPE", "%" + _fp_fmt_num(fp_mape, 2) if pd.notna(fp_mape) else "N/A")
+        fp_m4.metric("Eğitim/Test Satırı", f"{int(fp_train_rows) if pd.notna(fp_train_rows) else 'N/A'}/{int(fp_test_rows) if pd.notna(fp_test_rows) else 'N/A'}")
 
         fp_p1, fp_p2, fp_p3, fp_p4 = st.columns(4)
         fp_p1.metric("Yükseliş Olasılığı", f"%{selected_model['up_prob']:.1f}" if pd.notna(selected_model['up_prob']) else "N/A")
@@ -8941,18 +8991,30 @@ with tab_future:
                 selected_model = fp_result.get("best_model_result", {})
             horizon_value = int(fp_result.get("horizon_bars", future_horizon))
 
+            fp_current_price = _fp_safe_value(selected_model, fp_result, "current_price", np.nan)
+            fp_pred_price = _fp_safe_value(selected_model, fp_result, "predicted_price", np.nan)
+            fp_delta_pct = _fp_safe_value(selected_model, fp_result, "delta_pct", np.nan)
+            fp_pred_low = _fp_safe_value(selected_model, fp_result, "predicted_low", np.nan)
+            fp_pred_high = _fp_safe_value(selected_model, fp_result, "predicted_high", np.nan)
+            fp_confidence = _fp_safe_value(selected_model, fp_result, "confidence_score", np.nan)
+            fp_mae = _fp_safe_value(selected_model, fp_result, "mae", np.nan)
+            fp_rmse = _fp_safe_value(selected_model, fp_result, "rmse", np.nan)
+            fp_mape = _fp_safe_value(selected_model, fp_result, "mape", np.nan)
+            fp_train_rows = _fp_safe_value(selected_model, fp_result, "train_rows", np.nan)
+            fp_test_rows = _fp_safe_value(selected_model, fp_result, "test_rows", np.nan)
+
             fp_c1, fp_c2, fp_c3, fp_c4, fp_c5 = st.columns(5)
-            fp_c1.metric("Mevcut Kapanış", f"{selected_model['current_price']:.2f}")
-            fp_c2.metric(f"{int(horizon_value)} Bar Sonrası Tahmin", f"{selected_model['predicted_price']:.2f}")
-            fp_c3.metric("Tahmini Değişim", f"{selected_model['delta_pct']:+.2f}%")
-            fp_c4.metric("Tahmin Bandı", f"{selected_model['predicted_low']:.2f} - {selected_model['predicted_high']:.2f}" if pd.notna(selected_model['predicted_low']) and pd.notna(selected_model['predicted_high']) else "N/A")
-            fp_c5.metric("Güven Skoru", f"{selected_model['confidence_score']:.1f}%" if pd.notna(selected_model['confidence_score']) else "N/A")
+            fp_c1.metric("Mevcut Kapanış", _fp_fmt_num(fp_current_price, 2))
+            fp_c2.metric(f"{int(horizon_value)} Bar Sonrası Tahmin", _fp_fmt_num(fp_pred_price, 2))
+            fp_c3.metric("Tahmini Değişim", _fp_fmt_num(fp_delta_pct, 2, "%") if pd.notna(fp_delta_pct) else "N/A")
+            fp_c4.metric("Tahmin Bandı", f"{_fp_fmt_num(fp_pred_low, 2)} - {_fp_fmt_num(fp_pred_high, 2)}" if pd.notna(fp_pred_low) and pd.notna(fp_pred_high) else "N/A")
+            fp_c5.metric("Güven Skoru", _fp_fmt_num(fp_confidence, 1, "%") if pd.notna(fp_confidence) else "N/A")
 
             fp_m1, fp_m2, fp_m3, fp_m4 = st.columns(4)
-            fp_m1.metric("MAE", f"{selected_model['mae']:.4f}" if pd.notna(selected_model['mae']) else "N/A")
-            fp_m2.metric("RMSE", f"{selected_model['rmse']:.4f}" if pd.notna(selected_model['rmse']) else "N/A")
-            fp_m3.metric("MAPE", f"%{selected_model['mape']:.2f}" if pd.notna(selected_model['mape']) else "N/A")
-            fp_m4.metric("Eğitim/Test Satırı", f"{selected_model['train_rows']}/{selected_model['test_rows']}")
+            fp_m1.metric("MAE", _fp_fmt_num(fp_mae, 4))
+            fp_m2.metric("RMSE", _fp_fmt_num(fp_rmse, 4))
+            fp_m3.metric("MAPE", "%" + _fp_fmt_num(fp_mape, 2) if pd.notna(fp_mape) else "N/A")
+            fp_m4.metric("Eğitim/Test Satırı", f"{int(fp_train_rows) if pd.notna(fp_train_rows) else 'N/A'}/{int(fp_test_rows) if pd.notna(fp_test_rows) else 'N/A'}")
 
             fp_p1, fp_p2, fp_p3, fp_p4 = st.columns(4)
             fp_p1.metric("Yükseliş Olasılığı", f"%{selected_model['up_prob']:.1f}" if pd.notna(selected_model['up_prob']) else "N/A")
