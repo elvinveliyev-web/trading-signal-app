@@ -270,6 +270,22 @@ def render_help_badges(items: List[Any], title: str = ""):
         st.markdown('<div class="edu-help-wrap">' + "".join(badges) + '</div>', unsafe_allow_html=True)
 
 
+
+def render_page_education_expander(items: List[Any], label: str = "↘ Bu sayfanın eğitim rehberini aç"):
+    with st.expander(label, expanded=False):
+        for item in items:
+            if isinstance(item, (tuple, list)) and len(item) >= 2:
+                key = str(item[0]); title = str(item[1])
+            else:
+                key = str(item); title = str(item)
+            tip = APP_EDUCATION_TEXTS.get(key, "")
+            if not tip:
+                continue
+            st.markdown(f"### {title}")
+            st.markdown(tip)
+            st.markdown("---")
+
+
 APP_EDUCATION_TEXTS.update({
     "ema": """EMA (Exponential Moving Average), son barlara daha fazla ağırlık veren hareketli ortalamadır. Bu yüzden fiyatın güncel ritmine klasik ortalamalardan daha hızlı uyum sağlar. Kısa EMA yukarı dönüyor ve uzun EMA'nın üzerindeyse trend ivmesi çoğunlukla boğa lehine kabul edilir; kısa EMA aşağı dönüyor ve uzun EMA'nın altındaysa ayı lehine baskı artar. Ancak EMA'lar gecikmeli çalışır; ani haber akışlarında veya yatay piyasalarda fiyat çizgiyi sık sık kesip tekrar üzerine çıkabilir. Bu nedenle EMA'yı tek başına sinyal değil, trend filtresi ve dinamik destek/direnç alanı olarak okumak en sağlıklı yaklaşımdır.""",
     "sma_bias": """SMA bias, hızlı SMA ile yavaş SMA'nın ilişkisinden türetilen yapısal yön özetidir. Hızlı SMA yavaş SMA'nın üzerindeyse piyasa kısa-orta vadede LONG bias taşır; altındaysa SHORT bias öne çıkar. Bu bilgi, her barda al-sat komutu vermekten çok, mevcut rüzgârın hangi yönden estiğini anlamak için kullanılır. Yatay piyasalarda SMA'lar birbirini sık kesebilir ve bias kısa sürede değişebilir; bu yüzden ADX, hacim ve fiyatın ana destek/direnç bölgelerine göre konumu ile birlikte değerlendirilmelidir.""",
@@ -354,6 +370,39 @@ APP_EDUCATION_TEXTS.update({
     "horizon_bars": """Tahmin ufku (horizon bars), modelin kaç bar sonrasını tahmin etmeye çalıştığını belirler. Kısa ufuklar daha gürültülü ama daha taktiksel, uzun ufuklar daha zor ama daha stratejik olabilir. Model başarısı ve hata büyüklüğü bu parametreye çok duyarlıdır."""
 })
 
+
+APP_EDUCATION_TEXTS.update({
+    "dashboard_page": """Dashboard sekmesi, seçilen hissenin o anki teknik özetini tek bakışta okumak için tasarlanmıştır. Buradaki amaç tek bir göstergeden emir üretmek değil; fiyat, trend, volatilite, hacim, risk/ödül, backtest ve hacim profili gibi farklı katmanları aynı ekranda birleştirerek bağlam kurmaktır. Bu sayfa en sağlıklı şekilde yukarıdan aşağı okunur: önce genel skor ve trend durumu, sonra fiyat grafiği, sonra momentum/volatilite panelleri, ardından backtest ve VPVR. Eğer göstergeler aynı yönde kümeleniyorsa karar kalitesi artar; birbirleriyle çelişiyorsa temkin artmalıdır.""",
+    "triple_page": """3 Ekranlı Sistem sekmesinde büyük zaman dilimi ana trendi, orta zaman dilimi düzeltmeyi ve küçük zaman dilimi tetikleyiciyi anlamak için kullanılır. Bu sayfa, tek zaman dilimine bakarak acele karar vermeyi azaltır. Haftalık görünüm yönü, günlük görünüm setup kalitesini, saatlik görünüm ise hassas zamanlamayı destekler. En iyi okuma, üç ekranın da aynı yönde hizalanıp hizalanmadığına bakmaktır.""",
+    "future_page": """Future Price sekmesi, makine öğrenmesi tabanlı tahmin katmanıdır. Buradaki temel amaç 'kesin gelecek fiyatı' bulmak değil; farklı modellerin belirli bir bar ufkunda ne kadar tutarlı sonuç verdiğini görmek ve bunu mevcut trend, volatilite ve hata bandı ile birlikte yorumlamaktır. Model tahmini güçlü teknik bağlamla aynı yöne bakıyorsa yardımcı olabilir; teknik yapı ile zıt düşüyorsa tek başına belirleyici olmamalıdır.""",
+    "indicator_stats_page": """İndikatör İstatistik sekmesi, tek tek göstergelerin geçmişte ne kadar sık oluştuğunu ve ne ölçüde işe yaradığını istatistiksel olarak incelemek için kullanılır. Bu sayfa, 'bu sinyal oluşunca tarihte ne olmuş?' sorusunu cevaplamaya çalışır. Ancak geçmiş frekans her zaman gelecek başarı garantisi vermez; piyasa rejimi değiştiğinde istatistikler de anlam değiştirebilir.""",
+    "chart_patterns_page": """Grafik Formasyonları sekmesi, klasik teknik formasyonların varlığını ve bulunduğu konumu görmeye yarar. Formasyonlar tek başına kesin emir değildir; en iyi sonuç, trend filtresi, hacim ve seviye yapısı ile birlikte okunduğunda elde edilir. Özellikle kırılım beklenen yapılarda hacim teyidi çok önemlidir.""",
+    "history_page": """Tarih Aralığı Analizi sekmesi, geçmişte seçilen bir dönem içinde fiyatın ve teknik göstergelerin birlikte nasıl davrandığını inceleme aracıdır. Bu sayfa geriye dönük öğrenme için çok değerlidir; belirli kriz, rallİ veya yatay dönemlerde sistemin nasıl çalıştığını görmeyi sağlar. Geçmişte oluşan sinyal kümelerini görerek stratejinin güçlü ve zayıf rejimlerini keşfetmek mümkündür.""",
+    "financials_page": """Bilanço Analizi sekmesi, şirketin finansal kalitesini, büyümesini, borçluluğunu, nakit üretimini ve göreli değerlemesini bir arada okumayı amaçlar. Bu sayfada oranların tek tek iyi görünmesinden çok, birbirleriyle uyumu önemlidir. Yüksek büyüme ama zayıf nakit akışı, yüksek ROE ama aşırı borç veya düşük F/K ama kötü kalite gibi çelişkiler burada ayıklanmalıdır.""",
+    "index_center_page": """BIST Endeks Merkezi, tek hisse yerine endeks düzeyinde bağlam üretmek için tasarlanmıştır. Amaç, seçilen endeksin genel yönünü, momentumunu ve tahmin yapısını görmek; böylece tekil hisseleri endeks rüzgârından bağımsız düşünmemektir. Endeks olumlu değilse hisse bazlı sinyallerin başarı ihtimali de düşebilir.""",
+    "calendar_page": """Ekonomik Takvim sekmesi, makro veri akışının piyasayı nasıl etkileyebileceğini görmek için kullanılır. Burada veri başlığının kendisi kadar sürpriz potansiyeli, hangi sektörleri etkileyebileceği ve piyasadaki mevcut beklenti rejimi önemlidir. Makro veri günlerinde teknik seviyeler daha kolay delinip sahte hareketler de artabilir.""",
+    "social_page": """X + YouTube Trends sekmesi, sosyal ilgi yoğunluğunu fiyat davranışıyla birlikte değerlendirmeye yarar. Artan dijital ilgi bazen erken momentum göstergesi olabilir, bazen de geç kalınmış spekülatif coşkuyu anlatabilir. Bu nedenle sosyal ilgi her zaman olumlu kabul edilmez; zamanlaması ve fiyat yapısıyla uyumu önemlidir.""",
+    "heatmap_page": """Sektörel Heatmap sekmesi, hisseleri tek tek değil, ait oldukları sektör bağlamında okumaya yarar. Aynı piyasa içinde bazı sektörler lider, bazıları zayıf kalabilir. Göreli güç, pahalı/ucuzluk ve kalite karşılaştırmaları burada daha anlamlı hale gelir.""",
+    "export_page": """Rapor sekmesi, uygulamanın farklı modüllerinden gelen özet bilgileri saklamak, paylaşmak ve daha sistemli incelemek için kullanılır. Bu sayfa kararın kendisini değil, kararın belgesini üretir. Düzenli raporlama, stratejinin zaman içindeki tutarlılığını izlemeye yardım eder.""",
+    "scan_page": """Tarama sekmesi, evrendeki hisseler arasında seçilen şartlara göre hızlı filtreleme yapmak için kullanılır. Bu sayfa nihai karar yeri değil, aday bulma motorudur. Tarama sonrası en güçlü adaylar mutlaka Dashboard, Triple Screen, seviye yapısı ve finansal kalite ile tekrar doğrulanmalıdır.""",
+    "trend_donchian_page": """Trend + Donchian Sistemleri sekmesi, trend takip ve breakout mantığını sistematik hale getiren bir eğitim/uygulama alanıdır. Buradaki sistemler en dipten veya tepeden yakalamaya değil, yön netleştikten sonra disiplinli biçimde katılmaya odaklanır. Güçlü tarafları büyük trendleri taşıyabilmeleri, zayıf tarafları ise yatay piyasalarda sık küçük sinyaller üretebilmeleridir.""",
+    "twp_long_setup": """Trend with Patt Entry LONG setup, ana trend yukarıyken fiyat davranışının yeniden boğa yönünde hizalanmasını arar. Bu pratik sürümde temel mantık şudur: yapısal trend filtreleri olumlu olacak, kısa-orta vadeli ortalamalar boğa tarafını destekleyecek ve fiyat aksiyonunda boğa lehine bir giriş paternı görülecektir. LONG setup 'hemen al' demek değildir; özellikle hacim, seviye ve genel piyasa bağlamı ile teyit edildiğinde daha anlamlıdır.""",
+    "twp_short_setup": """Trend with Patt Entry SHORT setup, ana yön aşağıyken fiyatın ayı lehine yeniden ivme kazandığı bölgeleri arar. Bu pratik sürümde trend filtresi negatif, ortalama yapısı baskı yönünde ve fiyat davranışı da short lehine olmalıdır. SHORT setup özellikle zayıf piyasa rejiminde ve önemli direnç bölgelerine yakınken daha güçlü anlam taşır.""",
+    "twp_trend_filter": """Trend with Patt Entry içindeki trend filtresi, işlemin rüzgâra karşı mı yoksa rüzgârla birlikte mi açıldığını anlamak için kullanılır. Trend filtresi pozitifse boğa patternleri daha ciddiye alınır; negatifse ayı patternleri öncelik kazanır. En önemli işlevi, tek mum veya tek pattern kaynaklı acele işlemleri azaltmaktır.""",
+    "twp_sma_relation": """TWP içindeki SMA50 / SMA200 ilişkisi, yapısal trendin çoğunlukla hangi tarafta olduğunu özetler. SMA50'nin SMA200 üzerinde olması trend tarafının daha çok LONG lehine olduğunu, altında olması ise SHORT lehine baskıyı anlatır. Ancak bu ilişki gecikmeli çalışır; bu yüzden pattern ve fiyat yapısıyla birlikte teyit edilmelidir.""",
+    "donchian_upper_band": """Donchian üst bandı, seçilen periyottaki en yüksek tepeyi gösterir. Bu seviye, fiyatın mevcut işlem aralığının üst sınırıdır ve breakout sistemlerinde çok önemlidir. Fiyat bu bandın üzerine taşarsa yeni yüksek bölgeye geçiş sinyali oluşabilir; fakat hacim ve kabul davranışı teyit için çok önemlidir.""",
+    "donchian_mid_band": """Donchian orta bandı, üst ve alt kanalın ortalamasıdır ve denge çizgisi gibi düşünülebilir. Fiyat orta bandın üstünde kaldığında üst bölgeye eğilim, altında kaldığında alt bölgeye baskı okunabilir. Tek başına sinyal değil, kanal içi konum yorumunda yardımcı referanstır.""",
+    "donchian_lower_band": """Donchian alt bandı, seçilen periyottaki en düşük dibi gösterir. Bu seviye mevcut işlem aralığının alt sınırıdır. Fiyat bu bandın altına sarkarsa zayıflama veya aşağı kırılım sinyali oluşabilir; ancak sahte kırılımlar özellikle yatay dönemde sık görülebilir.""",
+    "donchian_position": """Donchian konum metrikleri, fiyatın kanalın üstüne mi altına mı daha yakın olduğunu gösterir. Üst banda yakınlık çoğu zaman göreli güç, alt banda yakınlık ise zayıflama veya baskı anlatır. Yine de kanalın tam neresinde olduğu kadar, oraya nasıl geldiği de önemlidir.""",
+    "d520_state": """5&20 sistemindeki 'durum' metriği, mevcut yapının kısa ortalama ile orta ortalama arasındaki ilişkiye göre LONG, SHORT veya nötr tarafta olup olmadığını özetler. Bu, tetik değil yön filtresidir. Sistem en iyi trend başlatan değil, trendi devam ederken izleyen araçlardan biridir.""",
+    "d520_buy_sig": """5&20 sistemindeki AL sinyali, kısa tarafın orta tarafı yukarı kestiği veya boğa lehine hizalandığı anı temsil eder. Fakat yatay piyasalarda bu tür sinyaller sık sık bozulabilir. Hacim, seviye ve trend gücü ile teyit edildiğinde kalite artar.""",
+    "d520_sell_sig": """5&20 sistemindeki SAT sinyali, kısa tarafın orta tarafı aşağı kestiği veya ayı lehine hizalandığı anı temsil eder. Güçlü ayı rejimlerinde etkili olabilir; ancak boğa piyasasında sık erken uyarı verip bozulabilir. Bu yüzden bağlam çok önemlidir.""",
+    "rd_long_entry": """Richard Dennis / Turtle LONG giriş mantığı, fiyatın belirli bir lookback içindeki üst kırılım seviyesini aşması üzerine kuruludur. Buradaki amaç ucuzluk aramak değil, güç gösterisini disiplinle takip etmektir. Sistem, güçlü trendlerin başını kaçırsa bile devam eden hareketi taşımaya çalışır.""",
+    "rd_short_entry": """Richard Dennis / Turtle SHORT giriş mantığı, fiyatın alt kırılım seviyesinin altına inmesiyle ayı tarafına katılmayı amaçlar. Bu yaklaşım özellikle zayıf ve trendli piyasalarda etkilidir. Ancak sert haber ve gap ortamında kırılımlar daha riskli hale gelir.""",
+    "rd_exit_filter": """Richard Dennis sistemindeki çıkış filtresi, trend bozulduğunda pozisyonda kalmaya devam etmemek için kullanılır. Klasik mantık, giriş kanalından daha kısa bir ters kanal veya belirli kırılım seviyesi ile çıkışı yönetmektir. Bu, büyük trendleri taşırken gereksiz inadı azaltır.""",
+    "rd_upper20": """Richard Dennis ekranındaki 20 günlük üst seviye, klasik turtle giriş üst bandını temsil eder. Fiyat bu seviyeyi yukarı geçiyorsa boğa yönlü breakout ihtimali doğar. Fakat hacim ve genel piyasa bağlamı kırılım kalitesi için hâlâ kritiktir.""",
+    "rd_lower20": """Richard Dennis ekranındaki 20 günlük alt seviye, aşağı yönlü breakout referansıdır. Fiyat bu seviyenin altına iniyorsa satış baskısının yeni bir faza geçtiği düşünülebilir. Ancak yatay ve haber bazlı piyasada sahte kırılım riski unutulmamalıdır.""",
+})
 EDUCATION_TAB_SECTIONS: List[Tuple[str, List[Tuple[str, str]]]] = [
     ("Trend, Ortalama ve Yapı", [
         ("ema", "EMA"), ("sma_bias", "SMA Bias"), ("ema_fast", "Hızlı EMA Periyodu"),
@@ -7373,7 +7422,7 @@ def _render_dashboard_like_context(ctx: Dict[str, Any], display_name: str, inter
     poc_price_local = ctx["poc_price"]
 
     st.subheader(f"📊 {display_name} Dashboard")
-    render_help_badges([("ema","EMA"),("bollinger","Bollinger"),("rsi","RSI"),("macd","MACD"),("atr_pct","ATR%"),("volume_ratio","Hacim"),("obv","OBV"),("vpvr","VPVR"),("poc","POC"),("support_resistance","Destek/Direnç")], "Dashboard eğitim katmanı")
+    render_page_education_expander([("dashboard_page","Dashboard Nasıl Okunur?"),("ema","EMA"),("bollinger","Bollinger Bantları"),("rsi","RSI"),("macd","MACD"),("atr_pct","ATR%"),("volume_ratio","Hacim Oranı"),("obv","OBV"),("support_resistance","Destek/Direnç"),("target_band","Hedef Fiyat Bandı"),("backtest","Backtest"),("monte_carlo","Monte Carlo"),("vpvr","VPVR"),("poc","POC"),("poc_distance","POC Uzaklık %"),("sector_relative","Sektöre Göre Pahalı/Ucuz")])
     c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
     c1.metric("Endeks", display_name)
     c2.metric("Interval", interval_label)
@@ -7393,7 +7442,6 @@ def _render_dashboard_like_context(ctx: Dict[str, Any], display_name: str, inter
     sm2.metric("ATR Rejimi", "Yüksek" if pd.notna(latest_local.get("ATR_PCT", np.nan)) and latest_local.get("ATR_PCT", 0) > 0.04 else "Normal")
 
     st.subheader("📊 Aşırı Alım / Spekülasyon Göstergeleri")
-    render_help_badges([("rsi","RSI"),("bollinger","Bollinger"),("stoch_rsi","Stochastic RSI"),("volume_ratio","Hacim Oranı"),("atr_pct","ATR%")])
     ob1, ob2, ob3, ob4 = st.columns(4)
     ob1.metric("Aşırı Alım Skoru", f"{spec_local['overbought_score']}/100")
     ob2.metric("Aşırı Satım Skoru", f"{spec_local['oversold_score']}/100")
@@ -7405,7 +7453,6 @@ def _render_dashboard_like_context(ctx: Dict[str, Any], display_name: str, inter
             st.write(f"• {v}")
 
     st.subheader("✅ Kontrol Noktaları (Son Bar)")
-    render_help_badges([("ema","EMA"),("rsi","RSI"),("macd","MACD"),("obv","OBV"),("atr_pct","ATR%"),("bollinger","Bollinger")])
     cp_cols = st.columns(3)
     cp_items = list(checkpoints_local.items())
     for i, (k, v) in enumerate(cp_items):
@@ -7413,7 +7460,6 @@ def _render_dashboard_like_context(ctx: Dict[str, Any], display_name: str, inter
             st.metric(k, "✅" if v else "❌")
 
     st.subheader("🎯 Hedef Fiyat Bandı (Senaryo)")
-    render_help_badges([("target_band","Hedef Bandı"),("support_resistance","Destek/Direnç")])
     base_px = float(tp_local["base"])
     rr_str = fmt_rr(rr_info_local.get("rr"))
     bull = tp_local.get("bull")
@@ -7439,7 +7485,6 @@ def _render_dashboard_like_context(ctx: Dict[str, Any], display_name: str, inter
 
     figs = ctx["indicator_figs"]
     st.subheader("📉 RSI / MACD / ATR%")
-    render_help_badges([("rsi","RSI"),("macd","MACD"),("atr_pct","ATR%")])
     colA, colB, colC = st.columns(3)
     with colA:
         st.plotly_chart(figs["rsi"], use_container_width=True)
@@ -7449,7 +7494,6 @@ def _render_dashboard_like_context(ctx: Dict[str, Any], display_name: str, inter
         st.plotly_chart(figs["atr"], use_container_width=True)
 
     st.subheader("📊 Stochastic RSI / Bollinger Genişliği / Hacim Oranı")
-    render_help_badges([("stoch_rsi","Stochastic RSI"),("bb_width","Bollinger Genişliği"),("volume_ratio","Hacim Oranı")])
     colD, colE, colF = st.columns(3)
     with colD:
         st.plotly_chart(figs["stoch"], use_container_width=True)
@@ -7459,7 +7503,6 @@ def _render_dashboard_like_context(ctx: Dict[str, Any], display_name: str, inter
         st.plotly_chart(figs["volratio"], use_container_width=True)
 
     st.subheader("📊 Hacim ve Trend Karşılaştırmaları")
-    render_help_badges([("obv","OBV"),("volume_ratio","Hacim"),("ema","Trend")])
     colV1, colV2, colV3 = st.columns(3)
     with colV1:
         st.plotly_chart(figs["vol_market"], use_container_width=True)
@@ -7498,7 +7541,6 @@ def _render_dashboard_like_context(ctx: Dict[str, Any], display_name: str, inter
         st.dataframe(ctx["tdf"], use_container_width=True, height=240)
 
     st.subheader("📦 Hacim Profili (VPVR / POC)")
-    render_help_badges([("vpvr","VPVR"),("poc","POC"),("poc_distance","POC Uzaklık %")])
     vp1, vp2, vp3 = st.columns(3)
     vp1.metric("POC", f"{poc_price_local:.2f}" if np.isfinite(poc_price_local) else "N/A")
     close_ref_local = float(df_local["Close"].iloc[-1]) if not df_local.empty else np.nan
@@ -8581,7 +8623,7 @@ with tab_scan:
 
 with tab_history_range:
     st.header("🕰️ Tarih Aralığı Analizi")
-    render_help_badges([("ema","EMA"),("rsi","RSI"),("macd","MACD"),("atr_pct","ATR%"),("stoch_rsi","Stochastic RSI"),("bb_width","Bollinger Genişliği"),("volume_ratio","Hacim Oranı"),("backtest","Backtest"),("vpvr","VPVR"),("poc","POC")], "Tarih aralığı teknik rehberi")
+    render_page_education_expander([("history_page","Tarih Aralığı Analizi Nasıl Okunur?"),("ema","EMA"),("rsi","RSI"),("macd","MACD"),("atr_pct","ATR%"),("stoch_rsi","Stochastic RSI"),("bb_width","Bollinger Genişliği"),("volume_ratio","Hacim Oranı"),("backtest","Backtest"),("vpvr","VPVR"),("poc","POC"),("poc_distance","POC Uzaklık %")])
     st.caption("Yüklü veri penceresi içinden geçmiş bir tarih aralığı seçerek büyük boy grafik ve ilgili teknik panelleri görüntüleyebilirsin. Daha eski tarihleri görmek için sol menüden periyodu genişlet.")
 
     if df is None or df.empty:
@@ -8702,7 +8744,7 @@ with tab_education:
 
 with tab_index_center:
     st.header("📉 BIST Endeks Merkezi")
-    render_help_badges([("ema","EMA"),("rsi","RSI"),("macd","MACD"),("atr_pct","ATR%"),("vpvr","VPVR"),("poc","POC"),("triple_screen","Triple Screen"),("future_price","Future Price")])
+    render_page_education_expander([("index_center_page","BIST Endeks Merkezi Nasıl Okunur?"),("ema","EMA"),("rsi","RSI"),("macd","MACD"),("atr_pct","ATR%"),("vpvr","VPVR"),("poc","POC"),("triple_screen","Triple Screen"),("future_price","Future Price")])
     st.caption("BIST 30, BIST 100 ve BIST Tüm endeksleri için dashboard benzeri teknik görünüm, 3 Ekranlı Sistem ve Future Price panelleri.")
 
     index_map = _bist_index_mapping()
@@ -8745,11 +8787,11 @@ with tab_index_center:
     idx_sub_dash, idx_sub_triple, idx_sub_future = st.tabs(["📊 Dashboard", "📺 3 Ekranlı Sistem", "🔮 Future Price"])
 
     with idx_sub_dash:
-        render_help_badges([("ema","EMA"),("bollinger","Bollinger"),("rsi","RSI"),("macd","MACD"),("atr_pct","ATR%"),("volume_ratio","Hacim Oranı"),("obv","OBV"),("vpvr","VPVR"),("poc","POC"),("support_resistance","Destek/Direnç")])
+        render_page_education_expander([("dashboard_page","Endeks Dashboard Nasıl Okunur?"),("ema","EMA"),("bollinger","Bollinger"),("rsi","RSI"),("macd","MACD"),("atr_pct","ATR%"),("volume_ratio","Hacim Oranı"),("obv","OBV"),("vpvr","VPVR"),("poc","POC"),("support_resistance","Destek/Direnç")])
         _render_dashboard_like_context(index_ctx, selected_index_label, interval, period)
 
     with idx_sub_triple:
-        render_help_badges([("triple_screen","Triple Screen"),("macd","MACD"),("ema","EMA"),("adx","ADX"),("rsi","RSI"),("stochastic","Stokastik"),("force_index","Force Index"),("elder_ray","Elder-Ray"),("divergence","Uyumsuzluk")])
+        render_page_education_expander([("triple_page","3 Ekranlı Sistem Nasıl Okunur?"),("triple_screen","Triple Screen"),("macd","Haftalık MACD"),("ema","EMA"),("adx","ADX"),("rsi","RSI"),("stochastic","Stokastik"),("force_index","Force Index"),("elder_ray","Elder-Ray"),("divergence","Uyumsuzluk")])
         _render_triple_screen_panel_for_symbol(
             selected_index_ticker,
             selected_index_label,
@@ -8758,7 +8800,7 @@ with tab_index_center:
         )
 
     with idx_sub_future:
-        render_help_badges([("future_price","Future Price"),("mae","MAE"),("rmse","RMSE"),("mape","MAPE"),("direction_acc","Yön Doğruluğu"),("confidence","Güven Skoru"),("train_test","Eğitim/Test"),("trend_regime","Trend Rejimi"),("vol_regime","Volatilite Rejimi")])
+        render_page_education_expander([("future_page","Future Price Nasıl Okunur?"),("future_price","Future Price"),("horizon_bars","Tahmin Ufku"),("mae","MAE"),("rmse","RMSE"),("mape","MAPE"),("direction_acc","Yön Doğruluğu"),("confidence","Güven Skoru"),("train_test","Eğitim/Test"),("trend_regime","Trend Rejimi"),("vol_regime","Volatilite Rejimi")])
         if index_ctx.get("error"):
             st.warning(index_ctx["error"])
         else:
@@ -9048,7 +9090,7 @@ with tab_triple:
 
 with tab_indicator_stats:
     st.header("📈 İndikatör İstatistik")
-    render_help_badges([("divergence","Uyumsuzluk"),("rsi","RSI"),("macd","MACD"),("adx","ADX"),("elder_ray","Elder-Ray"),("force_index","Force Index"),("stochastic","Stokastik")])
+    render_page_education_expander([("indicator_stats_page","İndikatör İstatistik Nasıl Okunur?"),("divergence","Uyumsuzluk"),("rsi","RSI"),("macd","MACD"),("adx","ADX"),("elder_ray","Elder-Ray"),("force_index","Force Index"),("stochastic","Stokastik")])
     st.caption("Seçilen hisse ve indikatör için geçmiş oluşumları tarar; kaç kez oluştuğunu, kaç kez çalıştığını, trendin ters yöne dönene kadar ortalama kaç gün sürdüğünü ve oluşum sonrası yüzde kaç yükselip/düştüğünü istatistiksel olarak verir.")
 
     if not st.session_state.ta_ran:
@@ -9305,7 +9347,7 @@ with tab_future:
 
 with tab_chart_patterns:
     st.header("📐 Grafik Formasyonları")
-    render_help_badges([("support_resistance","Destek/Direnç"),("risk_reward","Risk/Ödül"),("ema","EMA"),("volume_ratio","Hacim Oranı")])
+    render_page_education_expander([("chart_patterns_page","Grafik Formasyonları Nasıl Okunur?"),("support_resistance","Destek/Direnç"),("risk_reward","Risk/Ödül"),("ema","EMA"),("volume_ratio","Hacim Oranı")])
     st.caption("Seçtiğin zaman dilimlerinde seçili hisseyi klasik grafik formasyonları için tarar. Tespit edilen formasyonlar yeşil işaretlenir; tıkladığında grafikte mavi alan ile gösterilir.")
 
     if not st.session_state.ta_ran:
@@ -9398,7 +9440,7 @@ with tab_chart_patterns:
 
 with tab_social:
     st.header("📣 X + YouTube Trends")
-    render_help_badges([("volume_ratio","İlgi Yoğunluğu"),("trend_regime","Trend Bağlamı")])
+    render_page_education_expander([("social_page","X + YouTube Trends Nasıl Okunur?"),("volume_ratio","İlgi Yoğunluğu"),("trend_regime","Trend Bağlamı")])
     social_tab_x, social_tab_youtube = st.tabs(["𝕏 X Trends", "▶️ YouTube Trends"])
 
     with social_tab_x:
@@ -9579,14 +9621,14 @@ with tab_social:
 
 with tab_trend_donchian:
     st.header("📡 Trend + Donchian Sistemleri")
-    render_help_badges([("trend_patt","Trend with Patt Entry"),("donchian","Donchian"),("donchian_520","5&20"),("richard_dennis","Richard Dennis")])
+    render_page_education_expander([("trend_donchian_page","Trend + Donchian Sistemleri Nasıl Okunur?"),("trend_patt","Trend with Patt Entry"),("donchian","Donchian"),("donchian_520","5&20"),("richard_dennis","Richard Dennis")])
     st.caption("Bu sekmede trend ve breakout sistemleri özetlenir. 'Trend with Patt Entry' için kamuya açık birebir orijinal kurallar doğrulanamadığı için pratik trend + price action yaklaşımı kullanılmıştır.")
 
     twp_tab, dc_tab, d520_tab, rd_tab = st.tabs(["📈 Trend with Patt Entry", "📦 Donchian Kanalları", "5&20", "Richard Dennis"])
 
     with twp_tab:
         st.subheader("Trend with Patt Entry (pratik yaklaşım)")
-        render_help_badges([("trend_patt","Trend with Patt Entry"),("sma_bias","SMA Bias"),("sma_fast","Hızlı SMA"),("sma_slow","Yavaş SMA")])
+        render_page_education_expander([("trend_patt","Trend with Patt Entry"),("twp_trend_filter","Trend Filtresi"),("twp_long_setup","LONG Setup"),("twp_short_setup","SHORT Setup"),("twp_sma_relation","SMA50 / SMA200 İlişkisi"),("sma_bias","SMA Bias"),("sma_fast","Hızlı SMA"),("sma_slow","Yavaş SMA")])
         twp_df = trend_with_pattern_entry_signals(df.copy())
         twp_last = twp_df.iloc[-1]
         t1, t2, t3, t4 = st.columns(4)
@@ -9605,7 +9647,7 @@ with tab_trend_donchian:
 
     with dc_tab:
         st.subheader("Donchian Kanalları")
-        render_help_badges([("donchian","Donchian Kanalları")])
+        render_page_education_expander([("donchian","Donchian Kanalları"),("donchian_upper_band","Üst Bant"),("donchian_mid_band","Orta Bant"),("donchian_lower_band","Alt Bant"),("donchian_position","Konum")])
         dc_df = df.copy()
         dc_df["DC_UPPER20"], dc_df["DC_MID20"], dc_df["DC_LOWER20"] = donchian_channels(dc_df["High"], dc_df["Low"], 20)
         dc_last = dc_df.iloc[-1]
@@ -9619,7 +9661,7 @@ with tab_trend_donchian:
 
     with d520_tab:
         st.subheader("Donchian 5&20 / MA 5-20 Sistemi")
-        render_help_badges([("donchian_520","Donchian 5&20"),("sma_bias","SMA Bias"),("sma_fast","Hızlı SMA"),("sma_slow","Yavaş SMA")])
+        render_page_education_expander([("donchian_520","Donchian 5&20"),("d520_state","Durum"),("d520_buy_sig","AL Sinyali"),("d520_sell_sig","SAT Sinyali"),("sma_bias","SMA Bias"),("sma_fast","Hızlı SMA"),("sma_slow","Yavaş SMA")])
         d520_df = donchian_5_20_system(df.copy())
         d520_last = d520_df.iloc[-1]
         k1, k2, k3, k4 = st.columns(4)
@@ -9638,7 +9680,7 @@ with tab_trend_donchian:
 
     with rd_tab:
         st.subheader("Richard Dennis / Turtle benzeri breakout sistemi")
-        render_help_badges([("richard_dennis","Richard Dennis / Turtle"),("donchian","Donchian Kanalları")])
+        render_page_education_expander([("richard_dennis","Richard Dennis / Turtle"),("rd_long_entry","LONG Giriş"),("rd_short_entry","SHORT Giriş"),("rd_exit_filter","Çıkış Filtresi"),("rd_upper20","20G Üst Seviye"),("rd_lower20","20G Alt Seviye"),("donchian","Donchian Kanalları")])
         rd_df = richard_dennis_system(df.copy())
         rd_last = rd_df.iloc[-1]
         r1, r2, r3, r4 = st.columns(4)
