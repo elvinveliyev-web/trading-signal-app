@@ -456,24 +456,20 @@ EDUCATION_TAB_SECTIONS: List[Tuple[str, List[Tuple[str, str]]]] = [
     ]),
 ]
 
+
 def render_education_center_tab():
     st.header("📚 Eğitim Merkezi")
-    st.caption("Bu sekmede uygulamadaki göstergeler, osilatörler, parametreler, risk metrikleri, finansal oranlar ve sistemler için kapsamlı eğitim notları yer alır. Metinleri karar motoru gibi değil, kavramları doğru okumak için rehber olarak kullan.")
-    render_help_badges(
-        [("rsi","RSI"),("macd","MACD"),("atr_pct","ATR%"),("bollinger","Bollinger"),("stoch_rsi","Stoch RSI"),
-         ("volume_ratio","Hacim Oranı"),("obv","OBV"),("ema","EMA"),("adx","ADX"),("elder_ray","Elder-Ray"),
-         ("vpvr","VPVR"),("poc","POC"),("future_price","Future Price"),("backtest","Backtest"),
-         ("roe","ROE"),("dcf","DCF"),("donchian","Donchian")],
-        "Hızlı erişim rehberi"
-    )
+    st.caption("Bu sekme, uygulamadaki göstergeler, osilatörler, parametreler, risk metrikleri, finansal oranlar ve sistemler için kapsamlı eğitim notlarını tek yerde toplar.")
     st.info("Önemli not: Buradaki açıklamalar eğitim amaçlıdır. Hiçbir gösterge, oran veya model tek başına kesin yatırım kararı verdirmez; en sağlıklı yaklaşım, birden çok kanıtı aynı yönde toplamaktır.")
 
-    for section_title, items in EDUCATION_TAB_SECTIONS:
-        with st.expander(section_title, expanded=False):
+    with st.expander("↘ Eğitim merkezinin kapsamlı rehberini aç", expanded=False):
+        for section_title, items in EDUCATION_TAB_SECTIONS:
+            st.markdown(f"## {section_title}")
             for key, label in items:
                 st.markdown(f"### {label}")
                 st.markdown(APP_EDUCATION_TEXTS.get(key, "Bu başlık için açıklama bulunamadı."))
                 st.markdown("---")
+
 
 
 # =============================
@@ -7559,7 +7555,6 @@ def _render_future_price_panel_for_df(
 ):
     st.header("🔮 Future Price")
     st.caption("Makine öğrenmesi tabanlı çoklu model karşılaştırması ile seçili sembolün mevcut zaman diliminde ileri bar kapanış fiyat tahmini üretir.")
-    render_help_badges([("future_price","Future Price"),("mae","MAE"),("rmse","RMSE"),("mape","MAPE"),("direction_acc","Yön Doğruluğu"),("confidence","Güven Skoru"),("train_test","Eğitim/Test"),("trend_regime","Trend Rejimi"),("vol_regime","Volatilite Rejimi")], "Future Price eğitim katmanı")
 
     if local_df is None or local_df.empty:
         st.info("Future Price için önce veri hazırlanmalıdır.")
@@ -7719,7 +7714,6 @@ def _render_triple_screen_panel_for_symbol(
 ):
     st.header("📺 Üçlü Ekran Trading Sistemi (Triple Screen)")
     st.caption(f"{display_name} için Dr. Alexander Elder'in 3 Ekranlı sistemine dayanan trend, osilatör ve giriş seviyesi analizi.")
-    render_help_badges([("triple_screen","Triple Screen"),("macd","MACD"),("ema","EMA"),("adx","ADX"),("rsi","RSI"),("stochastic","Stokastik"),("force_index","Force Index"),("elder_ray","Elder-Ray"),("divergence","Uyumsuzluk")], "Triple Screen eğitim katmanı")
 
     run_key = f"{session_prefix}_run_triple_screen"
     if st.button("Üçlü Ekran Verilerini Getir ve Analiz Et", key=f"{session_prefix}_run_triple_btn"):
@@ -7982,6 +7976,8 @@ def _render_triple_screen_panel_for_symbol(
 tab_dash, tab_triple, tab_indicator_stats, tab_future, tab_chart_patterns, tab_trend_donchian, tab_financials, tab_history_range, tab_education, tab_index_center, tab_calendar, tab_social, tab_heatmap, tab_export, tab_scan = st.tabs(["📊 Dashboard", "📺 3 Ekranlı Sistem", "📈 İndikatör İstatistik", "🔮 Future Price", "📐 Grafik Formasyonları", "📡 Trend + Donchian", "📘 Bilanço Analizi", "🕰️ Tarih Aralığı Analizi", "📚 Eğitim Merkezi", "📉 BIST Endeks Merkezi", "🗓️ Ekonomik Takvim", "📣 X + YouTube Trends", "🔥 Sektörel Heatmap", "📄 Rapor (PDF/HTML)", "🔍 Tarama"])
 
 with tab_dash:
+    render_page_education_expander([("dashboard_page","Dashboard Nasıl Okunur?"),("ema","EMA"),("bollinger","Bollinger Bantları"),("rsi","RSI"),("macd","MACD"),("atr_pct","ATR%"),("stoch_rsi","Stochastic RSI"),("bb_width","Bollinger Genişliği"),("volume_ratio","Hacim Oranı"),("obv","OBV"),("support_resistance","Destek / Direnç"),("target_band","Hedef Fiyat Bandı"),("risk_reward","Risk / Ödül"),("backtest","Backtest"),("monte_carlo","Monte Carlo"),("sharpe","Sharpe"),("sortino","Sortino"),("calmar","Calmar"),("ulcer","Ulcer Index"),("kelly","Kelly"),("vpvr","VPVR"),("poc","POC"),("poc_distance","POC Uzaklık %"),("sector_relative","Sektöre Göre Pahalı / Ucuz")])
+
     if "app_errors" in st.session_state and st.session_state.app_errors:
         for err in st.session_state.app_errors:
             st.error(f"⚠️ {err}")
@@ -8814,6 +8810,7 @@ with tab_index_center:
 
 with tab_triple:
     st.header("📺 Üçlü Ekran Trading Sistemi (Triple Screen)")
+    render_page_education_expander([("triple_page","3 Ekranlı Sistem Nasıl Okunur?"),("triple_screen","Triple Screen"),("macd","Haftalık MACD"),("ema","EMA"),("adx","ADX"),("rsi","RSI"),("stochastic","Stokastik"),("force_index","Force Index"),("elder_ray","Elder-Ray"),("divergence","Uyumsuzluk")])
     st.caption("Dr. Alexander Elder'in 3 Ekranlı sistemine dayanan, trend, osilatör ve giriş seviyesi analizleri.")
     
     if not st.session_state.ta_ran:
@@ -9192,6 +9189,7 @@ with tab_indicator_stats:
 
 with tab_future:
     st.header("🔮 Future Price")
+    render_page_education_expander([("future_page","Future Price Nasıl Okunur?"),("future_price","Future Price"),("horizon_bars","Tahmin Ufku"),("mae","MAE"),("rmse","RMSE"),("mape","MAPE"),("direction_acc","Yön Doğruluğu"),("confidence","Güven Skoru"),("train_test","Eğitim/Test"),("trend_regime","Trend Rejimi"),("vol_regime","Volatilite Rejimi")])
     st.caption("Makine öğrenmesi tabanlı çoklu model karşılaştırması ile seçili sembolün mevcut zaman diliminde ileri bar kapanış fiyat tahmini üretir.")
 
     if not st.session_state.ta_ran:
@@ -9700,7 +9698,7 @@ with tab_trend_donchian:
 
 with tab_financials:
     st.header("📘 Bilanço Analizi")
-    render_help_badges([("roe","ROE"),("revenue_growth","Net Satış Büyümesi"),("ebitda","FAVÖK"),("ebitda_margin","FAVÖK Marjı"),("debt_equity","Borç/Özsermaye"),("current_ratio","Cari Oran"),("net_margin","Net Kar Marjı"),("fcf","Serbest Nakit Akışı"),("pe","F/K"),("pb","PD/DD"),("net_debt_ebitda","Net Borç/FAVÖK"),("altman_z","Altman Z"),("piotroski_f","Piotroski F"),("dcf","DCF"),("sector_relative","Sektöre Göre Pahalı/Ucuz")], "Finansal analiz eğitim katmanı")
+    render_page_education_expander([("financials_page","Bilanço Analizi Nasıl Okunur?"),("roe","ROE"),("revenue_growth","Net Satış Büyümesi"),("ebitda","FAVÖK"),("ebitda_margin","FAVÖK Marjı"),("debt_equity","Borç / Özsermaye"),("current_ratio","Cari Oran"),("net_margin","Net Kâr Marjı"),("fcf","Serbest Nakit Akışı"),("pe","F/K"),("pb","PD/DD"),("net_debt_ebitda","Net Borç / FAVÖK"),("altman_z","Altman Z"),("piotroski_f","Piotroski F"),("dcf","DCF"),("sector_relative","Sektöre Göre Pahalı / Ucuz")])
     st.caption("Seçilen hissenin çeyreklik veya senelik son 4 bilanço dönemini gösterir. Çeyreklik modda kıyas türü olarak bir önceki dönem (legacy), bir önceki çeyrek veya geçen yılın aynı çeyreği seçilebilir; senelik modda bir önceki yıl baz alınır. Daha iyi yönde değişim yeşil, kötü yönde değişim kırmızı görünür.")
 
     fin_symbol_options = [naked_ticker(x) for x in universe] if universe else [naked_ticker(ticker)]
