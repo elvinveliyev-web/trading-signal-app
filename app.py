@@ -221,17 +221,167 @@ def render_help_badges(items: List[Any], title: str = ""):
         st.markdown('<div class="edu-help-wrap">' + "".join(badges) + '</div>', unsafe_allow_html=True)
 
 
+APP_EDUCATION_TEXTS.update({
+    "ema": """EMA (Exponential Moving Average), son barlara daha fazla ağırlık veren hareketli ortalamadır. Bu yüzden fiyatın güncel ritmine klasik ortalamalardan daha hızlı uyum sağlar. Kısa EMA yukarı dönüyor ve uzun EMA'nın üzerindeyse trend ivmesi çoğunlukla boğa lehine kabul edilir; kısa EMA aşağı dönüyor ve uzun EMA'nın altındaysa ayı lehine baskı artar. Ancak EMA'lar gecikmeli çalışır; ani haber akışlarında veya yatay piyasalarda fiyat çizgiyi sık sık kesip tekrar üzerine çıkabilir. Bu nedenle EMA'yı tek başına sinyal değil, trend filtresi ve dinamik destek/direnç alanı olarak okumak en sağlıklı yaklaşımdır.""",
+    "sma_bias": """SMA bias, hızlı SMA ile yavaş SMA'nın ilişkisinden türetilen yapısal yön özetidir. Hızlı SMA yavaş SMA'nın üzerindeyse piyasa kısa-orta vadede LONG bias taşır; altındaysa SHORT bias öne çıkar. Bu bilgi, her barda al-sat komutu vermekten çok, mevcut rüzgârın hangi yönden estiğini anlamak için kullanılır. Yatay piyasalarda SMA'lar birbirini sık kesebilir ve bias kısa sürede değişebilir; bu yüzden ADX, hacim ve fiyatın ana destek/direnç bölgelerine göre konumu ile birlikte değerlendirilmelidir.""",
+    "rsi": """RSI, fiyat değişimlerinin hızını ve kalıcılığını 0 ile 100 arasında ölçen momentum osilatörüdür. Klasik eşikler 70 üzeri aşırı alım ve 30 altı aşırı satım olarak anlatılır; fakat bu seviyeler tek başına dönüş garantisi vermez. Güçlü boğa trendlerinde RSI 70 üzerinde uzun süre kalabilir, güçlü ayı trendlerinde ise 30 altı bölge uzayabilir. Bu nedenle RSI'ı en sağlıklı okumak için şu üç soruya bakılır: trend yönü nedir, fiyat önemli destek/direnç bölgesinde mi, indikatör fiyatla uyumsuzluk veriyor mu? Orta çizgi olan 50'nin üstü genellikle boğa momentumunu, altı ise ayı momentumunu yansıtır.""",
+    "macd": """MACD, iki EMA arasındaki farktan oluşan trend-momentum göstergesidir. MACD çizgisi ile sinyal çizgisi arasındaki mesafe büyüdükçe momentum güçlenir; histogramın sıfır çizgisini geçmesi ise ivme rejimindeki değişimi gösterir. Sıfır üstünde büyüyen histogram çoğu zaman yükseliş ivmesinin arttığını, sıfır altında derinleşen histogram ise satış baskısının kuvvetlendiğini anlatır. Fakat yatay ve dalgalı piyasalarda histogram sık sık yön değiştirerek yalancı sinyal üretebilir. Bu yüzden MACD en iyi, ana trend filtresi ve fiyat yapısıyla birlikte kullanıldığında işe yarar.""",
+    "atr_pct": """ATR%, ortalama gerçek aralığın fiyata oranlanmış halidir ve volatiliteyi yüzdesel olarak ölçer. Aynı ATR değeri 20 liralık bir hissede çok büyük, 500 liralık bir hissede küçük olabilir; bu yüzden ATR%'yi kullanmak farklı fiyat ölçeklerini karşılaştırmayı kolaylaştırır. Yüksek ATR% daha geniş dalga boyu, daha büyük stop mesafesi ve daha dikkatli pozisyon boyutu anlamına gelir. Düşük ATR% ise sakin fiyat yapısını gösterebilir ama bu her zaman fırsatsız piyasa demek değildir; bazen güçlü trendler de kontrollü, düşük ATR% ile ilerler. ATR%, sinyal üretmekten çok risk yönetimi, stop mesafesi ve rejim analizi için kullanılır.""",
+    "bollinger": """Bollinger Bantları, hareketli ortalama etrafına standart sapma ekleyerek fiyatın istatistiksel zarfını çizer. Fiyat üst banda dokundu diye otomatik pahalı, alt banda indi diye otomatik ucuz kabul edilmez; güçlü trendlerde fiyat bandın kenarında yürüyebilir. Esas yorum, bandın genişliği, fiyatın orta banda göre davranışı ve hacimle birlikte yapılır. Orta bant çoğu zaman kısa vadeli denge çizgisidir; fiyat bunun üzerinde kalıyorsa yukarı yönlü yapı, altında kalıyorsa zayıflama eğilimi okunabilir. Bantların sıkışması enerji birikimini, genişlemesi ise hareketin açıldığını gösterir.""",
+    "bb_width": """Bollinger Genişliği, üst ve alt bandın birbirinden ne kadar ayrıldığını ölçer. Çok düşük genişlik, piyasanın sıkıştığını ve enerjinin biriktiğini gösterebilir; bu dönemlerin ardından sert kırılımlar gelebilir. Çok hızlı genişleyen genişlik ise ya trend başlangıcını ya da panik hareketini anlatabilir. Yön belirtmediği için tek başına alım-satım kararı üretmez. En iyi kullanım, band sıkışması sonrası fiyatın hangi yöne kırıldığı, hacmin bu kırılımı destekleyip desteklemediği ve ana trendin ne söylediği ile birlikte değerlendirmektir.""",
+    "stochastic": """Stokastik osilatör, fiyatın seçilen periyottaki yüksek-düşük aralığı içinde nereye kapandığını gösterir. Bu sayede kapanışların aralık içinde üst tarafta mı, alt tarafta mı yoğunlaştığını anlarsın. Hızlı tepki verdiği için dönüş arayan sistemlerde faydalıdır, ancak güçlü trendlerde erken karşı sinyal verme eğilimi yüksektir. 80 üzeri ve 20 altı bölgeler tek başına emir üretmez; asıl değer, kesişimlerin trend bağlamında ve destek/direnç bölgelerinde okunmasındadır.""",
+    "stoch_rsi": """Stochastic RSI, RSI'ın kendi iç aralığı içindeki konumunu ölçerek klasik RSI'dan daha hassas ve hızlı hale gelir. Bu sayede kısa vadeli yön değişimlerine daha erken tepki verebilir, ancak aynı nedenle daha gürültülüdür. Özellikle kısa vadeli aşırılaşmaları ve mini dönüş bölgelerini görmekte kullanışlıdır. Trend yönü ile birlikte kullanılmadığında sık yalancı sinyal üretebilir; bu yüzden Stochastic RSI en iyi, EMA yapısı ve hacimle teyit edilerek kullanılır.""",
+    "volume_ratio": """Hacim oranı, mevcut barın hacmini kendi ortalama hacmine böler ve hareketin ne kadar ilgi çektiğini gösterir. 1'in üzeri değerler son barın normalden daha canlı geçtiğini, belirgin yüksek değerler ise kırılım, haber etkisi, panik veya spekülatif ilgi ihtimalini işaret eder. Ancak yüksek hacim her zaman sağlıklı yükseliş değildir; dağıtım veya zorunlu çıkış da olabilir. Bu nedenle hacim oranını fiyatın yönü, mum yapısı ve destek/direnç bölgeleriyle birlikte okumak gerekir.""",
+    "obv": """OBV (On Balance Volume), fiyat yönünü hacimle kümülatif bir şekilde birleştirerek para akışının genel yönü hakkında fikir verir. Fiyat yatay seyrederken OBV yükseliyorsa gizli birikim, fiyat yükselirken OBV yatay/negatif gidiyorsa hareketin iç gücünde sorun olabilir. Kırılım öncesi hacim davranışını görmek için çok faydalıdır. Ancak tüm hacmi aynı kalitede kabul ettiği için tek başına nihai sinyal motoru değil, doğrulama aracıdır.""",
+    "force_index": """Force Index, fiyat değişimi ile hacmi çarparak hareketin ne kadar kuvvetli gerçekleştiğini gösterir. Sadece fiyatın yönünü değil, bu yönün ne kadar enerjiyle desteklendiğini anlamaya yarar. Sıfır çizgisi üzerindeki güçlü değerler alıcı baskısını, altındaki güçlü değerler satıcı baskısını anlatır. Force Index özellikle trend içindeki düzeltmelerin sona erip ana hareketin devam edip etmeyeceğini anlamada faydalıdır.""",
+    "elder_ray": """Elder-Ray, fiyatı 13 EMA etrafında değerlendirerek Bull Power ve Bear Power üretir. Bull Power, boğaların EMA üzerine ne kadar çıkabildiğini; Bear Power ise ayıların EMA altına ne kadar inebildiğini gösterir. Fiyat yeni dip yaparken Bear Power daha az zayıflıyorsa pozitif uyumsuzluk, fiyat yeni tepe yaparken Bull Power eşlik etmiyorsa negatif uyumsuzluk okunabilir. Elder yaklaşımında bu göstergeler, trend filtresi ve giriş zamanlaması arasında köprü görevi görür.""",
+    "adx": """ADX, trendin yönünü değil gücünü ölçer. +DI ve -DI hangi tarafın baskın olduğunu söylerken, ADX bu baskının ne kadar organize ve kuvvetli olduğunu gösterir. 20-25 altı değerler çoğu zaman yatay veya kararsız yapıya, daha yüksek değerler trendleşen piyasaya işaret eder. Bu nedenle RSI gibi osilatörler yatay dönemde daha iyi çalışırken, trend piyasasında ADX'in yükselmesi karşı sinyallerin daha tehlikeli olabileceğini anlatır.""",
+    "divergence": """Uyumsuzluk, fiyatın yeni dip veya tepe yapmasına rağmen indikatörün bunu teyit etmemesi durumudur. Bu, mevcut hareketin yorulduğunu, iç momentumun zayıfladığını veya dönüş olasılığının arttığını düşündürebilir. Fakat uyumsuzluk tek başına giriş emri değildir; bazen fiyat uzun süre uyumsuzlukla devam eder. En güçlü kullanım, ana trend, önemli seviye, hacim ve teyit mumları ile birlikte okumaktır.""",
+    "triple_screen": """Triple Screen yaklaşımı, piyasayı tek bir zaman diliminden değil, üç farklı perspektiften okumayı hedefler. Büyük zaman dilimi ana trendi, orta zaman dilimi düzeltmeyi, küçük zaman dilimi ise tetikleyiciyi verir. Böylece yatırımcı yanlış yönde agresif işlem açmak yerine, ana yönü arkasına almış fırsatları seçmeye çalışır. Bu sistemin gücü, göstergeleri üst üste koymasından değil, bağlam kurmasından gelir.""",
+    "vpvr": """VPVR, hacmi zaman yerine fiyat seviyelerine dağıtarak hangi bölgelerde gerçek maliyet kümelenmesi oluştuğunu gösterir. Zaman bazlı destek/direnç çizgileri bazen seviyenin arkasındaki gerçek ilgiyi anlatamaz; VPVR bu boşluğu doldurur. Hacim düğümleri, piyasanın fiyatı hangi bölgede daha fazla kabul ettiğini; hacim boşlukları ise fiyatın hızla geçme eğiliminde olabileceği alanları gösterir. Özellikle kurumsal maliyetlenme ve denge alanlarını okumada çok değerlidir.""",
+    "poc": """POC (Point of Control), seçilen hacim profilindeki en yüksek hacim düğümüdür. Yani incelenen pencerede en fazla işlemin geçtiği ve piyasanın en çok kabul ettiği fiyat seviyesini temsil eder. Fiyat POC'nin üzerinde kalıyorsa bu, kabul alanının üstüne taşmış bir yapı anlamına gelebilir; altında kalıyorsa piyasanın ana maliyet merkezinin altına sarkılmış olabilir. Ancak POC tek başına destek/direnç çizgisi değildir; çevresindeki hacim dağılımı ve trend yönü ile birlikte okunmalıdır.""",
+    "poc_distance": """POC uzaklığı, mevcut fiyatın ana hacim merkezinden yüzde olarak ne kadar koptuğunu gösterir. Fiyat POC'nin üstündeyse çoğu zaman boğalar lehine kabul bölgesinden yukarı taşmış bir yapı vardır; fakat POC'den çok uzaklaşmak kısa vadeli geri test riskini de artırır. Çok küçük mesafe denge, çok büyük mesafe ise ya güçlü trend ya da aşırı uzama anlamına gelebilir. Bu nedenle POC uzaklığı tek başına iyi-kötü değil, 'güç ile geri dönüş riski arasındaki denge' olarak okunmalıdır.""",
+    "support_resistance": """Destek ve direnç, fiyatın daha önce tepki verdiği, durduğu, reddedildiği veya kırılmakta zorlandığı bölgelerdir. İyi bir seviye tek dokunuşla değil; zaman içinde korunması, hacim çekmesi ve tekrar tekrar piyasayı etkilemesiyle güç kazanır. Teknik analizde seviyeler çoğu zaman çizgi değil bölgedir. Bu yüzden birkaç kuruş/sent taşma hemen seviye bozuldu demek değildir; asıl önemli olan fiyatın bölgeyi kabul edip etmemesidir.""",
+    "target_band": """Hedef fiyat bandı, ATR ve önemli seviye kümelerini birlikte kullanarak olası boğa ve ayı senaryolarını aralık olarak sunar. Bu, 'kesin hedef fiyat' vermekten çok, pozisyon planlarken nerede nefes alınabileceğini, stop ve ödül oranının nasıl şekilleneceğini görmeye yarar. İyi yatırımcılar tek rakama değil, aralığa çalışır; çünkü piyasa doğrusal hareket etmez.""",
+    "risk_reward": """Risk/ödül oranı, bir işlemde kaybetmeyi göze aldığın tutarla kazanmayı hedeflediğin tutar arasındaki oranı gösterir. Yüksek isabet oranı kadar güçlü bir risk/ödül yapısı da uzun vadede kritik öneme sahiptir. Düşük isabetli ama yüksek ödüllü trend takip sistemleri kârlı olabilirken, çok sık kazanan fakat düşük ödüllü sistemler birkaç büyük kayıpla bozulabilir.""",
+    "backtest": """Backtest, stratejinin geçmiş veri üzerindeki yaklaşık davranışını ölçer. Amaç geleceği garanti etmek değil, sistemin hangi koşullarda güçlendiğini, hangi koşullarda kırılganlaştığını öğrenmektir. Komisyon, slippage ve stop kuralları eklemek backtest'i daha dürüst hale getirir; yine de gerçek piyasadaki likidite, haber akışı, gap ve psikoloji etkisini birebir yansıtmaz. Bu nedenle backtest sonucu bir 'kanıt' değil, karar desteği olarak kullanılmalıdır.""",
+    "monte_carlo": """Monte Carlo simülasyonu, aynı stratejinin getiri dizisinin farklı sıralanışlarda nasıl davranabileceğini göstererek sonuçların ne kadar oynak olabileceğini ortaya koyar. Tek bir equity eğrisi bazen fazla güven verir; Monte Carlo ise iyi, orta ve kötü senaryo aralığını görmeni sağlar. Özellikle maksimum düşüş, beklenen sonuç dağılımı ve sermaye dayanıklılığı açısından çok öğreticidir.""",
+    "sharpe": """Sharpe oranı, riskten arındırılmış getiriyi toplam volatiliteye göre ölçer. Aynı getiriyi üreten iki sistemden daha düşük oynak olan sistemin Sharpe'ı daha yüksek çıkar. Ancak Sharpe yukarı yönlü büyük hareketleri de volatilite saydığı için bazı trend takip sistemlerinde gereğinden sert olabilir. Bu yüzden başka risk metrikleriyle birlikte okunmalıdır.""",
+    "sortino": """Sortino oranı, Sharpe'tan farklı olarak yalnızca aşağı yönlü oynaklığı ceza olarak görür. Bu da yatırımcı açısından daha psikolojik ve pratik bir risk yaklaşımı sunar. Özellikle yukarı yönlü sıçramalar yapan sistemlerde Sharpe düşük görünürken, Sortino daha anlamlı bir tablo verebilir.""",
+    "calmar": """Calmar oranı, yıllıklaştırılmış getiriyi maksimum drawdown'a böler. Yani sistemin getirisini, yaşattığı en büyük acı ile karşılaştırır. Özellikle sermaye korumasını önemseyen yatırımcılar için çok değerlidir. Yüksek Calmar, genellikle hem güçlü getiri hem de kontrollü düşüş yapısı anlamına gelir.""",
+    "ulcer": """Ulcer Index, sadece standart sapmayı değil, yatırımcının yaşadığı drawdown derinlik ve süresini de dikkate alır. Aynı getiriye sahip iki sistemden biri sermayeyi daha az yıpratıyorsa Ulcer Index bunu daha iyi yakalayabilir. Bu yönüyle yatırımcı psikolojisine daha yakın bir risk ölçüsüdür.""",
+    "kelly": """Kelly kriteri, teorik olarak en verimli pozisyon büyüklüğünü bulmaya çalışır. Ancak tam Kelly çoğu zaman pratikte fazla agresiftir; veri hatasına ve model yanılgısına çok duyarlıdır. Bu yüzden birçok profesyonel yarım Kelly veya daha muhafazakâr bir oran tercih eder. Kelly'yi emir büyüklüğünü körlemesine belirleyen kural değil, üst sınır uyarısı gibi düşünmek daha güvenlidir.""",
+    "beta": """Beta, varlığın veya stratejinin benchmark'a göre ne kadar hassas hareket ettiğini ölçer. 1'in üzerindeki beta, benchmark hareketlerinin büyütülerek yaşanabileceğini; 1'in altı daha sakin bir yapıyı anlatır. Negatif beta ise benchmark ile ters yönlü ilişki anlamına gelebilir. Beta riski anlatır ama kaliteyi anlatmaz; bu yüzden alfa ve bilgi oranıyla birlikte değerlidir.""",
+    "information_ratio": """Information Ratio, benchmark'ı ne kadar geçtiğini değil, bunu ne kadar istikrarlı geçtiğini ölçer. Yani fazla getirinin kalite kontrolüdür. Benchmark'ı ara sıra çok geçen ama düzensiz performans gösteren stratejilerde düşük kalabilir. Düzenli ve sürdürülebilir ekstra getiri arayan yatırımcı için anlamlı bir metriktir.""",
+    "slippage": """Slippage, planlanan fiyat ile fiili işlem fiyatı arasındaki farktır. Backtest'te küçük görünen bu kalem, özellikle hızlı hareketlerde, düşük likiditede ve stop çalışırken ciddi performans farkı yaratabilir. Strateji ne kadar sık işlem açıyorsa slippage o kadar kritik hale gelir.""",
+    "commission": """Komisyon, görünen işlem maliyetidir ve özellikle yüksek frekanslı sistemlerde birikerek büyük aşındırma yaratır. Küçük oranlar bile çok sayıda işlemde stratejinin net performansını ciddi biçimde azaltabilir. Bu yüzden brüt değil, net sonuç düşünmek gerekir.""",
+    "future_price": """Future Price modülü, makine öğrenmesi ile seçilen bar ufkunda ileriye dönük fiyat/göreli yön tahmini üretir. Bu çıktı, 'olacak fiyat' kehaneti değil; belirli veri, özellik seti ve model varsayımları altında üretilmiş olasılıklı bir projeksiyondur. En sağlıklı kullanım, bunu trend, seviye, hacim ve temel yapı ile birlikte değerlendirmektir.""",
+    "mae": """MAE, tahminlerin ortalama mutlak sapmasını gösterir. Hataları sade ve anlaşılır biçimde ölçtüğü için pratikte çok kullanışlıdır. Ancak fiyatı yüksek hisselerde doğal olarak daha büyük sayı görünür; bu yüzden yüzde bazlı metriklerle birlikte okunmalıdır.""",
+    "rmse": """RMSE, büyük hataları daha sert cezalandıran hata ölçüsüdür. Model çoğu zaman iyi ama bazen çok kötü tahmin yapıyorsa RMSE bunu hemen ortaya çıkarır. Bu yönüyle 'kötü gün performansı' için değerli bir metriktir.""",
+    "mape": """MAPE, model hatasını yüzde olarak ölçer ve farklı fiyat ölçeklerindeki sembolleri kıyaslamayı kolaylaştırır. Çok düşük fiyatlı hisselerde baz etkisi nedeniyle yanıltıcı olabilir. Bu yüzden MAE ve RMSE ile birlikte okunmalıdır.""",
+    "direction_acc": """Yön doğruluğu, modelin tam fiyatı değil, fiyatın yönünü doğru tahmin etme başarısını ölçer. Trading açısından bazen bu bilgi, fiyat tahmin hatasından daha değerli olabilir. Fakat yüksek yön doğruluğu bile kötü risk/ödül veya geniş hata bandı ile birleşirse tek başına yeterli olmaz.""",
+    "confidence": """Güven skoru, hata metrikleri, yön başarısı ve bant genişliği gibi sinyallerden türetilen bileşik bir rahatlık göstergesidir. Kesin doğruluk garantisi vermez. En iyi kullanım, hangi sembol ve ufuk kombinasyonunda model sonucuna daha temkinli yaklaşmak gerektiğini anlamaktır.""",
+    "train_test": """Eğitim/Test satırı, modelin kaç gözlemle öğrenip kaç gözlem üzerinde sınandığını gösterir. Çok küçük test setleri, sonucu olduğundan iyi veya kötü gösterebilir. Zaman serisi yapısında veri bölme disiplini çok önemlidir; geleceğin geçmişe sızmaması gerekir.""",
+    "trend_regime": """Trend rejimi, mevcut piyasanın yukarı, aşağı veya nötr karakterini özetler. Aynı model farklı rejimlerde farklı kalite üretebilir. Bu nedenle model sonucunu mutlak değil, rejime duyarlı okumak daha güvenli olur.""",
+    "vol_regime": """Volatilite rejimi, piyasanın sakin mi gergin mi olduğunu anlatır. Yüksek volatilitede hem fırsat hem hata bandı büyür; düşük volatilitede ise hareketler daha kontrollü ama sınırlı olabilir. Tahmin ve stop yönetimi mutlaka bu bağlam içinde yorumlanmalıdır.""",
+    "roe": """ROE, özkaynağın ne kadar verimli kâra dönüştürüldüğünü gösterir. Yüksek ROE cazip görünür; ancak aşırı borç kullanımı bu oranı yapay olarak yükseltebilir. Bu yüzden borçluluk ve nakit üretimi ile birlikte okunmalıdır. Sürdürülebilir yüksek ROE, çoğu zaman kaliteli iş modeli ve verimli sermaye kullanımı işaretidir.""",
+    "revenue_growth": """Net satış büyümesi, şirketin üst satırının ne kadar hızlandığını gösterir. Hızlı büyüme heyecan vericidir ama kârlılığı bozuyorsa kalitesi düşebilir. Bu nedenle marjlar, nakit akışı ve borç dinamiği ile birlikte incelenmelidir.""",
+    "ebitda": """FAVÖK (EBITDA), şirketin faaliyet üretim gücünü faiz, vergi ve amortisman etkilerinden arındırılmış olarak gösterir. Özellikle sermaye yoğun sektörlerde operasyonel performansı daha temiz görmeye yardımcı olur. Ancak EBITDA nakdin aynısı değildir; yatırım harcamaları ve işletme sermayesi etkileri ayrıca izlenmelidir.""",
+    "ebitda_margin": """FAVÖK marjı, satışların ne kadarının operasyonel kârlılığa döndüğünü gösterir. Marjın yükselmesi verimlilik, fiyatlama gücü veya daha kaliteli ürün karması anlamına gelebilir. Tek başına değil, sektör ortalaması ve zaman içindeki eğilim ile birlikte okunmalıdır.""",
+    "debt_equity": """Borç/Özsermaye oranı, büyümenin ve faaliyetlerin ne kadarının kaldıraçla taşındığını gösterir. Aşırı yüksek değerler faiz, refinansman ve bilanço kırılganlığı riskini artırabilir. Bazı sektörlerde yüksek oranlar normal olsa da, nakit üretimi zayıfsa ciddi risk oluşturur.""",
+    "current_ratio": """Cari oran, şirketin kısa vadeli yükümlülüklerini dönen varlıklarla karşılama gücünü gösterir. Çok düşük değerler likidite stresi işareti olabilir. Aşırı yüksek değerler ise bazen verimsiz işletme sermayesi kullanımını düşündürebilir.""",
+    "net_margin": """Net kâr marjı, tüm giderler sonrası satışların ne kadarının net kâra dönüştüğünü gösterir. Düşük marjlı sektörlerde küçük artışlar bile büyük iyileşme anlamına gelebilir. Tek seferlik gelir/gider etkilerini ayırmak önemlidir.""",
+    "fcf": """Serbest nakit akışı, şirketin faaliyetlerinden ve gerekli yatırımlarından sonra kasada gerçekten ne kadar nakit kaldığını gösterir. Muhasebe kârı yüksek ama nakit üretimi zayıf şirketleri ayıklamak için en kritik metriklerden biridir. Değerleme açısından çok güçlü bir temeldir.""",
+    "pe": """F/K oranı, piyasanın şirketin mevcut veya beklenen kârını kaç katla fiyatladığını gösterir. Düşük F/K her zaman ucuzluk değildir; bazen büyüme zayıflığı veya risk primi yüksektir. Bu oran sektör, büyüme ve kalite ile birlikte anlam kazanır.""",
+    "pb": """PD/DD, piyasa değerinin defter değerine oranıdır. Özellikle banka ve varlık yoğun iş modellerinde önemlidir. Çok düşük PD/DD bazen ucuzluk, bazen de bilanço kalitesine yönelik güvensizlik anlamına gelebilir.""",
+    "net_debt_ebitda": """Net Borç / FAVÖK oranı, şirketin net borcunu operasyonel kazancıyla ne kadar sürede taşıyabileceğine dair pratik bir kaldıraç göstergesidir. Düşük oran genellikle daha güvenli finansal yapı anlamına gelir. Döngüsel sektörlerde bu oran, kazançlar hızla değiştiği için dikkatle okunmalıdır.""",
+    "altman_z": """Altman Z-Skoru, farklı bilanço ve gelir tablosu kalemlerini birleştirerek finansal stres/iflas riski hakkında erken sinyal verir. Düşük skorlar özellikle borçlu ve kırılgan şirketlerde uyarıcı olabilir. Tek başına hüküm vermez ama ucuz görünen riskli hisseleri ayıklamak için çok yararlıdır.""",
+    "piotroski_f": """Piotroski F-Skoru, kârlılık, verimlilik ve bilanço sağlığına dair 9 ayrı kalite testinin toplamıdır. Yüksek skor, değer hisseleri içinde daha sağlıklı adayları ayırmaya yardım eder. En iyi kullanım, ucuzluk metrikleriyle birlikte kalite filtresi olarak kullanmaktır.""",
+    "dcf": """DCF, gelecekte oluşması beklenen nakit akımlarını bugüne indirger ve şirketin teorik içsel değerini hesaplamaya çalışır. Gücü buradan gelir; fakat büyüme oranı, marj, sermaye maliyeti ve terminal değer varsayımlarına son derece hassastır. Bu yüzden DCF sonucu tek bir 'mutlak doğru fiyat' değil, senaryo aralığı olarak ele alınmalıdır.""",
+    "sector_relative": """Sektöre göre pahalı/ucuz analizi, şirket çarpanlarının sektörel ortalamaya göre primli mi iskontolu mu olduğunu gösterir. Böylece bir şirketin sadece kendi başına ucuz görünmesini değil, ait olduğu grubun içinde nerede durduğunu anlarsın. Yorum yapılırken büyüme kalitesi, borçluluk ve sektör döngüsü mutlaka hesaba katılmalıdır.""",
+    "trend_patt": """Trend with Patt Entry yaklaşımı, ana trendin yönünü filtrelerle belirleyip giriş zamanlamasını pattern ve fiyat davranışı ile yapmaya odaklanır. Amaç, en dipten veya en tepeden yakalamak değil; hareketin sağlıklı devam fazına disiplinli biçimde katılmaktır. Pattern yalnız başına değil, trend bağlamında değer üretir.""",
+    "donchian": """Donchian kanalları, seçilen periyottaki en yüksek tepe ile en düşük dibi kanal olarak çizer. Bu sayede piyasanın mevcut kırılım sınırları görünür hale gelir. Klasik trend takip ve breakout sistemlerinde çok kullanılır; çünkü fiyat kanal dışına çıktığında rejim değişimi veya hareket hızlanması ihtimali artar.""",
+    "donchian_520": """Donchian 5&20 yaklaşımı, daha kısa kanal ile tetikleyici, daha uzun kanal ile trend doğrulama mantığını birleştirir. Kısa kanal erken hareketleri, uzun kanal ise daha olgun trend teyidini göstermede kullanılabilir. Uygun stop ve pozisyon yönetimi olmadan tek başına yeterli değildir.""",
+    "richard_dennis": """Richard Dennis / Turtle yaklaşımı, sistematik trend takibinin klasik örneklerinden biridir. Mantık, tahmin yapmak değil; güçlü kırılımları kurallı şekilde izlemek ve büyük trendleri taşımaktır. Zayıf yanı yatay piyasalarda bir dizi küçük zararı kabul etmeyi gerektirmesidir; güçlü yanı ise büyük trendler geldiğinde bu küçük kayıpları telafi edebilmesidir.""",
+    "ema_fast": """Hızlı EMA periyodu, trendin kısa tarafını belirleyen parametredir. Periyot küçüldükçe gösterge fiyata daha duyarlı hale gelir ve sinyaller hızlanır; fakat gürültü ve yalancı sinyal de artar. Daha büyük periyot ise daha temiz ama daha geç tepki verir. Bu nedenle hızlı EMA, işlem ufkun ve sembolün volatilitesine göre seçilmelidir.""",
+    "ema_slow": """Yavaş EMA periyodu, yapısal trendin omurgasını belirler. Büyük periyotlar ana yönü daha sakin ve daha güvenli gösterirken, dönüşleri geç yakalar. Küçük periyotlar daha erken sinyal üretir ama kısa dalgalanmalara daha açık hale gelir. Hızlı EMA ile yavaş EMA arasındaki ilişki, sistemin trend filtresinin temelidir.""",
+    "sma_fast": """Hızlı SMA, kısa vadeli ortalama eğilimi gösterir ve bias üretiminde kullanılır. Kısa pencere nedeniyle fiyat değişimlerine daha erken tepki verir. Ancak özellikle yatay piyasada sık yön değişimi gösterebilir. Bu yüzden tek başına değil, yavaş SMA ve trend gücü filtreleriyle birlikte kullanılmalıdır.""",
+    "sma_slow": """Yavaş SMA, orta/uzun vadeli yönü daha sakin şekilde özetler. Hızlı SMA ile karşılaştırıldığında ana eğilimin hangi tarafta olduğunu anlamanı sağlar. Geç tepki verme pahasına daha temiz bir yapı sunar.""",
+    "rsi_period": """RSI periyodu, göstergenin hangi zaman penceresindeki momentum değişimlerini dikkate alacağını belirler. Küçük periyot daha hızlı ve daha gürültülü, büyük periyot daha yavaş ama daha dengeli sonuç üretir. Stratejinin ufkuna uygun olmayan periyot, gereksiz erken veya gereksiz geç sinyal yaratabilir.""",
+    "bb_period": """Bollinger periyodu, orta bandın hangi pencere üzerinden hesaplanacağını belirler. Kısa periyot bantları daha çevik hale getirir; uzun periyot daha dengeli ama yavaş davranır. Sıkışma ve genişleme davranışını yorumlarken bu parametre çok etkilidir.""",
+    "bb_std": """Bollinger standart sapma katsayısı, bantların orta ortalamadan ne kadar uzaklaşacağını belirler. Yüksek katsayı bantları genişletir ve daha az ama daha seçici temas üretir. Düşük katsayı ise daha sık temas ve daha hassas alarm yaratır.""",
+    "atr_period": """ATR periyodu, volatilite ölçümünün hangi uzunlukta ortalanacağını belirler. Kısa ATR periyodu son hareketlere daha hızlı uyum sağlar, uzun periyot ise volatiliteyi daha dengeli yansıtır. Stop tasarımı ve risk yönetiminde bu parametrenin etkisi büyüktür.""",
+    "vol_sma": """Hacim SMA periyodu, mevcut hacmin hangi ortalamaya göre güçlü ya da zayıf sayılacağını belirler. Kısa ortalama son ilgi değişimini daha hızlı yakalar, uzun ortalama ise daha stabil kıyas yapar. Hacim oranı ve spike tespitlerinde ana referans budur.""",
+    "rsi_entry_level": """RSI giriş seviyesi, sistemin momentumu hangi eşikten sonra yeterli kabul edeceğini belirler. Seviye yükseldikçe daha seçici ama daha geç; düştükçe daha erken ama daha gürültülü girişler oluşur. Trend piyasası ile range piyasasında aynı eşik aynı kaliteyi vermez.""",
+    "rsi_exit_level": """RSI çıkış seviyesi, momentumun ne kadar zayıflaması halinde sistemin risk azaltacağını belirler. Çok yüksek çıkış eşiği erken çıkışa, çok düşük eşik geç çıkışa neden olabilir. Stratejinin doğası ve hedeflediği hareket boyu bu parametrede önemlidir.""",
+    "atr_pct_max": """ATR% üst sınırı, sistemin aşırı oynak gördüğü koşullarda yeni girişleri filtrelemek için kullanılır. Bu filtre, fırsatları azaltırken riskin kontrol altında tutulmasına yardım eder. Çok düşük ayarlanırsa güçlü trendler de kaçabilir; çok yüksek ayarlanırsa filtre anlamını yitirir.""",
+    "initial_capital": """Başlangıç sermayesi, backtest ve risk metriklerinin parasal ölçeğini belirler. Yüzdesel performans aynı kalsa bile parasal drawdown ve işlem büyüklüğü bu değere göre değişir. Gerçekçi sermaye ile test yapmak psikolojik uygunluk açısından önemlidir.""",
+    "commission_bps": """Komisyon baz puanı, her işlemde düşülecek doğrudan maliyet oranını ifade eder. Küçük görünebilir ama çok işlemli sistemlerde birikerek stratejinin net kalitesini belirgin şekilde etkiler. Gerçek hayata en yakın maliyet varsayımını kullanmak gerekir.""",
+    "slippage_bps": """Slippage baz puanı, beklenen emir fiyatı ile fiili gerçekleşme arasındaki kaymayı simüle eder. Özellikle kırılım, stop ve düşük likidite senaryolarında çok önemlidir. Backtest performansını dürüstleştiren ana kalemlerden biridir.""",
+    "atr_stop_mult": """ATR stop katsayısı, stop mesafesini volatiliteye göre ayarlamak için kullanılır. Düşük katsayı, sık ama küçük kayıplar; yüksek katsayı daha geniş stop ve daha az sıkışma anlamına gelebilir. Stratejinin trend takip mi yoksa kısa vade dönüş mü olduğuna göre uygun katsayı değişir.""",
+    "risk_per_trade": """İşlem başına risk yüzdesi, her pozisyonda toplam sermayenin ne kadarını kaybetmeyi kabul ettiğini belirler. Doğru sistem bile kötü pozisyon boyutuyla batabilir. Bu parametre, stratejinin finansal sürdürülebilirliği kadar psikolojik taşınabilirliği için de kritiktir.""",
+    "take_profit_mult": """Kâr alma katsayısı, giriş ile stop mesafesinin kaç katında parsiyel veya tam realize düşünüldüğünü tanımlar. Düşük hedefler daha sık kazanç, yüksek hedefler daha seyrek ama büyük kazanç yaratabilir. Risk/ödül yapısının en görünür parametrelerinden biridir.""",
+    "time_stop_bars": """Zaman stopu, işlem belirli sayıda bar içinde beklenen performansı üretmezse pozisyonun kapanmasını sağlar. Böylece sermayenin verimsiz şekilde uzun süre bağlanması azaltılır. Özellikle ivme ve breakout stratejilerinde etkili bir disiplin aracıdır.""",
+    "horizon_bars": """Tahmin ufku (horizon bars), modelin kaç bar sonrasını tahmin etmeye çalıştığını belirler. Kısa ufuklar daha gürültülü ama daha taktiksel, uzun ufuklar daha zor ama daha stratejik olabilir. Model başarısı ve hata büyüklüğü bu parametreye çok duyarlıdır."""
+})
+
+EDUCATION_TAB_SECTIONS: List[Tuple[str, List[Tuple[str, str]]]] = [
+    ("Trend, Ortalama ve Yapı", [
+        ("ema", "EMA"), ("sma_bias", "SMA Bias"), ("ema_fast", "Hızlı EMA Periyodu"),
+        ("ema_slow", "Yavaş EMA Periyodu"), ("sma_fast", "Hızlı SMA"), ("sma_slow", "Yavaş SMA")
+    ]),
+    ("Momentum, Osilatörler ve Uyumsuzluklar", [
+        ("rsi", "RSI"), ("rsi_period", "RSI Periyodu"), ("rsi_entry_level", "RSI Giriş Eşiği"),
+        ("rsi_exit_level", "RSI Çıkış Eşiği"), ("macd", "MACD"), ("stochastic", "Stokastik"),
+        ("stoch_rsi", "Stochastic RSI"), ("force_index", "Force Index"), ("elder_ray", "Elder-Ray"),
+        ("adx", "ADX"), ("divergence", "Uyumsuzluk")
+    ]),
+    ("Volatilite, Bantlar ve Kanallar", [
+        ("atr_pct", "ATR%"), ("atr_period", "ATR Periyodu"), ("atr_pct_max", "ATR% Üst Limiti"),
+        ("bollinger", "Bollinger Bantları"), ("bb_width", "Bollinger Genişliği"),
+        ("bb_period", "Bollinger Periyodu"), ("bb_std", "Bollinger Std Katsayısı"),
+        ("donchian", "Donchian Kanalları"), ("donchian_520", "Donchian 5&20")
+    ]),
+    ("Hacim, Seviye ve Piyasa Yapısı", [
+        ("volume_ratio", "Hacim Oranı"), ("vol_sma", "Hacim SMA Periyodu"), ("obv", "OBV"),
+        ("vpvr", "VPVR"), ("poc", "POC"), ("poc_distance", "POC Uzaklık %"),
+        ("support_resistance", "Destek / Direnç"), ("target_band", "Hedef Bandı"),
+        ("risk_reward", "Risk / Ödül")
+    ]),
+    ("Sistemler ve Strateji Çerçevesi", [
+        ("triple_screen", "Triple Screen"), ("trend_patt", "Trend with Patt Entry"),
+        ("richard_dennis", "Richard Dennis / Turtle"), ("future_price", "Future Price"),
+        ("horizon_bars", "Tahmin Ufku")
+    ]),
+    ("Backtest, Risk ve Portföy Disiplini", [
+        ("backtest", "Backtest"), ("monte_carlo", "Monte Carlo"), ("sharpe", "Sharpe"),
+        ("sortino", "Sortino"), ("calmar", "Calmar"), ("ulcer", "Ulcer Index"),
+        ("kelly", "Kelly"), ("beta", "Beta"), ("information_ratio", "Information Ratio"),
+        ("initial_capital", "Başlangıç Sermayesi"), ("commission", "Komisyon"),
+        ("commission_bps", "Komisyon (bps)"), ("slippage", "Slippage"),
+        ("slippage_bps", "Slippage (bps)"), ("atr_stop_mult", "ATR Stop Katsayısı"),
+        ("risk_per_trade", "İşlem Başına Risk %"), ("take_profit_mult", "Kâr Alma Katsayısı"),
+        ("time_stop_bars", "Zaman Stopu (bar)")
+    ]),
+    ("Future Price Model Kalitesi ve Rejimler", [
+        ("mae", "MAE"), ("rmse", "RMSE"), ("mape", "MAPE"), ("direction_acc", "Yön Doğruluğu"),
+        ("confidence", "Güven Skoru"), ("train_test", "Eğitim/Test"), ("trend_regime", "Trend Rejimi"),
+        ("vol_regime", "Volatilite Rejimi")
+    ]),
+    ("Finansal Analiz ve Değerleme", [
+        ("roe", "ROE"), ("revenue_growth", "Net Satış Büyümesi"), ("ebitda", "FAVÖK"),
+        ("ebitda_margin", "FAVÖK Marjı"), ("debt_equity", "Borç / Özsermaye"),
+        ("current_ratio", "Cari Oran"), ("net_margin", "Net Kâr Marjı"), ("fcf", "Serbest Nakit Akışı"),
+        ("pe", "F/K"), ("pb", "PD/DD"), ("net_debt_ebitda", "Net Borç / FAVÖK"),
+        ("altman_z", "Altman Z"), ("piotroski_f", "Piotroski F"), ("dcf", "DCF"),
+        ("sector_relative", "Sektöre Göre Pahalı / Ucuz")
+    ]),
+]
+
+def render_education_center_tab():
+    st.header("📚 Eğitim Merkezi")
+    st.caption("Bu sekmede uygulamadaki göstergeler, osilatörler, parametreler, risk metrikleri, finansal oranlar ve sistemler için kapsamlı eğitim notları yer alır. Metinleri karar motoru gibi değil, kavramları doğru okumak için rehber olarak kullan.")
+    render_help_badges(
+        [("rsi","RSI"),("macd","MACD"),("atr_pct","ATR%"),("bollinger","Bollinger"),("stoch_rsi","Stoch RSI"),
+         ("volume_ratio","Hacim Oranı"),("obv","OBV"),("ema","EMA"),("adx","ADX"),("elder_ray","Elder-Ray"),
+         ("vpvr","VPVR"),("poc","POC"),("future_price","Future Price"),("backtest","Backtest"),
+         ("roe","ROE"),("dcf","DCF"),("donchian","Donchian")],
+        "Hızlı erişim rehberi"
+    )
+    st.info("Önemli not: Buradaki açıklamalar eğitim amaçlıdır. Hiçbir gösterge, oran veya model tek başına kesin yatırım kararı verdirmez; en sağlıklı yaklaşım, birden çok kanıtı aynı yönde toplamaktır.")
+
+    for section_title, items in EDUCATION_TAB_SECTIONS:
+        with st.expander(section_title, expanded=False):
+            for key, label in items:
+                st.markdown(f"### {label}")
+                st.markdown(APP_EDUCATION_TEXTS.get(key, "Bu başlık için açıklama bulunamadı."))
+                st.markdown("---")
+
+
 # =============================
 # Indicators
 # =============================
 
-with st.sidebar:
-    st.markdown("### 📚 Eğitim Merkezi")
-    st.caption("Soru işaretlerinin üzerine gelerek uygulamadaki temel göstergeler, sistemler ve risk metrikleri hakkında kapsamlı bilgi görebilirsin.")
-    try:
-        render_help_badges([("rsi","RSI"),("macd","MACD"),("atr_pct","ATR%"),("bollinger","Bollinger"),("stoch_rsi","Stoch RSI"),("volume_ratio","Hacim"),("obv","OBV"),("ema","EMA"),("adx","ADX"),("elder_ray","Elder-Ray"),("vpvr","VPVR"),("poc","POC"),("future_price","Future Price"),("backtest","Backtest"),("roe","ROE"),("dcf","DCF"),("donchian","Donchian")], "")
-    except Exception:
-        pass
 
 def ema(s: pd.Series, span: int) -> pd.Series:
     return s.ewm(span=span, adjust=False).mean()
@@ -7737,7 +7887,7 @@ def _render_triple_screen_panel_for_symbol(
                     st.plotly_chart(fig3_adx, use_container_width=True)
 
 
-tab_dash, tab_triple, tab_indicator_stats, tab_future, tab_chart_patterns, tab_trend_donchian, tab_financials, tab_history_range, tab_index_center, tab_calendar, tab_social, tab_heatmap, tab_export, tab_scan = st.tabs(["📊 Dashboard", "📺 3 Ekranlı Sistem", "📈 İndikatör İstatistik", "🔮 Future Price", "📐 Grafik Formasyonları", "📡 Trend + Donchian", "📘 Bilanço Analizi", "🕰️ Tarih Aralığı Analizi", "📉 BIST Endeks Merkezi", "🗓️ Ekonomik Takvim", "📣 X + YouTube Trends", "🔥 Sektörel Heatmap", "📄 Rapor (PDF/HTML)", "🔍 Tarama"])
+tab_dash, tab_triple, tab_indicator_stats, tab_future, tab_chart_patterns, tab_trend_donchian, tab_financials, tab_history_range, tab_education, tab_index_center, tab_calendar, tab_social, tab_heatmap, tab_export, tab_scan = st.tabs(["📊 Dashboard", "📺 3 Ekranlı Sistem", "📈 İndikatör İstatistik", "🔮 Future Price", "📐 Grafik Formasyonları", "📡 Trend + Donchian", "📘 Bilanço Analizi", "🕰️ Tarih Aralığı Analizi", "📚 Eğitim Merkezi", "📉 BIST Endeks Merkezi", "🗓️ Ekonomik Takvim", "📣 X + YouTube Trends", "🔥 Sektörel Heatmap", "📄 Rapor (PDF/HTML)", "🔍 Tarama"])
 
 with tab_dash:
     if "app_errors" in st.session_state and st.session_state.app_errors:
@@ -8496,6 +8646,9 @@ with tab_history_range:
                 hp3.metric("Profil Bar Sayısı", f"{len(history_df)}")
                 st.plotly_chart(hist_vpvr_fig, use_container_width=True)
 
+
+with tab_education:
+    render_education_center_tab()
 
 with tab_index_center:
     st.header("📉 BIST Endeks Merkezi")
