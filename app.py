@@ -8080,6 +8080,8 @@ with tab_dash:
     st.subheader("🎯 Hedef Fiyat Bandı (Senaryo)")
     base_px = float(tp["base"])
     rr_str = fmt_rr(rr_info.get("rr"))
+    r1 = None
+    s1 = None
 
     bcol1, bcol2, bcol3 = st.columns(3)
     bcol1.metric("Base", f"{base_px:.2f}", help="Referans alınan anlık/kapanış fiyat.")
