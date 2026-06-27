@@ -3393,6 +3393,109 @@ def load_data_cached(ticker: str, period: str, interval: str, end_date=None, for
     return df
 
 
+
+
+# =============================
+# BIST TL / USD Price Conversion Helpers
+# =============================
+@st.cache_data(ttl=300, show_spinner=False)
+def load_usdtry_cached(period: str, interval: str, end_date=None) -> pd.DataFrame:
+    """
+    Yahoo Finance'ta TRY=X çoğunlukla USD/TRY kurudur.
+    BIST TL fiyatlarını USD'ye çevirmek için OHLC fiyatları USDTRY'ye böleriz.
+    """
+    fx_interval = interval
+    # Yahoo bazı sembollerde 4h interval'i desteklemeyebilir; 1h FX verisiyle ffill daha güvenli olur.
+    if fx_interval == "4h":
+        fx_interval = "1h"
+
+    try:
+        fx = load_data_cached("TRY=X", period, fx_interval, end_date=end_date, force_latest=False)
+        fx = _flatten_yf(fx)
+    except Exception:
+        fx = pd.DataFrame()
+
+    if fx is None or fx.empty:
+        try:
+            fx = load_data_cached("TRY=X", period, "1d", end_date=end_date, force_latest=False)
+            fx = _flatten_yf(fx)
+        except Exception:
+            fx = pd.DataFrame()
+
+    return fx if fx is not None else pd.DataFrame()
+
+
+def _make_naive_datetime_index(idx) -> pd.DatetimeIndex:
+    out_idx = pd.to_datetime(idx, errors="coerce")
+    try:
+        if getattr(out_idx, "tz", None) is not None:
+            out_idx = out_idx.tz_localize(None)
+    except Exception:
+        try:
+            out_idx = out_idx.tz_convert(None)
+        except Exception:
+            pass
+    return pd.DatetimeIndex(out_idx)
+
+
+def convert_bist_ohlcv_to_usd(df_tl: pd.DataFrame, period: str, interval: str, end_date=None) -> Tuple[pd.DataFrame, float, str]:
+    """
+    BIST OHLC verisini TL'den USD'ye çevirir.
+    Hacim lot/adet olduğu için değişmez; Open/High/Low/Close/Adj Close USDTRY'ye bölünür.
+    Dönen: (usd_df, son_kur, hata_mesajı)
+    """
+    if df_tl is None or df_tl.empty:
+        return pd.DataFrame(), np.nan, "BIST fiyat verisi boş."
+
+    fx = load_usdtry_cached(period, interval, end_date=end_date)
+    if fx is None or fx.empty or "Close" not in fx.columns:
+        return df_tl.copy(), np.nan, "USDTRY verisi alınamadı; TL veriler korunuyor."
+
+    out = df_tl.copy()
+    fx_close = fx["Close"].copy()
+
+    try:
+        out.index = _make_naive_datetime_index(out.index)
+        fx_close.index = _make_naive_datetime_index(fx_close.index)
+        out = out[out.index.notna()]
+        fx_close = fx_close[fx_close.index.notna()]
+    except Exception:
+        return df_tl.copy(), np.nan, "Tarih hizalama sırasında USD dönüşümü yapılamadı; TL veriler korunuyor."
+
+    fx_close = pd.to_numeric(fx_close, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    fx_close = fx_close[fx_close > 0]
+
+    if fx_close.empty:
+        return df_tl.copy(), np.nan, "USDTRY kapanış verisi geçersiz; TL veriler korunuyor."
+
+    fx_aligned = fx_close.reindex(out.index).ffill().bfill()
+
+    if fx_aligned.isna().all():
+        # Günlük FX ile saatlik/hisse index'i birebir çakışmazsa tarih bazlı ikinci hizalama dene.
+        try:
+            fx_daily = fx_close.copy()
+            fx_daily.index = pd.to_datetime(fx_daily.index).normalize()
+            tmp_dates = pd.Series(pd.to_datetime(out.index).normalize(), index=out.index)
+            fx_aligned = tmp_dates.map(fx_daily.groupby(fx_daily.index).last()).ffill().bfill()
+        except Exception:
+            pass
+
+    fx_aligned = pd.to_numeric(fx_aligned, errors="coerce").replace([np.inf, -np.inf], np.nan)
+    if fx_aligned.isna().all():
+        return df_tl.copy(), np.nan, "USDTRY verisi fiyat tarihleriyle hizalanamadı; TL veriler korunuyor."
+
+    fx_aligned = fx_aligned.ffill().bfill()
+    last_fx = safe_float(fx_aligned.iloc[-1])
+
+    price_cols = [c for c in ["Open", "High", "Low", "Close", "Adj Close"] if c in out.columns]
+    for col in price_cols:
+        out[col] = pd.to_numeric(out[col], errors="coerce") / fx_aligned.values
+
+    out["USDTRY"] = fx_aligned.values
+
+    return out, last_fx, ""
+
+
 # =============================
 # UI STATE
 # =============================
@@ -3452,6 +3555,16 @@ with st.sidebar:
         st.session_state.screener_df = pd.DataFrame()
         st.session_state.selected_ticker = None
         st.session_state.last_market = market
+
+    bist_price_currency = "TL"
+    if market == "BIST":
+        bist_price_currency = st.radio(
+            "BIST fiyat para birimi",
+            ["TL", "USD"],
+            index=0,
+            horizontal=True,
+            help="TL seçiliyse BIST verileri normal TL fiyatlarla hesaplanır. USD seçiliyse OHLC fiyatları USDTRY kuruna bölünür ve Dashboard, indikatörler, osilatörler, backtest, Future Price ve diğer teknik analizler USD bazlı fiyat serisi üzerinden çalışır.",
+        )
 
     usa_bucket = None
     if market == "USA":
@@ -4005,6 +4118,19 @@ live_price = live.get("last_price", np.nan)
 
 if use_live_last_override:
     df_raw = apply_live_last_override_to_df(df_raw, live_price)
+
+analysis_currency = "USD" if market == "USA" else "TL"
+usdtry_last = np.nan
+if market == "BIST" and bist_price_currency == "USD":
+    with st.spinner("BIST fiyatları USD bazına çevriliyor (USDTRY)..."):
+        df_raw, usdtry_last, usd_err = convert_bist_ohlcv_to_usd(df_raw, period, interval, end_date=custom_end_date)
+    if usd_err:
+        st.warning(usd_err)
+    else:
+        analysis_currency = "USD"
+        if np.isfinite(live_price) and np.isfinite(usdtry_last) and usdtry_last > 0:
+            live_price = live_price / usdtry_last
+        st.caption(f"💵 BIST USD modu aktif — fiyat serisi USD bazlıdır. Kullanılan son USDTRY: {usdtry_last:.4f}")
 
 if df_raw.empty:
     st.session_state.app_errors.append(f"Veri çekilemedi: {ticker} (Bölünme/delist veya API engeli olabilir)")
@@ -8435,6 +8561,7 @@ with tab_export:
 
     meta = {
         "market": market, "ticker": ticker, "interval": interval, "period": period,
+        "currency": analysis_currency,
         "preset": preset_name, "ema_fast": ema_fast, "ema_slow": ema_slow,
         "rsi_period": rsi_period, "bb_period": bb_period, "bb_std": bb_std,
         "atr_period": atr_period, "vol_sma": vol_sma,
