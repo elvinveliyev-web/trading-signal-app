@@ -2783,7 +2783,7 @@ def _extract_gemini_text(resp: dict) -> str:
 def gemini_generate_text(
     *,
     prompt: str,
-    model: str = "gemini-1.5-flash",
+    model: str = "gemini-3.5-flash",
     temperature: float = 0.2,
     max_output_tokens: int = 2048,
     image_bytes: Optional[bytes] = None,
@@ -4277,10 +4277,20 @@ with st.sidebar:
         value=True,
         help="Google Gemini AI ile grafik ve veri analizi yapılır.",
     )
-    gemini_model = st.text_input(
+    gemini_model = st.selectbox(
         "Gemini Model",
-        value="gemini-1.5-flash",
-        help="Kullanılacak Gemini modeli. 1.5-flash hızlı ve yeterlidir.",
+        options=[
+            "gemini-3.5-flash",
+            "gemini-flash-latest",
+            "gemini-3.1-pro",
+            "gemini-3-flash",
+            "gemini-3.1-flash-lite",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+        ],
+        index=0,
+        help="Kullanılacak Gemini modeli. Stable modeller daha tutarlı; gemini-flash-latest ise Google yeni Flash sürümü yayınladığında otomatik güncellenebilir.",
     )
     gemini_temp = st.slider(
         "Temperature",
