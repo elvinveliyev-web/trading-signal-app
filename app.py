@@ -9209,29 +9209,70 @@ with tab_scan:
         default_scan_symbols = [ticker] if ticker else (scan_symbol_options[:1] if scan_symbol_options else [])
 
         st.markdown("---")
-        st.subheader("🚀 Dashboard Güçlü Al Taraması (1W / 2Y)")
-        st.caption("Seçili BIST veya USA evrenini haftalık mum ve 2 yıllık veriyle tarar. Hesaplama, Dashboard'daki build_features + signal_with_checkpoints skor mantığını kullanır ve güçlü al adaylarını skora göre sıralar.")
+        st.subheader("🚀 Dashboard AL / GÜÇLÜ AL Taraması (1W / 2Y)")
+        st.caption("Seçtiğin BIST veya USA universe listesini haftalık mum ve 2 yıllık veriyle tarar. Dashboard'daki build_features + signal_with_checkpoints skor mantığını kullanır; GÜÇLÜ AL ve AL veren hisseleri listeler.")
 
-        sb_col1, sb_col2, sb_col3 = st.columns([1, 1, 1])
+        # Kullanıcının taranacak evreni Tarama sekmesi içinden açıkça seçebilmesi için
+        # sidebar market seçimine dokunmadan bağımsız universe seçimi eklendi.
+        strong_scan_universe_options = ["BIST100", "USA - S&P 500", "USA - Nasdaq 100", "Mevcut liste", "Sadece seçili sembol"]
+        if market == "BIST":
+            strong_scan_default_idx = 0
+        elif usa_bucket == "Nasdaq 100":
+            strong_scan_default_idx = 2
+        else:
+            strong_scan_default_idx = 1
+
+        sb_col1, sb_col2, sb_col3, sb_col4 = st.columns([1.25, 0.75, 0.75, 0.75])
         with sb_col1:
             strong_scan_source = st.selectbox(
-                "Tarama kaynağı",
-                ["Mevcut liste", "Sadece seçili sembol"],
-                index=0,
+                "Taranacak universe",
+                strong_scan_universe_options,
+                index=strong_scan_default_idx,
                 key="dashboard_strong_scan_source",
-                help="Mevcut liste; fundamental screener sonucu varsa onu, yoksa seçili market universe listesini kullanır.",
+                help="Hangi evrenin taranacağını buradan seçebilirsin. BIST100, USA S&P 500, USA Nasdaq 100, mevcut liste veya sadece seçili sembol.",
             )
+
+        if strong_scan_source == "BIST100":
+            strong_scan_market = "BIST"
+            strong_scan_symbols_base = load_universe_file(pjoin("universes", "bist100.txt"))
+        elif strong_scan_source == "USA - S&P 500":
+            strong_scan_market = "USA"
+            strong_scan_symbols_base = load_universe_file(pjoin("universes", "sp500.txt"))
+        elif strong_scan_source == "USA - Nasdaq 100":
+            strong_scan_market = "USA"
+            strong_scan_symbols_base = load_universe_file(pjoin("universes", "nasdaq100.txt"))
+        elif strong_scan_source == "Sadece seçili sembol":
+            strong_scan_market = market
+            strong_scan_symbols_base = [ticker] if ticker else []
+        else:
+            strong_scan_market = market
+            strong_scan_symbols_base = scan_symbol_options
+
+        strong_scan_currency = "TL"
         with sb_col2:
+            if strong_scan_market == "BIST":
+                strong_scan_currency = st.selectbox(
+                    "BIST para birimi",
+                    ["TL", "USD"],
+                    index=0 if bist_price_currency == "TL" else 1,
+                    key="dashboard_strong_scan_bist_currency",
+                    help="BIST taramasında fiyatların TL mi USD bazlı mı hesaplanacağını seçer.",
+                )
+            else:
+                st.caption("Para birimi: USD")
+
+        strong_scan_available_count = max(1, len(strong_scan_symbols_base))
+        with sb_col3:
             max_strong_scan_symbols = st.number_input(
                 "Maksimum hisse",
                 min_value=1,
-                max_value=max(1, len(scan_symbol_options)),
-                value=min(100, max(1, len(scan_symbol_options))),
+                max_value=strong_scan_available_count,
+                value=min(100, strong_scan_available_count),
                 step=10,
                 key="dashboard_strong_scan_max_symbols",
                 help="Çok büyük evrenlerde tarama uzun sürebilir. İstersen artırabilirsin.",
             )
-        with sb_col3:
+        with sb_col4:
             strong_scan_workers = st.number_input(
                 "Paralel işçi",
                 min_value=1,
@@ -9242,15 +9283,17 @@ with tab_scan:
                 help="Veri çekimini hızlandırır. API limitlerinde hata olursa düşür.",
             )
 
+        st.caption(f"Seçili tarama: **{strong_scan_source}** | Market: **{strong_scan_market}** | Hisse sayısı: **{len(strong_scan_symbols_base)}**")
+
         run_dashboard_strong_scan = st.button(
-            "🚀 1W / 2Y Dashboard Güçlü Al Taramasını Çalıştır",
+            "🚀 1W / 2Y Dashboard AL + GÜÇLÜ AL Taramasını Çalıştır",
             key="run_dashboard_strong_buy_scan",
             use_container_width=True,
             type="secondary",
         )
 
         clear_dashboard_strong_scan = st.button(
-            "Dashboard Güçlü Al Sonuçlarını Temizle",
+            "Dashboard AL / GÜÇLÜ AL Sonuçlarını Temizle",
             key="clear_dashboard_strong_buy_scan",
             use_container_width=True,
         )
@@ -9259,34 +9302,35 @@ with tab_scan:
             st.session_state.dashboard_strong_buy_scan_results = pd.DataFrame()
 
         if run_dashboard_strong_scan:
-            if strong_scan_source == "Sadece seçili sembol":
-                strong_symbols_to_scan = [ticker] if ticker else []
-            else:
-                strong_symbols_to_scan = scan_symbol_options[:int(max_strong_scan_symbols)]
+            strong_symbols_to_scan = strong_scan_symbols_base[:int(max_strong_scan_symbols)]
 
             if not strong_symbols_to_scan:
-                st.warning("Dashboard Güçlü Al taraması için hisse bulunamadı.")
+                st.warning("Dashboard AL / GÜÇLÜ AL taraması için hisse bulunamadı.")
             else:
-                with st.spinner(f"1W / 2Y Dashboard Güçlü Al taraması yapılıyor... ({len(strong_symbols_to_scan)} hisse)"):
+                with st.spinner(f"1W / 2Y Dashboard AL / GÜÇLÜ AL taraması yapılıyor... ({len(strong_symbols_to_scan)} hisse)"):
                     strong_scan_df = dashboard_strong_buy_scan_many(
                         strong_symbols_to_scan,
-                        market,
+                        strong_scan_market,
                         cfg.copy(),
-                        bist_price_currency,
+                        strong_scan_currency,
                         max_workers=int(strong_scan_workers),
                     )
 
                 if strong_scan_df.empty:
                     st.session_state.dashboard_strong_buy_scan_results = pd.DataFrame()
                 else:
+                    signal_series = strong_scan_df.get("Dashboard Sinyali", pd.Series(dtype=str)).astype(str)
                     strong_ok = strong_scan_df[
-                        strong_scan_df.get("Dashboard Sinyali", pd.Series(dtype=str)).astype(str).str.startswith("GÜÇLÜ AL", na=False)
+                        signal_series.str.startswith("GÜÇLÜ AL", na=False) | signal_series.eq("AL")
                     ].copy()
 
                     if not strong_ok.empty:
+                        strong_ok["Sinyal Öncelik"] = strong_ok["Dashboard Sinyali"].astype(str).map(
+                            {"GÜÇLÜ AL": 1, "GÜÇLÜ AL (Trend)": 2, "AL": 3}
+                        ).fillna(9)
                         strong_ok = strong_ok.sort_values(
-                            ["Skor", "Hacim Oranı", "RSI"],
-                            ascending=[False, False, False],
+                            ["Sinyal Öncelik", "Skor", "Hacim Oranı", "RSI"],
+                            ascending=[True, False, False, False],
                             na_position="last",
                         ).reset_index(drop=True)
 
@@ -9298,7 +9342,9 @@ with tab_scan:
 
         dashboard_strong_results = st.session_state.dashboard_strong_buy_scan_results.copy()
         if not dashboard_strong_results.empty:
-            st.success(f"1W / 2Y Dashboard Güçlü Al adayı: {len(dashboard_strong_results)}")
+            strong_count = int(dashboard_strong_results["Dashboard Sinyali"].astype(str).str.startswith("GÜÇLÜ AL", na=False).sum()) if "Dashboard Sinyali" in dashboard_strong_results.columns else 0
+            buy_count = int(dashboard_strong_results["Dashboard Sinyali"].astype(str).eq("AL").sum()) if "Dashboard Sinyali" in dashboard_strong_results.columns else 0
+            st.success(f"1W / 2Y Dashboard sonucu: {strong_count} GÜÇLÜ AL, {buy_count} AL adayı")
             strong_show_cols = [
                 "Sembol", "Dashboard Sinyali", "Skor", "Son Kapanış", "RSI", "MACD Hist",
                 "ATR%", "Hacim Oranı", "Trend OK", "BB OK", "OBV OK", "Para Birimi",
@@ -9311,15 +9357,15 @@ with tab_scan:
             )
 
             pick_strong_symbol = st.selectbox(
-                "Dashboard'a aktarılacak güçlü al hissesi",
+                "Dashboard'a aktarılacak AL / GÜÇLÜ AL hissesi",
                 dashboard_strong_results["Sembol"].astype(str).tolist(),
                 key="dashboard_strong_buy_pick_symbol",
             )
-            if st.button("➡️ Seçili güçlü al hissesini Dashboard'a al", key="send_dashboard_strong_buy_to_dashboard", use_container_width=True):
+            if st.button("➡️ Seçili hisseyi Dashboard'a al", key="send_dashboard_strong_buy_to_dashboard", use_container_width=True):
                 st.session_state.selected_ticker = pick_strong_symbol
                 st.rerun()
         elif run_dashboard_strong_scan:
-            st.info("1W / 2Y Dashboard mantığına göre güçlü al adayı bulunmadı.")
+            st.info("1W / 2Y Dashboard mantığına göre AL veya GÜÇLÜ AL adayı bulunmadı.")
 
         with st.form("divergence_scan_form"):
             st.markdown("**Zaman Dilimleri**")
