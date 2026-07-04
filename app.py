@@ -3847,6 +3847,175 @@ def convert_bist_ohlcv_to_usd(df_tl: pd.DataFrame, period: str, interval: str, e
 
 
 # =============================
+# Dashboard Strong Buy Scan Helpers (1W / 2Y)
+# =============================
+def _dashboard_recommendation_from_latest(latest_row: pd.Series) -> str:
+    try:
+        score_val = safe_float(latest_row.get("SCORE", np.nan))
+        entry_val = int(latest_row.get("ENTRY", 0)) if pd.notna(latest_row.get("ENTRY", np.nan)) else 0
+        exit_val = int(latest_row.get("EXIT", 0)) if pd.notna(latest_row.get("EXIT", np.nan)) else 0
+
+        if exit_val == 1:
+            return "SAT"
+        if score_val >= 80 and entry_val == 1:
+            return "GÜÇLÜ AL"
+        if score_val >= 80:
+            return "GÜÇLÜ AL (Trend)"
+        if entry_val == 1:
+            return "AL"
+        if score_val >= 60:
+            return "İZLE (Orta)"
+        return "UZAK DUR"
+    except Exception as e:
+        log_app_error("_dashboard_recommendation_from_latest", e, level="DEBUG")
+        return "N/A"
+
+
+def dashboard_strong_buy_scan_one(
+    scan_symbol: str,
+    selected_market: str,
+    cfg_in: dict,
+    bist_currency_mode: str = "TL",
+) -> Dict[str, Any]:
+    """
+    Tarama sekmesinde kullanılmak üzere tek sembol için Dashboard mantığını 1wk / 2y üzerinde çalıştırır.
+    Mevcut Dashboard skor motoru olan build_features + signal_with_checkpoints kullanılır.
+    """
+    symbol_norm = normalize_ticker(scan_symbol, selected_market)
+    out: Dict[str, Any] = {
+        "Sembol": symbol_norm,
+        "Periyot": "2y",
+        "Interval": "1wk",
+        "Para Birimi": "USD" if selected_market == "BIST" and bist_currency_mode == "USD" else ("TL" if selected_market == "BIST" else "USD"),
+    }
+
+    try:
+        raw = load_data_cached(symbol_norm, "2y", "1wk", end_date=None, force_latest=False)
+        raw = _flatten_yf(raw)
+
+        if raw is None or raw.empty:
+            out["Hata"] = "Veri yok"
+            return out
+
+        if selected_market == "BIST" and bist_currency_mode == "USD":
+            raw, usdtry_last_local, usd_err = convert_bist_ohlcv_to_usd(raw, "2y", "1wk", end_date=None)
+            out["USDTRY"] = usdtry_last_local
+            if usd_err:
+                out["Hata"] = usd_err
+                return out
+
+        required_cols = {"Open", "High", "Low", "Close", "Volume"}
+        if not required_cols.issubset(set(raw.columns)):
+            out["Hata"] = "OHLCV eksik"
+            return out
+
+        if len(raw) < 60:
+            out["Hata"] = "Yetersiz haftalık veri"
+            return out
+
+        feat = build_features(raw, cfg_in)
+        feat, _ = signal_with_checkpoints(feat, cfg_in)
+
+        if feat is None or feat.empty:
+            out["Hata"] = "Feature üretilemedi"
+            return out
+
+        latest_local = feat.iloc[-1]
+        rec = _dashboard_recommendation_from_latest(latest_local)
+
+        close_val = safe_float(latest_local.get("Close", np.nan))
+        score_val = safe_float(latest_local.get("SCORE", np.nan))
+        rsi_val = safe_float(latest_local.get("RSI", np.nan))
+        macd_hist_val = safe_float(latest_local.get("MACD_hist", np.nan))
+        atr_pct_val = safe_float(latest_local.get("ATR_PCT", np.nan))
+        volume_ratio_val = safe_float(latest_local.get("Volume_Ratio", np.nan))
+        ema50_val = safe_float(latest_local.get("EMA50", np.nan))
+        ema200_val = safe_float(latest_local.get("EMA200", np.nan))
+        bb_mid_val = safe_float(latest_local.get("BB_mid", np.nan))
+        obv_val = safe_float(latest_local.get("OBV", np.nan))
+        obv_ema_val = safe_float(latest_local.get("OBV_EMA", np.nan))
+
+        out.update({
+            "Dashboard Sinyali": rec,
+            "Skor": score_val,
+            "Son Kapanış": close_val,
+            "RSI": rsi_val,
+            "MACD Hist": macd_hist_val,
+            "ATR%": atr_pct_val,
+            "Hacim Oranı": volume_ratio_val,
+            "Trend OK": bool(pd.notna(ema50_val) and pd.notna(ema200_val) and pd.notna(close_val) and close_val > ema200_val and ema50_val > ema200_val),
+            "BB OK": bool(pd.notna(bb_mid_val) and pd.notna(close_val) and close_val > bb_mid_val),
+            "OBV OK": bool(pd.notna(obv_val) and pd.notna(obv_ema_val) and obv_val > obv_ema_val),
+            "ENTRY": int(latest_local.get("ENTRY", 0)) if pd.notna(latest_local.get("ENTRY", np.nan)) else 0,
+            "EXIT": int(latest_local.get("EXIT", 0)) if pd.notna(latest_local.get("EXIT", np.nan)) else 0,
+            "Son Bar Tarihi": str(pd.to_datetime(feat.index[-1]).date()),
+            "Hata": "",
+        })
+        return out
+
+    except Exception as e:
+        log_app_error("dashboard_strong_buy_scan_one", e, {"ticker": scan_symbol, "market": selected_market}, level="DEBUG")
+        out["Hata"] = str(e)[:180]
+        return out
+
+
+def dashboard_strong_buy_scan_many(
+    symbols: List[str],
+    selected_market: str,
+    cfg_in: dict,
+    bist_currency_mode: str = "TL",
+    max_workers: int = 6,
+) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    clean_symbols = []
+    seen_symbols = set()
+
+    for sym in symbols or []:
+        sym_norm = normalize_ticker(str(sym).strip().upper(), selected_market)
+        key = naked_ticker(sym_norm)
+        if key and key not in seen_symbols:
+            seen_symbols.add(key)
+            clean_symbols.append(sym_norm)
+
+    if not clean_symbols:
+        return pd.DataFrame()
+
+    worker_count = int(max(1, min(max_workers, len(clean_symbols))))
+
+    try:
+        with ThreadPoolExecutor(max_workers=worker_count) as ex:
+            futures = {
+                ex.submit(dashboard_strong_buy_scan_one, sym, selected_market, cfg_in, bist_currency_mode): sym
+                for sym in clean_symbols
+            }
+            for fut in as_completed(futures):
+                try:
+                    rows.append(fut.result())
+                except Exception as e:
+                    sym = futures.get(fut, "")
+                    log_app_error("dashboard_strong_buy_scan_many.future", e, {"ticker": sym}, level="DEBUG")
+                    rows.append({"Sembol": sym, "Hata": str(e)[:180]})
+    except Exception as e:
+        log_app_error("dashboard_strong_buy_scan_many.threadpool", e, {"count": len(clean_symbols)}, level="DEBUG")
+        for sym in clean_symbols:
+            rows.append(dashboard_strong_buy_scan_one(sym, selected_market, cfg_in, bist_currency_mode))
+
+    df_out = pd.DataFrame(rows)
+    if df_out.empty:
+        return df_out
+
+    if "Skor" in df_out.columns:
+        df_out["Skor"] = pd.to_numeric(df_out["Skor"], errors="coerce")
+    if "ATR%" in df_out.columns:
+        df_out["ATR%"] = pd.to_numeric(df_out["ATR%"], errors="coerce")
+    if "Hacim Oranı" in df_out.columns:
+        df_out["Hacim Oranı"] = pd.to_numeric(df_out["Hacim Oranı"], errors="coerce")
+
+    return df_out
+
+
+
+# =============================
 # UI STATE
 # =============================
 st.title("📈 FA→TA Trading Uygulaması + 🤖 AI Analiz")
@@ -3881,6 +4050,9 @@ if "show_sr_lines_index_center" not in st.session_state:
 
 if "divergence_scan_results" not in st.session_state:
     st.session_state.divergence_scan_results = pd.DataFrame()
+
+if "dashboard_strong_buy_scan_results" not in st.session_state:
+    st.session_state.dashboard_strong_buy_scan_results = pd.DataFrame()
 
 
 if "ai_messages" in st.session_state:
@@ -9035,6 +9207,119 @@ with tab_scan:
                 scan_symbol_options.append(opt)
 
         default_scan_symbols = [ticker] if ticker else (scan_symbol_options[:1] if scan_symbol_options else [])
+
+        st.markdown("---")
+        st.subheader("🚀 Dashboard Güçlü Al Taraması (1W / 2Y)")
+        st.caption("Seçili BIST veya USA evrenini haftalık mum ve 2 yıllık veriyle tarar. Hesaplama, Dashboard'daki build_features + signal_with_checkpoints skor mantığını kullanır ve güçlü al adaylarını skora göre sıralar.")
+
+        sb_col1, sb_col2, sb_col3 = st.columns([1, 1, 1])
+        with sb_col1:
+            strong_scan_source = st.selectbox(
+                "Tarama kaynağı",
+                ["Mevcut liste", "Sadece seçili sembol"],
+                index=0,
+                key="dashboard_strong_scan_source",
+                help="Mevcut liste; fundamental screener sonucu varsa onu, yoksa seçili market universe listesini kullanır.",
+            )
+        with sb_col2:
+            max_strong_scan_symbols = st.number_input(
+                "Maksimum hisse",
+                min_value=1,
+                max_value=max(1, len(scan_symbol_options)),
+                value=min(100, max(1, len(scan_symbol_options))),
+                step=10,
+                key="dashboard_strong_scan_max_symbols",
+                help="Çok büyük evrenlerde tarama uzun sürebilir. İstersen artırabilirsin.",
+            )
+        with sb_col3:
+            strong_scan_workers = st.number_input(
+                "Paralel işçi",
+                min_value=1,
+                max_value=10,
+                value=6,
+                step=1,
+                key="dashboard_strong_scan_workers",
+                help="Veri çekimini hızlandırır. API limitlerinde hata olursa düşür.",
+            )
+
+        run_dashboard_strong_scan = st.button(
+            "🚀 1W / 2Y Dashboard Güçlü Al Taramasını Çalıştır",
+            key="run_dashboard_strong_buy_scan",
+            use_container_width=True,
+            type="secondary",
+        )
+
+        clear_dashboard_strong_scan = st.button(
+            "Dashboard Güçlü Al Sonuçlarını Temizle",
+            key="clear_dashboard_strong_buy_scan",
+            use_container_width=True,
+        )
+
+        if clear_dashboard_strong_scan:
+            st.session_state.dashboard_strong_buy_scan_results = pd.DataFrame()
+
+        if run_dashboard_strong_scan:
+            if strong_scan_source == "Sadece seçili sembol":
+                strong_symbols_to_scan = [ticker] if ticker else []
+            else:
+                strong_symbols_to_scan = scan_symbol_options[:int(max_strong_scan_symbols)]
+
+            if not strong_symbols_to_scan:
+                st.warning("Dashboard Güçlü Al taraması için hisse bulunamadı.")
+            else:
+                with st.spinner(f"1W / 2Y Dashboard Güçlü Al taraması yapılıyor... ({len(strong_symbols_to_scan)} hisse)"):
+                    strong_scan_df = dashboard_strong_buy_scan_many(
+                        strong_symbols_to_scan,
+                        market,
+                        cfg.copy(),
+                        bist_price_currency,
+                        max_workers=int(strong_scan_workers),
+                    )
+
+                if strong_scan_df.empty:
+                    st.session_state.dashboard_strong_buy_scan_results = pd.DataFrame()
+                else:
+                    strong_ok = strong_scan_df[
+                        strong_scan_df.get("Dashboard Sinyali", pd.Series(dtype=str)).astype(str).str.startswith("GÜÇLÜ AL", na=False)
+                    ].copy()
+
+                    if not strong_ok.empty:
+                        strong_ok = strong_ok.sort_values(
+                            ["Skor", "Hacim Oranı", "RSI"],
+                            ascending=[False, False, False],
+                            na_position="last",
+                        ).reset_index(drop=True)
+
+                    st.session_state.dashboard_strong_buy_scan_results = strong_ok
+
+                    failed_count = int(strong_scan_df.get("Hata", pd.Series(dtype=str)).astype(str).str.len().gt(0).sum()) if "Hata" in strong_scan_df.columns else 0
+                    if failed_count > 0:
+                        st.caption(f"Not: {failed_count} sembolde veri/API kaynaklı hata veya yetersiz veri oluştu.")
+
+        dashboard_strong_results = st.session_state.dashboard_strong_buy_scan_results.copy()
+        if not dashboard_strong_results.empty:
+            st.success(f"1W / 2Y Dashboard Güçlü Al adayı: {len(dashboard_strong_results)}")
+            strong_show_cols = [
+                "Sembol", "Dashboard Sinyali", "Skor", "Son Kapanış", "RSI", "MACD Hist",
+                "ATR%", "Hacim Oranı", "Trend OK", "BB OK", "OBV OK", "Para Birimi",
+                "USDTRY", "Son Bar Tarihi"
+            ]
+            st.dataframe(
+                dashboard_strong_results[[c for c in strong_show_cols if c in dashboard_strong_results.columns]],
+                use_container_width=True,
+                height=300,
+            )
+
+            pick_strong_symbol = st.selectbox(
+                "Dashboard'a aktarılacak güçlü al hissesi",
+                dashboard_strong_results["Sembol"].astype(str).tolist(),
+                key="dashboard_strong_buy_pick_symbol",
+            )
+            if st.button("➡️ Seçili güçlü al hissesini Dashboard'a al", key="send_dashboard_strong_buy_to_dashboard", use_container_width=True):
+                st.session_state.selected_ticker = pick_strong_symbol
+                st.rerun()
+        elif run_dashboard_strong_scan:
+            st.info("1W / 2Y Dashboard mantığına göre güçlü al adayı bulunmadı.")
 
         with st.form("divergence_scan_form"):
             st.markdown("**Zaman Dilimleri**")
