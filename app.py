@@ -3855,17 +3855,14 @@ def _dashboard_recommendation_from_latest(latest_row: pd.Series) -> str:
         entry_val = int(latest_row.get("ENTRY", 0)) if pd.notna(latest_row.get("ENTRY", np.nan)) else 0
         exit_val = int(latest_row.get("EXIT", 0)) if pd.notna(latest_row.get("EXIT", np.nan)) else 0
 
-        if exit_val == 1:
-            return "SAT"
-        if score_val >= 80 and entry_val == 1:
-            return "GÜÇLÜ AL"
-        if score_val >= 80:
-            return "GÜÇLÜ AL (Trend)"
+        # Dashboard ana karar metniyle birebir aynı öncelik:
+        # ENTRY varsa AL, EXIT varsa SAT, aksi halde skor >= 80 ise AL (Güçlü Trend).
         if entry_val == 1:
             return "AL"
-        if score_val >= 60:
-            return "İZLE (Orta)"
-        return "UZAK DUR"
+        elif exit_val == 1:
+            return "SAT"
+        else:
+            return "AL (Güçlü Trend)" if score_val >= 80 else ("İZLE (Orta)" if score_val >= 60 else "UZAK DUR")
     except Exception as e:
         log_app_error("_dashboard_recommendation_from_latest", e, level="DEBUG")
         return "N/A"
@@ -9182,9 +9179,6 @@ with tab_export:
 # =============================
 
 with tab_scan:
-    st.header("🔍 Uyumsuzluk Tarama Sekmesi")
-    st.caption("Seçilen hisselerde aylık, haftalık, günlük ve saatlik bazda MACD Histogram, EMA, ADX, Kuvvet Endeksi (FI), RSI (13), Stokastik (5) ve Elder-Ray uyumsuzluklarını listeler. Aylık, haftalık ve günlük tarama kapanmış barlara göre çalışır.")
-
     timeframe_options = ["Aylık", "Haftalık", "Günlük", "Saatlik"]
 
     if not st.session_state.ta_ran:
@@ -9320,13 +9314,17 @@ with tab_scan:
                     st.session_state.dashboard_strong_buy_scan_results = pd.DataFrame()
                 else:
                     signal_series = strong_scan_df.get("Dashboard Sinyali", pd.Series(dtype=str)).astype(str)
+                    signal_norm = signal_series.str.strip().str.upper()
                     strong_ok = strong_scan_df[
-                        signal_series.str.startswith("GÜÇLÜ AL", na=False) | signal_series.eq("AL")
+                        signal_norm.eq("GÜÇLÜ AL") |
+                        signal_norm.eq("GÜÇLÜ AL (TREND)") |
+                        signal_norm.eq("AL") |
+                        signal_norm.eq("AL (GÜÇLÜ TREND)")
                     ].copy()
 
                     if not strong_ok.empty:
-                        strong_ok["Sinyal Öncelik"] = strong_ok["Dashboard Sinyali"].astype(str).map(
-                            {"GÜÇLÜ AL": 1, "GÜÇLÜ AL (Trend)": 2, "AL": 3}
+                        strong_ok["Sinyal Öncelik"] = strong_ok["Dashboard Sinyali"].astype(str).str.strip().str.upper().map(
+                            {"GÜÇLÜ AL": 1, "AL (GÜÇLÜ TREND)": 2, "GÜÇLÜ AL (TREND)": 2, "AL": 3}
                         ).fillna(9)
                         strong_ok = strong_ok.sort_values(
                             ["Sinyal Öncelik", "Skor", "Hacim Oranı", "RSI"],
@@ -9342,9 +9340,16 @@ with tab_scan:
 
         dashboard_strong_results = st.session_state.dashboard_strong_buy_scan_results.copy()
         if not dashboard_strong_results.empty:
-            strong_count = int(dashboard_strong_results["Dashboard Sinyali"].astype(str).str.startswith("GÜÇLÜ AL", na=False).sum()) if "Dashboard Sinyali" in dashboard_strong_results.columns else 0
-            buy_count = int(dashboard_strong_results["Dashboard Sinyali"].astype(str).eq("AL").sum()) if "Dashboard Sinyali" in dashboard_strong_results.columns else 0
-            st.success(f"1W / 2Y Dashboard sonucu: {strong_count} GÜÇLÜ AL, {buy_count} AL adayı")
+            if "Dashboard Sinyali" in dashboard_strong_results.columns:
+                result_signal_norm = dashboard_strong_results["Dashboard Sinyali"].astype(str).str.strip().str.upper()
+                strong_count = int(result_signal_norm.isin(["GÜÇLÜ AL", "GÜÇLÜ AL (TREND)"]).sum())
+                al_trend_count = int(result_signal_norm.eq("AL (GÜÇLÜ TREND)").sum())
+                buy_count = int(result_signal_norm.eq("AL").sum())
+            else:
+                strong_count = 0
+                al_trend_count = 0
+                buy_count = 0
+            st.success(f"1W / 2Y Dashboard sonucu: {strong_count} GÜÇLÜ AL, {al_trend_count} AL (Güçlü Trend), {buy_count} AL adayı")
             strong_show_cols = [
                 "Sembol", "Dashboard Sinyali", "Skor", "Son Kapanış", "RSI", "MACD Hist",
                 "ATR%", "Hacim Oranı", "Trend OK", "BB OK", "OBV OK", "Para Birimi",
@@ -9366,6 +9371,10 @@ with tab_scan:
                 st.rerun()
         elif run_dashboard_strong_scan:
             st.info("1W / 2Y Dashboard mantığına göre AL veya GÜÇLÜ AL adayı bulunmadı.")
+
+        st.markdown("---")
+        st.header("🔍 Uyumsuzluk Tarama Sekmesi")
+        st.caption("Seçilen hisselerde aylık, haftalık, günlük ve saatlik bazda MACD Histogram, EMA, ADX, Kuvvet Endeksi (FI), RSI (13), Stokastik (5) ve Elder-Ray uyumsuzluklarını listeler. Aylık, haftalık ve günlük tarama kapanmış barlara göre çalışır.")
 
         with st.form("divergence_scan_form"):
             st.markdown("**Zaman Dilimleri**")
