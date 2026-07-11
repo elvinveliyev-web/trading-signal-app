@@ -1,4 +1,14 @@
 import os
+
+# Streamlit Cloud / container ortamlarında NumPy-SciPy-Sklearn/OpenBLAS/OpenMP
+# kaynaklı segmentation fault riskini azaltmak için native thread sayısını sınırla.
+# Bu satırlar numpy/scipy/sklearn importlarından önce çalışmalıdır.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
 import re
 import json
 import time
@@ -3980,18 +3990,24 @@ def dashboard_strong_buy_scan_many(
     worker_count = int(max(1, min(max_workers, len(clean_symbols))))
 
     try:
-        with ThreadPoolExecutor(max_workers=worker_count) as ex:
-            futures = {
-                ex.submit(dashboard_strong_buy_scan_one, sym, selected_market, cfg_in, bist_currency_mode): sym
-                for sym in clean_symbols
-            }
-            for fut in as_completed(futures):
-                try:
-                    rows.append(fut.result())
-                except Exception as e:
-                    sym = futures.get(fut, "")
-                    log_app_error("dashboard_strong_buy_scan_many.future", e, {"ticker": sym}, level="DEBUG")
-                    rows.append({"Sembol": sym, "Hata": str(e)[:180]})
+        if worker_count <= 1:
+            # Streamlit Cloud tarafında ThreadPool + yfinance/native libs kombinasyonu
+            # nadiren segmentation fault üretebildiği için güvenli modda sıralı çalış.
+            for sym in clean_symbols:
+                rows.append(dashboard_strong_buy_scan_one(sym, selected_market, cfg_in, bist_currency_mode))
+        else:
+            with ThreadPoolExecutor(max_workers=worker_count) as ex:
+                futures = {
+                    ex.submit(dashboard_strong_buy_scan_one, sym, selected_market, cfg_in, bist_currency_mode): sym
+                    for sym in clean_symbols
+                }
+                for fut in as_completed(futures):
+                    try:
+                        rows.append(fut.result())
+                    except Exception as e:
+                        sym = futures.get(fut, "")
+                        log_app_error("dashboard_strong_buy_scan_many.future", e, {"ticker": sym}, level="DEBUG")
+                        rows.append({"Sembol": sym, "Hata": str(e)[:180]})
     except Exception as e:
         log_app_error("dashboard_strong_buy_scan_many.threadpool", e, {"count": len(clean_symbols)}, level="DEBUG")
         for sym in clean_symbols:
@@ -9271,10 +9287,10 @@ with tab_scan:
                 "Paralel işçi",
                 min_value=1,
                 max_value=10,
-                value=6,
+                value=1,
                 step=1,
                 key="dashboard_strong_scan_workers",
-                help="Veri çekimini hızlandırır. API limitlerinde hata olursa düşür.",
+                help="Güvenli varsayılan 1'dir. Hızlandırmak için artırabilirsin; API/native kütüphane hatası olursa tekrar 1'e düşür.",
             )
 
         st.caption(f"Seçili tarama: **{strong_scan_source}** | Market: **{strong_scan_market}** | Hisse sayısı: **{len(strong_scan_symbols_base)}**")
