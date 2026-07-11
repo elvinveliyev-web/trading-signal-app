@@ -4108,6 +4108,12 @@ with st.sidebar:
             help="Hangi endeksteki hisseleri tarayacağınızı seçin. S&P 500 daha geniş, Nasdaq 100 teknoloji ağırlıklı.",
         )
 
+    enable_sector_relative_value = st.checkbox(
+        "Sektöre göre değer hesapla",
+        value=False,
+        help="Varsayılan kapalıdır. Açılırsa Dashboard'da seçili hissenin F/K ve PD/DD çarpanları aynı sektördeki hisselerle kıyaslanır. Bu işlem çok sayıda temel veri çektiği için yavaş çalışabilir.",
+    )
+
     st.header("1) Fundamental Screener")
     use_fa = st.checkbox(
         "Fundamental filtreyi kullan",
@@ -8735,7 +8741,15 @@ with tab_dash:
     c7.metric("Piyasa Filtresi", "BULL ✅" if checkpoints.get("Market Filter OK", True) else "BEAR ❌")
     c8.metric("Haftalık Trend", "BULL ✅" if checkpoints.get("Higher TF Filter OK", True) else "BEAR ❌")
 
-    sector_rel = get_sector_relative_value_summary(ticker, market, universe)
+    if enable_sector_relative_value:
+        with st.spinner("Sektöre göre değer hesaplanıyor..."):
+            sector_rel = get_sector_relative_value_summary(ticker, market, universe)
+    else:
+        sector_rel = {
+            "label": "Kapalı",
+            "delta_pct": np.nan,
+            "detail": "Sektöre göre değer hesabı varsayılan olarak kapalıdır. Açmak için sol menüden 'Sektöre göre değer hesapla' seçeneğini aktif et.",
+        }
     sma_fast_last = latest.get("SMA_FAST", np.nan)
     sma_slow_last = latest.get("SMA_SLOW", np.nan)
     sma_rel = "Üstünde" if pd.notna(sma_fast_last) and pd.notna(sma_slow_last) and sma_fast_last > sma_slow_last else ("Altında" if pd.notna(sma_fast_last) and pd.notna(sma_slow_last) else "N/A")
