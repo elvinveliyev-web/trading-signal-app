@@ -2452,21 +2452,19 @@ def build_sector_peer_snapshot(universe_tuple: Tuple[str, ...], market: str) -> 
             log_app_error("build_sector_peer_snapshot.fetch_one", e, {"ticker": raw_ticker, "normalized": norm}, level="DEBUG")
             return {"raw_ticker": raw_ticker, "ticker": norm, "error": str(e)}
 
-    max_workers = min(12, max(1, min(4, len(universe_tuple)) if len(universe_tuple) <= 8 else max(4, len(universe_tuple) // 8)))
-
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(_one, raw): raw for raw in universe_tuple}
-        for fut in as_completed(futures):
-            raw = futures.get(fut, "")
-            try:
-                res = fut.result()
-                if isinstance(res, dict) and not res.get("error"):
-                    rows.append(res)
-                elif isinstance(res, dict) and res.get("error"):
-                    # Hata loglandı, tabloya dahil etmiyoruz.
-                    continue
-            except Exception as e:
-                log_app_error("build_sector_peer_snapshot.thread", e, {"ticker": raw}, level="DEBUG")
+    # Dashboard Teknik Analiz çalıştırıldığında "Sektöre Göre Değer" metriği bu fonksiyonu çağırır.
+    # Streamlit Cloud/container ortamında ThreadPoolExecutor + yfinance/native libs kombinasyonu
+    # segmentation fault üretebildiği için bu bölüm güvenli şekilde sıralı çalıştırılır.
+    for raw in universe_tuple:
+        try:
+            res = _one(raw)
+            if isinstance(res, dict) and not res.get("error"):
+                rows.append(res)
+            elif isinstance(res, dict) and res.get("error"):
+                # Hata loglandı, tabloya dahil etmiyoruz.
+                continue
+        except Exception as e:
+            log_app_error("build_sector_peer_snapshot.safe_loop", e, {"ticker": raw}, level="DEBUG")
 
     df_peers = pd.DataFrame(rows)
     if df_peers.empty:
