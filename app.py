@@ -28,11 +28,50 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 import requests
-from sklearn.linear_model import Ridge, LinearRegression, RANSACRegressor
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
-from sklearn.cluster import KMeans
-from sklearn.model_selection import TimeSeriesSplit
-from scipy.stats import linregress
+# sklearn/scipy native modülleri Streamlit Cloud'da bazı ortamlarda segmentation fault üretebildiği için
+# Dashboard açılışında import edilmiyor. Future Price çalıştırılırsa sklearn lazy import edilir.
+def linregress(x, y):
+    """scipy.stats.linregress yerine hafif numpy tabanlı güvenli regresyon."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y)
+    x = x[mask]
+    y = y[mask]
+    if len(x) < 2 or np.nanstd(x) == 0:
+        return np.nan, np.nan, np.nan, np.nan, np.nan
+    slope, intercept = np.polyfit(x, y, 1)
+    try:
+        r_value = float(np.corrcoef(x, y)[0, 1]) if len(x) >= 2 and np.nanstd(y) > 0 else 0.0
+    except Exception:
+        r_value = 0.0
+    return float(slope), float(intercept), float(r_value), np.nan, np.nan
+
+
+class TimeSeriesSplit:
+    """sklearn.model_selection.TimeSeriesSplit yerine minimal güvenli splitter."""
+    def __init__(self, n_splits: int = 5):
+        self.n_splits = int(max(2, n_splits))
+
+    def split(self, X):
+        n = len(X)
+        if n <= self.n_splits + 1:
+            return
+        fold_size = max(1, n // (self.n_splits + 1))
+        indices = np.arange(n)
+        for i in range(1, self.n_splits + 1):
+            train_end = min(i * fold_size, n - 1)
+            test_start = train_end
+            test_end = min(test_start + fold_size, n)
+            if train_end <= 0 or test_start >= test_end:
+                continue
+            yield indices[:train_end], indices[test_start:test_end]
+
+
+def _future_sklearn_models():
+    from sklearn.linear_model import Ridge, LinearRegression
+    from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+    return Ridge, LinearRegression, RandomForestRegressor, GradientBoostingRegressor
+
 
 # =============================
 # OPTIONAL PDF SUPPORT (ReportLab)
@@ -1703,22 +1742,7 @@ def _analyze_sr_levels_cached(df_in: pd.DataFrame, lookback: int = 200, tol: flo
 
     center_sources: List[Tuple[float, str, float]] = []
 
-    # 1) 1D KMeans: doğal kümelenme yakalama
-    try:
-        arr = np.array(raw_levels, dtype=float).reshape(-1, 1)
-        unique_count = len(np.unique(arr.flatten()))
-        if unique_count >= 3:
-            n_clusters = int(min(max(3, round(np.sqrt(len(raw_levels)))), 8, unique_count))
-            km = KMeans(n_clusters=n_clusters, n_init=10, random_state=42)
-            labels = km.fit_predict(arr)
-            for k, center in enumerate(km.cluster_centers_.flatten()):
-                count = int(np.sum(labels == k))
-                if np.isfinite(center):
-                    center_sources.append((float(center), "kmeans", min(1.0, count / max(1, len(raw_levels)))))
-    except Exception as e:
-        log_app_error("analyze_sr_levels.kmeans", e, {"raw_levels": len(raw_levels)}, level="DEBUG")
-
-    # 2) Histogram peak yaklaşımı
+    # 1) Histogram peak yaklaşımı
     try:
         bins = int(min(max(8, round(np.sqrt(len(raw_levels)) * 2)), 24))
         hist, edges = np.histogram(np.array(raw_levels, dtype=float), bins=bins)
@@ -1735,7 +1759,7 @@ def _analyze_sr_levels_cached(df_in: pd.DataFrame, lookback: int = 200, tol: flo
     except Exception as e:
         log_app_error("analyze_sr_levels.histogram", e, {"raw_levels": len(raw_levels)}, level="DEBUG")
 
-    # 3) Fallback: tolerans bazlı eski mantık, ama dinamik merkezli
+    # 2) Fallback: tolerans bazlı eski mantık, ama dinamik merkezli
     adaptive_clusters = []
     for rl in sorted(set(round(float(x), 2) for x in raw_levels)):
         placed = False
@@ -1753,8 +1777,8 @@ def _analyze_sr_levels_cached(df_in: pd.DataFrame, lookback: int = 200, tol: flo
     if not center_sources:
         return []
 
-    # 4) Kaynak ağırlıklı merge: KMeans + histogram + adaptive merkezleri tek normalize skorla birleştir.
-    source_weight = {"kmeans": 1.05, "histogram": 1.00, "adaptive": 0.90}
+    # 3) Kaynak ağırlıklı merge: histogram + adaptive merkezleri tek normalize skorla birleştir.
+    source_weight = {"histogram": 1.00, "adaptive": 0.90}
     center_sources = sorted([(p, s, w) for p, s, w in center_sources if np.isfinite(p)], key=lambda x: x[0])
     merged: List[Dict[str, Any]] = []
     for price, source, local_weight in center_sources:
@@ -2317,28 +2341,6 @@ def _build_trendline_candidates(
                 candidates.append(cand)
         except Exception as e:
             log_app_error("_build_trendline_candidates.ransac", e, {"line_kind": line_kind, "reg_pivots": len(reg_pivots)}, level="DEBUG")
-
-        try:
-            rx = np.array([float(subset.index.get_loc(t)) for t, _ in reg_pivots], dtype=float).reshape(-1, 1)
-            ry = np.array([float(p) for _, p in reg_pivots], dtype=float)
-            ransac = RANSACRegressor(random_state=42)
-            ransac.fit(rx, ry)
-            slope_rc = float(ransac.estimator_.coef_[0]) if hasattr(ransac.estimator_, "coef_") else np.nan
-            intercept_rc = float(ransac.estimator_.intercept_) if hasattr(ransac.estimator_, "intercept_") else np.nan
-            if np.isfinite(slope_rc) and np.isfinite(intercept_rc):
-                base_r2 = float(ransac.score(rx, ry))
-                extra_score = max(0.0, (base_r2 - 0.5) * 20.0) if pd.notna(base_r2) else 0.0
-                cand = _evaluate_line_candidate(
-                    subset, pivots,
-                    slope=slope_rc, intercept=intercept_rc, line_kind=line_kind,
-                    touch_tol_pct=use_touch_tol, break_tol_pct=use_break_tol,
-                    source="ransac", anchor_t1=reg_pivots[0][0], anchor_p1=float(reg_pivots[0][1]),
-                    min_required_touches=min_required_touches, base_r2=base_r2, extra_score=extra_score,
-                )
-                if cand is not None:
-                    candidates.append(cand)
-        except Exception:
-            pass
 
     if not candidates:
         return None
@@ -4502,8 +4504,8 @@ with st.sidebar:
     st.header("4) Haber Duygu Analizi (Google News + Gemini)")
     use_sentiment = st.checkbox(
         "Haber duygu analizini aktifleştir",
-        value=True,
-        help="Google News'ten haber başlıklarını çeker, Gemini ile duygu analizi yapar.",
+        value=False,
+        help="Varsayılan kapalıdır. Açılırsa Google News'ten haber başlıklarını çeker ve Gemini ile duygu analizi yapar; bu işlem teknik analizi yavaşlatabilir.",
     )
 
     run_btn = st.button("🚀 Teknik Analizi Çalıştır", type="primary")
@@ -5085,6 +5087,7 @@ def build_future_price_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _future_make_model(model_name: str):
+    Ridge, LinearRegression, RandomForestRegressor, GradientBoostingRegressor = _future_sklearn_models()
     if model_name == "Ridge":
         return Ridge(alpha=1.0)
     if model_name == "Linear Regression":
@@ -5095,7 +5098,7 @@ def _future_make_model(model_name: str):
             max_depth=6,
             min_samples_leaf=2,
             random_state=42,
-            n_jobs=-1,
+            n_jobs=1,
         )
     if model_name == "Gradient Boosting":
         return GradientBoostingRegressor(
